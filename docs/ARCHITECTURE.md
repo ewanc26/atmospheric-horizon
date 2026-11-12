@@ -310,6 +310,25 @@ Stub-PDS tests cover the upload+upsert path, the endorsement verifying against
 the persisted key, foreign-endorsement preservation across re-publish, and
 the non-PNG/no-path rejections (no upload happens).
 
+### M10: server profile record (`at.atpcraft.server.profile`)
+
+`/atmospheric server` sends `Command::PostServerProfile`; the worker builds
+the descriptor from the settings file (identity fields, capabilities, game
+version), the logged-in DID/handle as `operator`, and the mod's persisted
+Ed25519 key as the `signingKey` block (`publicKey` = base64-standard SPKI).
+It is upserted with `putRecord` (validate=false) at the literal rkey `self`;
+a prior `getRecord` preserves `createdAt` across re-publishes (first publish
+stamps it), matching atpcraft's `ServerProfileWriter`. Capabilities are
+sorted/deduped as the lexicon requires; blank optionals are omitted. The
+record carries no signature — it lives in the account's own repo.
+
+Verified against the real PDS: `pds_check` with
+`ATMOSPHERIC_POST_SERVER_PROFILE=1` upserted
+`at://did:plc:…/at.atpcraft.server.profile/self` on eurosky.social and the
+stored record read back matched the lexicon exactly (test record deleted
+after). Stub-PDS tests cover the shape, key-id/public-key match against the
+persisted key, capability sorting, and `createdAt` preservation.
+
 ### Manual check against a real PDS
 
 `crates/atmospheric/examples/pds_check.rs` spawns the worker exactly as the
@@ -327,6 +346,7 @@ ATMOSPHERIC_POST_SNAPSHOT=1 \                                  # optional, M6
 ATMOSPHERIC_POST_SKIN="/path/to/skin.png" \                    # optional, M9
 ATMOSPHERIC_POST_CAPE="/path/to/cape.png" \                    # optional, M9
 ATMOSPHERIC_SKIN_MODEL="slim" \                                # optional, M9
+ATMOSPHERIC_POST_SERVER_PROFILE=1 \                            # optional, M10
 cargo run -p atmospheric --example pds_check
 ```
 
