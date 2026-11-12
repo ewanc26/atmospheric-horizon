@@ -12,7 +12,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -71,6 +71,10 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
             m::post_skin(skin_path, None, model);
             game.native_chat("atmospheric: publishing the skin record…");
         }
+    } else if rest == "server" {
+        *ran = true;
+        m::post_server_profile();
+        game.native_chat("atmospheric: publishing the server profile record…");
     } else if rest == "chat" || rest.starts_with("chat ") {
         let text = rest.strip_prefix("chat").unwrap_or("").trim();
         *ran = true;
