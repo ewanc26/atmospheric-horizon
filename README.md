@@ -8,7 +8,7 @@ This project is the successor to [jollywhoppers-socialsync](https://github.com/e
 
 ## Status
 
-Early scaffold. The protocol library builds and tests standalone; the native injection pipeline follows the [horizon-native-mod-template](https://github.com/horizon-rust/horizon-native-mod-template). Milestones: M1 library skeleton, M2 worker wiring + login/text posts and the game-side hooks (keybind, `/atmospheric` commands, HUD status line), M3 screenshots (F2, then a keybind posts the latest one), M4 notifications (poll timer + persisted cursor + `/atmospheric notifications`), M5 atpcraft port start — chat messages as `at.atpcraft.player.chat` records (TID-keyed, off by default; `/atmospheric chat <text>` publishes one), M6 registry submission.
+Early scaffold. The protocol library builds and tests standalone; the native injection pipeline follows the [horizon-native-mod-template](https://github.com/horizon-rust/horizon-native-mod-template). Milestones: M1 library skeleton, M2 worker wiring + login/text posts and the game-side hooks (keybind, `/atmospheric` commands, HUD status line), M3 screenshots (F2, then a keybind posts the latest one), M4 notifications (poll timer + persisted cursor + `/atmospheric notifications`), M5 atpcraft port start — chat messages as `at.atpcraft.player.chat` records (TID-keyed, off by default; `/atmospheric chat <text>` publishes one), M6 player-state snapshots as `at.atpcraft.player.snapshot` records (Ed25519-endorsed, keybind or `/atmospheric snapshot`), M7 registry submission.
 
 ### Roadmap: porting atpcraft to Horizon
 
@@ -18,7 +18,7 @@ atpcraft is a server-side Fabric mod; Horizon native mods can hook the server si
 |---|---|
 | Bluesky sign-in | app-password login (`com.atproto.server.createSession`, M2); a browser OAuth flow would need a tiny local web server on the worker — later milestone |
 | Chat messages as records (`at.atpcraft.player.chat`) | **M5**: chat hook mirrors each line; the worker publishes TID-keyed records when `post_chat_messages` is on, and `/atmospheric chat <text>` always publishes one |
-| Player state snapshots (`at.atpcraft.player.snapshot`, `defs`) | later; position/facing already readable via `native_player` |
+| Player state snapshots (`at.atpcraft.player.snapshot`, `defs`) | **M6**: keybind or `/atmospheric snapshot` publishes a self-endorsed record (Ed25519 key generated + persisted by the worker; rkey = key id, monotonic version) |
 | Skins and capes as blobs on the PDS | blob upload proven in M3; skin upload later |
 | Labeler publishing player activity | later (`com.atproto.label.*`) |
 | Server profile record (`at.atpcraft.server.profile`) | later, server-side |
@@ -56,14 +56,14 @@ The published mod installs through the Horizon launcher's Mods page once it is i
 
 This mod talks to the network **by design**, and to exactly one place: the PDS you configure.
 
-- Sent to your PDS: your identifier and app password (`com.atproto.server.createSession`), a session check after login (`com.atproto.server.getSession`), notification polling (`app.bsky.notification.listNotifications` with a `seenAt` timestamp, on a timer and on `/atmospheric notifications`), and the records you choose to make: text and screenshot posts (`com.atproto.repo.uploadBlob` for the image, then `com.atproto.repo.createRecord` with an `app.bsky.embed.images` embed), chat lines (`com.atproto.repo.createRecord` in the `at.atpcraft.player.chat` collection, TID-keyed — only when `post_chat_messages` is enabled in `config.json`, or one at a time via `/atmospheric chat <text>`).
-- Stored on disk: two files in the mod's own storage folder `horizon-mods/.horizon-mod-data/atmospheric/` — never in world saves. `config.json` (PDS URL, identifier, app password, poll interval, post-death-messages flag, post-chat-messages flag, chat server id) and `cursor.json` (the notification seen-cursor, so restarts do not re-show old notifications). The image you post is read from the game's `screenshots/` folder only when you press the post-screenshot keybind; the path of the latest screenshot is otherwise kept in memory only. The login session is held in memory for the running game and re-created by logging in; persisting it across restarts is planned.
+- Sent to your PDS: your identifier and app password (`com.atproto.server.createSession`), a session check after login (`com.atproto.server.getSession`), notification polling (`app.bsky.notification.listNotifications` with a `seenAt` timestamp, on a timer and on `/atmospheric notifications`), and the records you choose to make: text and screenshot posts (`com.atproto.repo.uploadBlob` for the image, then `com.atproto.repo.createRecord` with an `app.bsky.embed.images` embed), chat lines (`com.atproto.repo.createRecord` in the `at.atpcraft.player.chat` collection, TID-keyed — only when `post_chat_messages` is enabled in `config.json`, or one at a time via `/atmospheric chat <text>`), and player-state snapshots (`com.atproto.repo.createRecord` in the `at.atpcraft.player.snapshot` collection, keybind or `/atmospheric snapshot`, carrying your position/dimension and an Ed25519 endorsement signature).
+- Stored on disk: files in the mod's own storage folder `horizon-mods/.horizon-mod-data/atmospheric/` — never in world saves. `config.json` (PDS URL, identifier, app password, poll interval, post-death-messages flag, post-chat-messages flag, chat server id), `cursor.json` (the notification seen-cursor, so restarts do not re-show old notifications), `signing-key.json` (the Ed25519 seed for snapshot endorsements, generated once) and `snapshot-state.json` (the snapshot version counter, so records never roll back). The image you post is read from the game's `screenshots/` folder only when you press the post-screenshot keybind; the path of the latest screenshot is otherwise kept in memory only. The login session is held in memory for the running game and re-created by logging in; persisting it across restarts is planned.
 - Nothing else: no telemetry, no analytics, no other endpoints.
 
 ## Files
 
 - `mixins/atmospheric/` — horizon-mixins declarations: the injected `runtime.rs` module (std-only), its placeholder hook, and `horizon-mixin.toml`
-- `crates/atmospheric/` — the protocol library: `config`, `session`, `actions`, `notifications`, `records` (atpcraft lexicon types), `tid` (record keys), `worker` (all game-free and testable)
+- `crates/atmospheric/` — the protocol library: `config`, `session`, `actions`, `notifications`, `records` (atpcraft lexicon types), `tid` (record keys), `signing` (Ed25519 endorsements), `worker` (all game-free and testable)
 - `compatibility.json` — the pinned Horizon and horizon-mixins revisions the bundle is built against
 - `docs/ARCHITECTURE.md` — how the layers connect, for reviewers and contributors
 
