@@ -33,6 +33,21 @@ pub const SNAPSHOT_STATE_FILE: &str = "snapshot-state.json";
 /// The persisted refresh token, same folder (session resume across restarts).
 pub const SESSION_FILE: &str = "session.json";
 
+/// Write a file that holds secrets (app password in `config.json`, the
+/// session/refresh token and DPoP private key in `session.json`, the Ed25519
+/// seed in `signing-key.json`) with owner-only permissions: 0600 on unix.
+/// Other platforms have no portable mode API, so there the file is written
+/// as-is (noted in the README's network-use section).
+fn write_private(path: &std::path::Path, contents: impl AsRef<[u8]>) -> crate::error::Result<()> {
+    std::fs::write(path, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 /// What the worker needs besides the channels: where its files live.
 #[derive(Debug, Clone)]
 pub struct WorkerOptions {
@@ -280,9 +295,10 @@ impl Worker {
     }
 
     /// Write the settings file, creating the mod's storage folder if needed.
+    /// It holds the app password, so it is written owner-only (0600 on unix).
     fn save_config(&self, config: &Config) -> crate::error::Result<()> {
         std::fs::create_dir_all(&self.storage_dir)?;
-        std::fs::write(self.config_path(), config.to_json()?)?;
+        write_private(&self.config_path(), config.to_json()?)?;
         Ok(())
     }
 
@@ -517,7 +533,7 @@ impl Worker {
         let key = signing::generate();
         let file = signing::key_file_of(&key);
         std::fs::create_dir_all(&self.storage_dir)?;
-        std::fs::write(path, serde_json::to_string_pretty(&file)?)?;
+        write_private(&path, serde_json::to_string_pretty(&file)?)?;
         Ok(key)
     }
 
@@ -782,11 +798,13 @@ impl Worker {
         }
     }
 
-    /// Persist the session's refresh token (worker owns disk I/O).
+    /// Persist the session's refresh token (worker owns disk I/O). For OAuth
+    /// sessions the file also holds the DPoP private key, so it is written
+    /// owner-only (0600 on unix).
     fn save_session(&self, stored: &StoredSession) -> crate::error::Result<()> {
         std::fs::create_dir_all(&self.storage_dir)?;
-        std::fs::write(
-            self.storage_dir.join(SESSION_FILE),
+        write_private(
+            &self.storage_dir.join(SESSION_FILE),
             serde_json::to_string_pretty(stored)?,
         )?;
         Ok(())
@@ -1971,6 +1989,32 @@ mod tests {
         assert!(!raw.contains("password"));
         // The persisted DPoP key rebuilds.
         assert!(oauth::DpopKey::from_jwk_json(&oauth.dpop_jwk).is_ok());
+        // session.json holds the DPoP private key: owner-only on unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join(SESSION_FILE))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "session.json must be 0600");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_private_makes_the_file_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("private-perms");
+        let path = dir.join("secret.json");
+        write_private(&path, b"{}").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        // Rewriting keeps the restrictive mode.
+        write_private(&path, b"{\"a\":1}").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]
