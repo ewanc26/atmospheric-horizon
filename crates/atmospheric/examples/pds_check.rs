@@ -11,6 +11,9 @@
 //! ATMOSPHERIC_POST_IMAGE="/path/to/screenshot.png" \   # optional, M3
 //! ATMOSPHERIC_POST_CHAT="hello from in-game chat" \     # optional, M5
 //! ATMOSPHERIC_POST_SNAPSHOT=1 \                          # optional, M6
+//! ATMOSPHERIC_POST_SKIN="/path/to/skin.png" \          # optional, M9
+//! ATMOSPHERIC_POST_CAPE="/path/to/cape.png" \          # optional, M9
+//! ATMOSPHERIC_SKIN_MODEL="slim" \                        # optional, M9
 //! cargo run -p atmospheric --example pds_check
 //! ```
 //!
@@ -78,6 +81,9 @@ fn main() {
         chat_server_id: "pds-check".into(),
         persist_session: true,
         oauth_client_id: env::var("ATMOSPHERIC_OAUTH_CLIENT_ID").unwrap_or_default(),
+        skin_path: String::new(),
+        cape_path: String::new(),
+        skin_model: "default".into(),
     };
     if oauth_handle.is_none() {
         // App-password mode needs all three; OAuth mode needs none of them.
@@ -89,6 +95,9 @@ fn main() {
     let post_image = env::var("ATMOSPHERIC_POST_IMAGE").ok();
     let post_chat = env::var("ATMOSPHERIC_POST_CHAT").ok();
     let post_snapshot = env::var("ATMOSPHERIC_POST_SNAPSHOT").is_ok();
+    let post_skin = env::var("ATMOSPHERIC_POST_SKIN").ok();
+    let post_cape = env::var("ATMOSPHERIC_POST_CAPE").ok();
+    let skin_model = env::var("ATMOSPHERIC_SKIN_MODEL").unwrap_or_else(|_| "default".into());
 
     // A throwaway settings folder: the worker reads its config from here.
     let storage_dir: PathBuf = env::temp_dir().join("atmospheric-pds-check");
@@ -188,6 +197,11 @@ fn main() {
                 scores: None,
             },
         }),
+        (post_skin.is_some() || post_cape.is_some()).then_some(Command::PostSkin {
+            skin_path: post_skin,
+            cape_path: post_cape,
+            model: skin_model,
+        }),
     ]
     .into_iter()
     .flatten()
@@ -198,6 +212,7 @@ fn main() {
             Command::PostImage { .. } => "image",
             Command::PostChat { .. } => "chat record",
             Command::PostSnapshot { .. } => "snapshot record",
+            Command::PostSkin { .. } => "skin record",
             _ => unreachable!(),
         };
         command_tx.send(post).expect("send post");
