@@ -198,6 +198,26 @@ PDS — see "Manual check" below.
   persisted public key over the payload rebuilt from the record; against a
   real PDS `ATMOSPHERIC_POST_SNAPSHOT=1 pds_check` posts a real snapshot.
 
+### Issue sweep (session resume, death messages, HUD history)
+
+- **#5 session persistence**: `session::login` now returns the `StoredSession`
+  (pds_url/did/handle/refresh_jwt — never the app password), persisted by the
+  worker to `<storage>/session.json` when `persist_session` is on (default).
+  At startup the worker calls `session::resume`: a direct
+  `com.atproto.server.refreshSession` with the stored refresh token (the
+  agent cannot seed its store without a full session, so that one call goes
+  through reqwest), then `resume_session` + `getSession`. The rotated refresh
+  token is persisted again. `Command::Logout` (`/atmospheric logout`) drops
+  the session and deletes the file. Stub-PDS tests cover resume-without-login,
+  token rotation, and logout.
+- **#6 death messages**: a `RETURN` injection on
+  `horizon_client::game::chat::Game::death_message` reads `ui.death_text`
+  (set just before return) and hands `Text::plain()` to the worker, which
+  posts it as an `app.bsky.feed.post` only when `post_death_messages` is
+  enabled. Tested both ways against the stub PDS.
+- **#7 HUD history**: `runtime` keeps the last `STATUS_LINES_MAX` (3) status
+  lines instead of only the newest; the HUD box draws them stacked. Tested.
+
 ### Manual check against a real PDS
 
 `crates/atmospheric/examples/pds_check.rs` spawns the worker exactly as the
