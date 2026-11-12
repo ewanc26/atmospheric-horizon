@@ -20,6 +20,10 @@ pub const DESCRIPTION: &str = "Post to Bluesky from Horizon: a keybind posts you
 pub const KEY_POST: &str = "post_location";
 pub const KEY_POST_LABEL: &str = "Post location to Bluesky";
 pub const KEY_POST_DEFAULT: &str = "key.keyboard.b";
+/// The second keybind: post the latest F2 screenshot.
+pub const KEY_SHOT: &str = "post_screenshot";
+pub const KEY_SHOT_LABEL: &str = "Post latest screenshot to Bluesky";
+pub const KEY_SHOT_DEFAULT: &str = "key.keyboard.v";
 
 /// The HUD status box, drawn as the WebAssembly mods' panels were: translucent
 /// black with white shadowed text.
@@ -119,9 +123,14 @@ pub fn location_line(x: f64, y: f64, z: f64, dimension: &str) -> String {
 static COMMAND_TX: OnceLock<Sender<GameCommand>> = OnceLock::new();
 static EVENTS_RX: OnceLock<Mutex<Receiver<ModEvent>>> = OnceLock::new();
 static STATUS: OnceLock<Mutex<String>> = OnceLock::new();
+static LAST_SHOT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 fn status_slot() -> &'static Mutex<String> {
     STATUS.get_or_init(|| Mutex::new("atmospheric: worker not attached".into()))
+}
+
+fn last_shot_slot() -> &'static Mutex<Option<String>> {
+    LAST_SHOT.get_or_init(|| Mutex::new(None))
 }
 
 /// Create the channel pair and install the game side.
@@ -201,6 +210,35 @@ pub fn post_text(text: &str) {
     send(GameCommand::PostText { text: text.into() });
 }
 
+/// Remember the path of a screenshot the game just saved (F2), so the
+/// keybind can post that file. In-memory only: nothing is scanned or read.
+pub fn remember_screenshot(path: &str) {
+    if let Ok(mut slot) = last_shot_slot().lock() {
+        *slot = Some(path.into());
+    }
+}
+
+/// The latest screenshot's path, if the game saved one this session.
+pub fn latest_screenshot() -> Option<String> {
+    last_shot_slot().lock().ok().and_then(|slot| slot.clone())
+}
+
+/// Ask the worker to post the latest screenshot. Returns false when the game
+/// has not saved one yet, so the caller can say so.
+pub fn post_screenshot(alt_text: &str) -> bool {
+    match latest_screenshot() {
+        Some(path) => {
+            send(GameCommand::PostImage {
+                path,
+                alt_text: alt_text.into(),
+                text: None,
+            });
+            true
+        }
+        None => false,
+    }
+}
+
 /// Ask the worker to stop.
 #[allow(dead_code)]
 pub fn shutdown() {
@@ -221,6 +259,13 @@ mod tests {
         // Game side -> worker: the commands the hooks send.
         login();
         post_text("hello from the game");
+        assert!(!post_screenshot("no screenshot yet"));
+        remember_screenshot("/tmp/shots/2026-11-12_07.00.00.png");
+        assert_eq!(
+            latest_screenshot().as_deref(),
+            Some("/tmp/shots/2026-11-12_07.00.00.png")
+        );
+        assert!(post_screenshot("Screenshot from Horizon"));
         save_config(Settings {
             pds_url: "https://pds.example".into(),
             identifier: "someone.example".into(),
@@ -236,6 +281,18 @@ mod tests {
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::PostText { text }) => assert_eq!(text, "hello from the game"),
             other => panic!("expected PostText, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::PostImage {
+                path,
+                alt_text,
+                text,
+            }) => {
+                assert_eq!(path, "/tmp/shots/2026-11-12_07.00.00.png");
+                assert_eq!(alt_text, "Screenshot from Horizon");
+                assert_eq!(text, None);
+            }
+            other => panic!("expected PostImage, got {:?}", other),
         }
         assert!(matches!(
             command_rx.recv_timeout(std::time::Duration::from_secs(5)),
