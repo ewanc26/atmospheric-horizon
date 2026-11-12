@@ -12,7 +12,10 @@ pub const MAX_IMAGE_BYTES: usize = 2_000_000;
 /// Convert a record into the `Unknown` value `create_record` expects, adding
 /// the `$type` field it requires (generated `RecordData` types do not carry
 /// one themselves).
-fn record_to_unknown<T: serde::Serialize>(type_nsid: &str, record: &T) -> Result<Unknown> {
+pub(crate) fn record_to_unknown<T: serde::Serialize>(
+    type_nsid: &str,
+    record: &T,
+) -> Result<Unknown> {
     let mut value = serde_json::to_value(record)?;
     let Some(map) = value.as_object_mut() else {
         return Err(AtmosphericError::Message(
@@ -50,19 +53,26 @@ pub fn png_dimensions(bytes: &[u8]) -> Option<(u64, u64)> {
     Some((width, height))
 }
 
-/// Write a post record (`app.bsky.feed.post`) and return its `at://` URI.
-async fn create_post(
+/// Write one record to `collection` and return its `at://` URI.
+async fn create_record(
     agent: &Agent,
     did: &str,
-    record: atrium_api::app::bsky::feed::post::RecordData,
+    collection: &str,
+    rkey: Option<&str>,
+    record: Unknown,
 ) -> Result<String> {
     let input = atrium_api::com::atproto::repo::create_record::InputData {
-        collection: "app.bsky.feed.post".parse().expect("valid NSID"),
-        record: record_to_unknown("app.bsky.feed.post", &record)?,
+        collection: collection.parse().expect("valid NSID"),
+        record,
         repo: did
             .parse()
             .map_err(|_| AtmosphericError::Message(format!("invalid DID: {did}")))?,
-        rkey: None,
+        rkey: rkey
+            .map(|key| {
+                key.parse()
+                    .map_err(|_| AtmosphericError::Message(format!("invalid record key: {key}")))
+            })
+            .transpose()?,
         swap_commit: None,
         validate: None,
     };
@@ -76,6 +86,22 @@ async fn create_post(
         .map_err(AtmosphericError::protocol)?;
     // The call returns `Object<OutputData>`; move the URI out of its data.
     Ok(output.data.uri)
+}
+
+/// Write a post record (`app.bsky.feed.post`) and return its `at://` URI.
+async fn create_post(
+    agent: &Agent,
+    did: &str,
+    record: atrium_api::app::bsky::feed::post::RecordData,
+) -> Result<String> {
+    create_record(
+        agent,
+        did,
+        "app.bsky.feed.post",
+        None,
+        record_to_unknown("app.bsky.feed.post", &record)?,
+    )
+    .await
 }
 
 /// Post plain text to Bluesky (`app.bsky.feed.post`).
@@ -152,6 +178,33 @@ pub async fn post_image(
         text: text.unwrap_or_default().into(),
     };
     create_post(agent, did, record).await
+}
+
+/// Publish one chat message as an `at.atpcraft.player.chat` record (the
+/// atpcraft port's chat history), keyed by a fresh TID from `tid`.
+///
+/// Returns the new record's `at://` URI.
+pub async fn post_chat(
+    agent: &Agent,
+    did: &str,
+    server_id: &str,
+    message: &str,
+    tid: &mut crate::tid::TidGen,
+) -> Result<String> {
+    let record = crate::records::ChatRecord::new(
+        server_id,
+        message,
+        atrium_api::types::string::Datetime::now(),
+    );
+    let rkey = tid.next_tid();
+    create_record(
+        agent,
+        did,
+        crate::records::CHAT_COLLECTION,
+        Some(rkey.as_str()),
+        record.to_unknown()?,
+    )
+    .await
 }
 
 #[cfg(test)]

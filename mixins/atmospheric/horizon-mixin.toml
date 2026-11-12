@@ -62,6 +62,19 @@ bindings = [
   { name = "ran", ty = "&mut bool", value = "&mut *ran" },
 ]
 
+# Every chat line the player submits (a raw target, not one of the named hook
+# points, like the screenshot one): mirrored to the worker for
+# at.atpcraft.player.chat records when chat publishing is enabled.
+[[injection]]
+id = "chat"
+kind = "HEAD"
+target = "horizon_client::game::chat::Game<'_>::handle_chat_input"
+helper = "chat.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "message", ty = "&str", value = "message" },
+]
+
 # Once a tick: drain the worker's events into the HUD status line.
 [[injection]]
 id = "tick"
