@@ -203,6 +203,11 @@ PDS — see "Manual check" below.
 - **#5 session persistence**: `session::login` now returns the `StoredSession`
   (pds_url/did/handle/refresh_jwt — never the app password), persisted by the
   worker to `<storage>/session.json` when `persist_session` is on (default).
+  **#16 file permissions**: every file that holds a secret — `session.json`
+  (refresh token; for OAuth also the DPoP private JWK), `signing-key.json`
+  (Ed25519 seed) and `config.json` (app password) — is written through
+  `worker::write_private`, which sets mode 0600 on unix (no portable ACL API
+  elsewhere; see the README).
   At startup the worker calls `session::resume`: a direct
   `com.atproto.server.refreshSession` with the stored refresh token (the
   agent cannot seed its store without a full session, so that one call goes
