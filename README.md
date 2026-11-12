@@ -4,7 +4,7 @@ AT Protocol (Bluesky) integration for [Horizon](https://playhorizon.dev), the Ru
 
 Independent project; not affiliated with Mojang, Microsoft, Bluesky PBC, or the Horizon project. NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.
 
-This project is the successor to [jollywhoppers-socialsync](https://github.com/ewanc26/jollywhoppers-socialsync) — the Paper plugin that linked Minecraft players to AT Protocol identities — rebuilt as a native Horizon mod. It also aims to port the feature set of [atpcraft](https://atforge.org/products/atpcraft/) (atforge's Minecraft server mod: per-player AT Protocol identity, chat and player-state records, skins as blobs, a labeler, a server profile) to Horizon; see the roadmap below.
+This project is the successor to [jollywhoppers-socialsync](https://github.com/ewanc26/jollywhoppers-socialsync) — the Paper plugin that linked Minecraft players to AT Protocol identities — rebuilt as a native Horizon mod. It also aims to port the feature set of [atpcraft](https://git.atforge.org/atforge/atpcraft/ATPcraft) (atforge's Minecraft server mod: per-player AT Protocol identity, chat and player-state records, skins as blobs, a labeler, a server profile) to Horizon; see the roadmap below.
 
 ## Status
 
