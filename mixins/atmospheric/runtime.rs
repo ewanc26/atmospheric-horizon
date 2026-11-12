@@ -28,6 +28,9 @@ pub const INK: u32 = 0xFF_FFFF;
 
 /// Plain settings, carried across the channel; the worker side maps them
 /// onto its `Config`. Credentials are app passwords, never account passwords.
+// Read by the worker glue once the bundle crate can be staged into the game
+// build; until then the game-side hooks compile against these boundary types.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub pds_url: String,
@@ -38,6 +41,9 @@ pub struct Settings {
 }
 
 /// Commands the game side sends to the worker thread.
+// The worker side is not linked into the game build yet (see
+// docs/ARCHITECTURE.md), so only `Login`/`PostText` are constructed today.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum GameCommand {
     /// Log in with the configured credentials (app-password flow).
@@ -60,6 +66,7 @@ pub enum GameCommand {
 
 /// Session health, mirrored on the HUD. Plain data: the worker side has the
 /// same enum with protocol types behind it.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
     LoggedOut,
@@ -69,6 +76,7 @@ pub enum SessionState {
 }
 
 /// Events the worker thread reports back to the game side.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModEvent {
     /// A free-form status line.
@@ -120,6 +128,9 @@ fn status_slot() -> &'static Mutex<String> {
 ///
 /// Returns the worker side — the receiving end of the commands and the
 /// sending end of the events — exactly once. A second call returns `None`.
+// Called by the worker glue once the bundle crate can be staged into the
+// game build; until then the hooks only send.
+#[allow(dead_code)]
 pub fn install() -> Option<(Receiver<GameCommand>, Sender<ModEvent>)> {
     if COMMAND_TX.get().is_some() {
         return None;
@@ -180,6 +191,7 @@ pub fn login() {
 }
 
 /// Ask the worker to post these settings to the settings file.
+#[allow(dead_code)]
 pub fn save_config(settings: Settings) {
     send(GameCommand::SaveConfig { settings });
 }
@@ -190,6 +202,7 @@ pub fn post_text(text: &str) {
 }
 
 /// Ask the worker to stop.
+#[allow(dead_code)]
 pub fn shutdown() {
     send(GameCommand::Shutdown);
 }

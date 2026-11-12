@@ -119,6 +119,50 @@ stub PDS on loopback (`cargo test --workspace --locked --offline`).
 - The bundle pins the exact Horizon and horizon-mixins revisions; other
   revisions have not been validated.
 
+### Native staging and the in-game check (done for M2)
+
+With clones of the two upstream repositories beside this one, at the pinned
+commits:
+
+```sh
+git -C ../horizon checkout ba6344a59cb9e755b730dcf02285fc0d33b97d3c   # pinned Horizon
+git -C ../horizon-mixins checkout d9c83d7                            # pinned mixins
+cargo build --locked -p horizon-mixins-cli --manifest-path ../horizon-mixins/Cargo.toml
+mkdir -p target/horizon-export
+git -C ../horizon archive ba6344a59cb9e755b730dcf02285fc0d33b97d3c | tar -x -C target/horizon-export
+find target/horizon-export -type l -delete   # the tool refuses links; nothing needs them
+echo -n ba6344a59cb9e755b730dcf02285fc0d33b97d3c > target/horizon-export/.horizon-revision
+../horizon-mixins/target/debug/horizon-mixins plan  --workspace target/horizon-export --mods mixins --out target/mixins/plan.json
+../horizon-mixins/target/debug/horizon-mixins apply --workspace target/horizon-export --mods mixins --out target/modded
+cd target/modded && cargo build --locked --profile fast --no-default-features -p horizon-client
+```
+
+(`target/` is gitignored; the upstream checkouts are never modified.)
+
+Then run the modded client with prepared 26.3 resources and a control
+socket, in a scratch game home so a dev install is untouched:
+
+```sh
+HORIZON_HOME=/tmp/atmos-home target/modded/target/fast/horizon-client \
+  --resources "<launcher>/versions/<nightly>/.local/horizon-client/26.3" \
+  --control-socket /tmp/atmos-test.sock --world AtmosTest --render-distance 8
+horizon-ctl --socket /tmp/atmos-test.sock state
+```
+
+Observed for M2 on the pinned revision: `plan`/`apply` succeed (1 module, 5
+named-hook injections); the stage builds with no warnings; the game launches
+and plays. In-game, verified through the control socket: Options > Mods lists
+"Atmospheric 0.1.0" and toggles ON/OFF; typing `/atmospheric login` and
+`/atmospheric post <text>` in chat shows the mod's chat feedback, so the
+`command` hook fires and the commands go down the channel; control-socket key
+events reach `native_key` (the keybind hook path) with no panics in the log;
+and a pixel diff of screenshots with the mod OFF vs ON shows the HUD status
+box in the bottom-left corner only when ON — the `hud` hook rendering the
+`status_line()` fed by the `tick` hook's `drain_events()`. The worker side of
+the channel has no in-game consumer yet (see above), so those sends are no-ops
+until the glue lands; the worker itself is proven by the crate tests and the
+`pds_check` example.
+
 ## Reviewer notes
 
 - Network use is declared, not hidden: this README, the mod page, and the
