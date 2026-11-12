@@ -75,6 +75,19 @@ bindings = [
   { name = "message", ty = "&str", value = "message" },
 ]
 
+# System messages (HEAD of system_message is injectable; death_message itself
+# is not — it contains control flow the injector rejects). Only translatable
+# "death.*" messages are posted, when post_death_messages is enabled.
+[[injection]]
+id = "death"
+kind = "HEAD"
+target = "horizon_client::game::chat::Game<'_>::system_message"
+helper = "death.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "text", ty = "&horizon_client::text::Text", value = "&text" },
+]
+
 # Once a tick: drain the worker's events into the HUD status line.
 [[injection]]
 id = "tick"
