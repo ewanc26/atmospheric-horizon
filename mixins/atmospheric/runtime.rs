@@ -95,6 +95,16 @@ pub enum GameCommand {
     /// Fetch a public Bluesky list's member DIDs (M11, join-gate read side):
     /// an `at://…app.bsky.graph.list/<rkey>` URI or a bsky.app list URL.
     FetchList { reference: String },
+    /// Read the labels on a subject (M12, labeler read side): an AT-URI, a
+    /// DID, a handle, or a bsky.app profile/post/list URL.
+    FetchLabels { subject: String },
+    /// Query a labeler's `com.atproto.label.queryLabels` for a subject (M12):
+    /// the labeler's `#atproto_labeler` endpoint is resolved from its DID
+    /// document; `None` subject means the logged-in account's own DID.
+    FetchLabelerLabels {
+        labeler: String,
+        subject: Option<String>,
+    },
     /// Post the player's death message (only when `post_death_messages` is on).
     PostDeathMessage { text: String },
     /// Log out: drop the session and delete the persisted refresh token.
@@ -164,6 +174,17 @@ pub struct NotificationDigest {
     pub text_snippet: String,
 }
 
+/// One label on a subject, reduced to what the HUD shows (M12). Plain data:
+/// the worker side maps `com.atproto.label.defs#label` onto this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelDigest {
+    pub val: String,
+    pub src: String,
+    pub neg: bool,
+    pub cts: String,
+    pub exp: Option<String>,
+}
+
 /// Events the worker thread reports back to the game side.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +203,14 @@ pub enum ModEvent {
     Notifications { items: Vec<NotificationDigest> },
     /// The members of a fetched Bluesky list (M11, join-gate read side).
     ListMembers { list: String, members: Vec<String> },
+    /// The labels found on a subject (M12, labeler read side): the subject
+    /// (AT-URI or DID), where the labels came from (`via`: the AppView URL or
+    /// the labeler's endpoint), and the labels themselves.
+    Labels {
+        subject: String,
+        via: String,
+        labels: Vec<LabelDigest>,
+    },
 }
 
 /// The HUD line one event leaves behind.
@@ -201,6 +230,37 @@ pub fn status_text(event: &ModEvent) -> String {
         ModEvent::OAuthAuthorize { url } => format!("atmospheric: finish login at {url}"),
         ModEvent::ListMembers { list, members } => {
             format!("atmospheric: list {list} has {} members", members.len())
+        }
+        ModEvent::Labels {
+            subject,
+            via,
+            labels,
+        } => {
+            if labels.is_empty() {
+                format!("atmospheric: no labels on {subject}")
+            } else {
+                let heads: Vec<String> = labels
+                    .iter()
+                    .take(3)
+                    .map(|l| {
+                        if l.neg {
+                            format!("-{}", l.val)
+                        } else {
+                            l.val.clone()
+                        }
+                    })
+                    .collect();
+                let more = if labels.len() > 3 {
+                    format!(" +{} more", labels.len() - 3)
+                } else {
+                    String::new()
+                };
+                format!(
+                    "atmospheric: {} label(s) on {subject} via {via}: {}{more}",
+                    labels.len(),
+                    heads.join(", ")
+                )
+            }
         }
         ModEvent::Notifications { items } => {
             if items.is_empty() {
@@ -431,6 +491,22 @@ pub fn fetch_list(reference: &str) {
     });
 }
 
+/// Ask the worker to read the labels on a subject via its AppView view (M12).
+pub fn fetch_labels(subject: &str) {
+    send(GameCommand::FetchLabels {
+        subject: subject.into(),
+    });
+}
+
+/// Ask the worker to query a labeler for a subject's labels (M12). `subject`
+/// `None` means the logged-in account's own DID.
+pub fn fetch_labeler_labels(labeler: &str, subject: Option<&str>) {
+    send(GameCommand::FetchLabelerLabels {
+        labeler: labeler.into(),
+        subject: subject.map(str::to_owned),
+    });
+}
+
 /// Ask the worker to post a death message (published only when the settings
 /// enable `post_death_messages`).
 pub fn post_death_message(text: &str) {
@@ -475,6 +551,9 @@ mod tests {
             -2.5,
         ));
         post_death_message("Player was slain by Zombie");
+        fetch_labels("at://did:plc:example/app.bsky.feed.post/3abc");
+        fetch_labeler_labels("did:plc:labeler", Some("did:plc:example"));
+        fetch_labeler_labels("did:plc:labeler", None);
         logout();
         assert!(!post_screenshot("no screenshot yet"));
         remember_screenshot("/tmp/shots/2026-11-12_07.00.00.png");
@@ -524,6 +603,23 @@ mod tests {
                 assert_eq!(text, "Player was slain by Zombie")
             }
             other => panic!("expected PostDeathMessage, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::FetchLabels { subject }) => {
+                assert_eq!(subject, "at://did:plc:example/app.bsky.feed.post/3abc")
+            }
+            other => panic!("expected FetchLabels, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::FetchLabelerLabels { labeler, subject }) => {
+                assert_eq!(labeler, "did:plc:labeler");
+                assert_eq!(subject.as_deref(), Some("did:plc:example"));
+            }
+            other => panic!("expected FetchLabelerLabels, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::FetchLabelerLabels { subject, .. }) => assert_eq!(subject, None),
+            other => panic!("expected FetchLabelerLabels, got {:?}", other),
         }
         assert!(matches!(
             command_rx.recv_timeout(std::time::Duration::from_secs(5)),
@@ -640,6 +736,37 @@ mod tests {
                 members: vec!["did:plc:a".into(), "did:plc:b".into()],
             }),
             "atmospheric: list at://did:plc:x/app.bsky.graph.list/3abc has 2 members"
+        );
+        assert_eq!(
+            status_text(&ModEvent::Labels {
+                subject: "did:plc:x".into(),
+                via: "did:plc:labeler (https://labels.example)".into(),
+                labels: vec![
+                    LabelDigest {
+                        val: "player".into(),
+                        src: "did:plc:labeler".into(),
+                        neg: false,
+                        cts: "2026-11-12T10:00:00.000Z".into(),
+                        exp: None,
+                    },
+                    LabelDigest {
+                        val: "spam".into(),
+                        src: "did:plc:labeler".into(),
+                        neg: true,
+                        cts: "2026-11-12T11:00:00.000Z".into(),
+                        exp: None,
+                    },
+                ],
+            }),
+            "atmospheric: 2 label(s) on did:plc:x via did:plc:labeler (https://labels.example): player, -spam"
+        );
+        assert_eq!(
+            status_text(&ModEvent::Labels {
+                subject: "at://did:plc:x/app.bsky.feed.post/1".into(),
+                via: "https://public.api.bsky.app".into(),
+                labels: vec![],
+            }),
+            "atmospheric: no labels on at://did:plc:x/app.bsky.feed.post/1"
         );
     }
 
