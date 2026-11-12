@@ -10,7 +10,9 @@ use crate::{
     Command, Config, Event, actions,
     error::AtmosphericError,
     notifications::{self, SeenCursor},
+    records::{self, SnapshotRecord},
     session::{self, Agent, SessionState},
+    signing::{self, SigningKey},
     tid::TidGen,
 };
 use std::{
@@ -23,6 +25,10 @@ use std::{
 pub const CONFIG_FILE: &str = "config.json";
 /// The notification cursor's file, same folder.
 pub const CURSOR_FILE: &str = "cursor.json";
+/// The Ed25519 endorsement key for snapshot records, same folder (M6).
+pub const SIGNING_KEY_FILE: &str = "signing-key.json";
+/// The snapshot version counter, same folder (M6).
+pub const SNAPSHOT_STATE_FILE: &str = "snapshot-state.json";
 
 /// What the worker needs besides the channels: where its files live.
 #[derive(Debug, Clone)]
@@ -121,6 +127,12 @@ pub fn spawn(
         .expect("spawn the atmospheric worker thread")
 }
 
+/// The persisted snapshot counter (see [`SNAPSHOT_STATE_FILE`]).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct SnapshotState {
+    version: i64,
+}
+
 /// The worker's state: the agent and DID once logged in, plus its files.
 struct Worker {
     storage_dir: PathBuf,
@@ -134,6 +146,12 @@ struct Worker {
     post_chat_messages: bool,
     /// `chat_server_id` from the settings file, refreshed at login.
     chat_server_id: String,
+    /// The login identifier, kept so snapshots can default the username.
+    identifier: String,
+    /// The endorsement signing key, loaded/generated on first snapshot (M6).
+    signing_key: Option<SigningKey>,
+    /// The last published snapshot version (anti-rollback), persisted.
+    snapshot_version: i64,
     events: Sender<Event>,
 }
 
@@ -145,6 +163,12 @@ impl Worker {
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default();
+        let snapshot_version =
+            std::fs::read_to_string(options.storage_dir.join(SNAPSHOT_STATE_FILE))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<SnapshotState>(&raw).ok())
+                .map(|state| state.version)
+                .unwrap_or(0);
         Self {
             storage_dir: options.storage_dir,
             agent: None,
@@ -154,6 +178,9 @@ impl Worker {
             tid: TidGen::new(),
             post_chat_messages: false,
             chat_server_id: Config::default().chat_server_id,
+            identifier: String::new(),
+            signing_key: None,
+            snapshot_version,
             events,
         }
     }
@@ -217,6 +244,13 @@ impl Worker {
                 Err(error) => self.fail(error.to_string()),
             },
             Command::RefreshNotifications => self.poll_notifications(true).await,
+            Command::PostSnapshot { mut summary } => {
+                let result = self.post_snapshot(&mut summary).await;
+                match result {
+                    Ok(uri) => self.emit(Event::Posted { uri }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
             Command::PostChat { message, automatic } => {
                 // Hook-originated messages only publish when the settings say
                 // so; the explicit `/atmospheric chat` command always does.
@@ -309,6 +343,81 @@ impl Worker {
         actions::post_image(agent, did, bytes, alt_text, text).await
     }
 
+    /// Publish a player snapshot (M6): load or generate the endorsement key,
+    /// build the record at the next version, sign the canonical payload, and
+    /// write it under the key id as rkey. The version persists so a restart
+    /// never rolls back.
+    async fn post_snapshot(
+        &mut self,
+        summary: &mut records::SnapshotSummary,
+    ) -> crate::error::Result<String> {
+        let (Some(agent), Some(did)) = (&self.agent, &self.did) else {
+            return Err(AtmosphericError::NotLoggedIn);
+        };
+        if summary.username.is_empty() {
+            summary.username = self.identifier.clone();
+        }
+        let key = match &self.signing_key {
+            Some(key) => key.clone(),
+            None => {
+                let key = match self.load_or_create_signing_key() {
+                    Ok(key) => key,
+                    Err(error) => return Err(error),
+                };
+                self.signing_key = Some(key.clone());
+                key
+            }
+        };
+        let key_id = signing::key_id_of(&key.verifying_key());
+        let mut record = SnapshotRecord {
+            version: self.snapshot_version + 1,
+            issued_at: atrium_api::types::string::Datetime::now(),
+            summary: summary.clone(),
+            aspects: vec![],
+            endorsements: vec![],
+        };
+        let payload = record.signable_payload(did, &key_id);
+        record.endorsements.push(records::Endorsement {
+            server: key_id.clone(),
+            alg: signing::ALG_ED25519.into(),
+            sig: records::BytesB64 {
+                value: signing::sign_b64(&key, &payload),
+            },
+        });
+        let uri = actions::post_snapshot(agent, did, &record, &key_id).await?;
+        self.snapshot_version = record.version;
+        if let Err(error) = self.save_snapshot_state() {
+            self.fail(format!("could not persist the snapshot version: {error}"));
+        }
+        Ok(uri)
+    }
+
+    /// Load the endorsement key from the storage folder, or generate and
+    /// persist a fresh one (worker owns disk I/O).
+    fn load_or_create_signing_key(&self) -> crate::error::Result<SigningKey> {
+        let path = self.storage_dir.join(SIGNING_KEY_FILE);
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            let file: signing::SigningKeyFile = serde_json::from_str(&raw)?;
+            return signing::from_key_file(&file);
+        }
+        let key = signing::generate();
+        let file = signing::key_file_of(&key);
+        std::fs::create_dir_all(&self.storage_dir)?;
+        std::fs::write(path, serde_json::to_string_pretty(&file)?)?;
+        Ok(key)
+    }
+
+    fn save_snapshot_state(&self) -> crate::error::Result<()> {
+        let state = SnapshotState {
+            version: self.snapshot_version,
+        };
+        std::fs::write(
+            self.storage_dir.join(SNAPSHOT_STATE_FILE),
+            serde_json::to_string(&state)?,
+        )?;
+        Ok(())
+    }
+
     /// App-password login: read the settings file, log in, cache the agent
     /// and the DID from `get_session`.
     async fn login(&mut self) {
@@ -340,6 +449,7 @@ impl Worker {
                     self.poll_interval_secs = config.poll_interval_secs.max(5);
                     self.post_chat_messages = config.post_chat_messages;
                     self.chat_server_id = config.chat_server_id.clone();
+                    self.identifier = config.identifier.clone();
                     self.emit(Event::Session(SessionState::LoggedIn { did }));
                 }
                 Err(error) => self.emit(Event::Session(SessionState::Failed {
@@ -1135,6 +1245,112 @@ mod tests {
             polls.iter().any(|p| !p.contains("seenAt=")),
             "and retried without it: {polls:?}"
         );
+    }
+
+    /// The summary the snapshot test posts.
+    fn test_summary() -> records::SnapshotSummary {
+        records::SnapshotSummary {
+            username: String::new(), // the worker fills it from the identifier
+            dimension: "minecraft:overworld".into(),
+            position: records::Position {
+                x: -25,
+                y: 67,
+                z: -3,
+            },
+            health: "20".into(),
+            food: 20,
+            xp_level: 0,
+            game_mode: "survival".into(),
+            team: None,
+            scores: None,
+        }
+    }
+
+    #[test]
+    fn post_snapshot_writes_a_signed_atpcraft_record_and_advances_the_version() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("post-snapshot");
+        write_config(&dir, &test_config(pds.url.clone()));
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir.clone());
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+
+        // Two snapshots: versions 1 and 2, same key id as rkey.
+        for expected_version in [1, 2] {
+            command_tx
+                .send(Command::PostSnapshot {
+                    summary: test_summary(),
+                })
+                .unwrap();
+            match wait_for(&event_rx, |e| matches!(e, Event::Posted { .. })) {
+                Event::Posted { uri } => assert!(!uri.is_empty()),
+                other => panic!("expected Posted, got {other:?}"),
+            }
+            let requests = pds.requests();
+            let create_record = requests
+                .iter()
+                .rev()
+                .find(|r| r.path == "/xrpc/com.atproto.repo.createRecord")
+                .expect("createRecord was called");
+            let body: serde_json::Value = serde_json::from_str(&create_record.body).unwrap();
+            assert_eq!(body["collection"], "at.atpcraft.player.snapshot");
+            assert_eq!(body["record"]["$type"], "at.atpcraft.player.snapshot");
+            assert_eq!(body["record"]["version"], expected_version);
+            // The username defaulted to the configured identifier.
+            assert_eq!(body["record"]["summary"]["username"], "stub.test");
+            // rkey == endorsements[0].server == the persisted key id.
+            let rkey = body["rkey"].as_str().unwrap();
+            assert_eq!(rkey.len(), 16);
+            let endorsement = &body["record"]["endorsements"][0];
+            assert_eq!(endorsement["server"], rkey);
+            assert_eq!(endorsement["alg"], "ed25519");
+            let sig = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD_NO_PAD,
+                endorsement["sig"]["$bytes"].as_str().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(sig.len(), 64, "an Ed25519 signature is 64 bytes");
+
+            // The signature verifies against the persisted public key over the
+            // canonical payload rebuilt from the record itself.
+            let key_file: signing::SigningKeyFile =
+                serde_json::from_str(&std::fs::read_to_string(dir.join(SIGNING_KEY_FILE)).unwrap())
+                    .unwrap();
+            assert_eq!(key_file.key_id, rkey);
+            let key = signing::from_key_file(&key_file).unwrap();
+            let payload = records::SnapshotRecord {
+                version: body["record"]["version"].as_i64().unwrap(),
+                issued_at: body["record"]["issuedAt"]
+                    .as_str()
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+                summary: serde_json::from_value(body["record"]["summary"].clone()).unwrap(),
+                aspects: vec![],
+                endorsements: vec![],
+            };
+            // A verifier rebuilds the canonical payload from the record and
+            // checks the signature against the persisted public key.
+            let signable = payload.signable_payload("did:plc:stubuser", rkey);
+            signing::verify_b64(
+                &key.verifying_key(),
+                &signable,
+                endorsement["sig"]["$bytes"].as_str().unwrap(),
+            )
+            .unwrap();
+        }
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        // The version persisted for the next run.
+        let state: SnapshotState =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(SNAPSHOT_STATE_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(state.version, 2);
     }
 
     #[test]

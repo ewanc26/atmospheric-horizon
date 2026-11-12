@@ -10,7 +10,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login, /atmospheric post <text>, /atmospheric chat <text> or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login, /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -32,6 +32,15 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
         } else {
             m::post_text(text);
             game.native_chat("atmospheric: posting…");
+        }
+    } else if rest == "snapshot" {
+        *ran = true;
+        match game.native_player() {
+            Some(p) => {
+                m::post_snapshot(m::snapshot_from_player("", p.dimension, p.x, p.y, p.z));
+                game.native_chat("atmospheric: publishing the snapshot record…");
+            }
+            None => game.native_chat("atmospheric: no player in this world"),
         }
     } else if rest == "chat" || rest.starts_with("chat ") {
         let text = rest.strip_prefix("chat").unwrap_or("").trim();

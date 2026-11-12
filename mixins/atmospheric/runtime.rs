@@ -24,6 +24,10 @@ pub const KEY_POST_DEFAULT: &str = "key.keyboard.b";
 pub const KEY_SHOT: &str = "post_screenshot";
 pub const KEY_SHOT_LABEL: &str = "Post latest screenshot to Bluesky";
 pub const KEY_SHOT_DEFAULT: &str = "key.keyboard.v";
+/// The third keybind: publish a player-state snapshot record (M6).
+pub const KEY_SNAPSHOT: &str = "post_snapshot";
+pub const KEY_SNAPSHOT_LABEL: &str = "Publish player snapshot record";
+pub const KEY_SNAPSHOT_DEFAULT: &str = "key.keyboard.c";
 
 /// The HUD status box, drawn as the WebAssembly mods' panels were: translucent
 /// black with white shadowed text.
@@ -70,8 +74,51 @@ pub enum GameCommand {
     /// atpcraft port). `automatic` marks chat-hook messages, which the worker
     /// only publishes when `post_chat_messages` is enabled.
     PostChat { message: String, automatic: bool },
+    /// Publish the player's state as an `at.atpcraft.player.snapshot` record
+    /// (M6, atpcraft port).
+    PostSnapshot { summary: SnapshotSummary },
     /// Stop the worker thread.
     Shutdown,
+}
+
+/// The player-state summary a snapshot record carries. Plain data; the
+/// worker side maps it onto the `at.atpcraft.player.defs#summary` shape.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotSummary {
+    pub username: String,
+    pub dimension: String,
+    pub x: i64,
+    pub y: i64,
+    pub z: i64,
+    pub health: String,
+    pub food: i64,
+    pub xp_level: i64,
+    pub game_mode: String,
+}
+
+/// Build a summary from the player the game reports. Fields Horizon's
+/// `native_player` does not expose (health, food, xp, game mode) get sane
+/// defaults; an empty username is filled from the configured identifier by
+/// the worker.
+pub fn snapshot_from_player(
+    username: &str,
+    dimension: &str,
+    x: f64,
+    y: f64,
+    z: f64,
+) -> SnapshotSummary {
+    SnapshotSummary {
+        username: username.into(),
+        dimension: dimension.into(),
+        x: x.floor() as i64,
+        y: y.floor() as i64,
+        z: z.floor() as i64,
+        health: "20".into(),
+        food: 20,
+        xp_level: 0,
+        game_mode: "survival".into(),
+    }
 }
 
 /// Session health, mirrored on the HUD. Plain data: the worker side has the
@@ -288,6 +335,11 @@ pub fn post_chat(message: &str, automatic: bool) {
     });
 }
 
+/// Ask the worker to publish a player-state snapshot record (M6).
+pub fn post_snapshot(summary: SnapshotSummary) {
+    send(GameCommand::PostSnapshot { summary });
+}
+
 /// Ask the worker to stop.
 #[allow(dead_code)]
 pub fn shutdown() {
@@ -311,6 +363,13 @@ mod tests {
         login();
         post_text("hello from the game");
         post_chat("a chat line", true);
+        post_snapshot(snapshot_from_player(
+            "",
+            "minecraft:overworld",
+            -24.5,
+            67.0,
+            -2.5,
+        ));
         assert!(!post_screenshot("no screenshot yet"));
         remember_screenshot("/tmp/shots/2026-11-12_07.00.00.png");
         assert_eq!(
@@ -342,6 +401,13 @@ mod tests {
                 assert!(automatic);
             }
             other => panic!("expected PostChat, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::PostSnapshot { summary }) => {
+                assert_eq!(summary.dimension, "minecraft:overworld");
+                assert_eq!((summary.x, summary.y, summary.z), (-25, 67, -3));
+            }
+            other => panic!("expected PostSnapshot, got {:?}", other),
         }
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::PostImage {

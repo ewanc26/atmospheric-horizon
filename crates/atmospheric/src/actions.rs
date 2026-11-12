@@ -207,6 +207,24 @@ pub async fn post_chat(
     .await
 }
 
+/// Publish one player snapshot (`at.atpcraft.player.snapshot`), keyed by the
+/// endorsing key id, and return its `at://` URI.
+pub async fn post_snapshot(
+    agent: &Agent,
+    did: &str,
+    record: &crate::records::SnapshotRecord,
+    rkey: &str,
+) -> Result<String> {
+    create_record(
+        agent,
+        did,
+        crate::records::SNAPSHOT_COLLECTION,
+        Some(rkey),
+        record.to_unknown()?,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
