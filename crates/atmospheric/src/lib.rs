@@ -49,6 +49,16 @@ pub enum Command {
     /// endorsed with the mod's own Ed25519 key (atpcraft port, M6). An empty
     /// `summary.username` is filled from the configured identifier.
     PostSnapshot { summary: records::SnapshotSummary },
+    /// Publish the player's skin (and optional cape) as an
+    /// `at.atpcraft.player.skin` record, endorsed with the mod's own Ed25519
+    /// key and upserted at the key id (atpcraft port, M9). `None` paths fall
+    /// back to the configured `skin_path`/`cape_path`; `model` is
+    /// "default" or "slim".
+    PostSkin {
+        skin_path: Option<String>,
+        cape_path: Option<String>,
+        model: String,
+    },
     /// Post the player's death message to Bluesky (only when
     /// `post_death_messages` is enabled).
     PostDeathMessage { text: String },

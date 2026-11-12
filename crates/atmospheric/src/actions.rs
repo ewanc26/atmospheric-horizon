@@ -88,6 +88,97 @@ async fn create_record(
     Ok(output.data.uri)
 }
 
+/// Upload raw bytes as a blob (`com.atproto.repo.uploadBlob`) and return the
+/// typed blob reference (`$type: "blob"`, as the atpcraft skin lexicon and the
+/// PDS both expect).
+pub async fn upload_blob(agent: &Agent, bytes: Vec<u8>) -> Result<atrium_api::types::BlobRef> {
+    let output = agent
+        .api
+        .com
+        .atproto
+        .repo
+        .upload_blob(bytes)
+        .await
+        .map_err(AtmosphericError::protocol)?;
+    Ok(output.data.blob)
+}
+
+/// Upsert one record at an explicit key (`com.atproto.repo.putRecord`), the
+/// call atpcraft uses for its keyed records (skin, snapshots). Returns the
+/// record's `at://` URI. `validate` is off, matching atpcraft.
+pub async fn put_record(
+    agent: &Agent,
+    did: &str,
+    collection: &str,
+    rkey: &str,
+    record: Unknown,
+) -> Result<String> {
+    let input = atrium_api::com::atproto::repo::put_record::InputData {
+        collection: collection.parse().expect("valid NSID"),
+        record,
+        repo: did
+            .parse()
+            .map_err(|_| AtmosphericError::Message(format!("invalid DID: {did}")))?,
+        rkey: rkey
+            .parse()
+            .map_err(|_| AtmosphericError::Message(format!("invalid record key: {rkey}")))?,
+        swap_commit: None,
+        swap_record: None,
+        validate: Some(false),
+    };
+    let output = agent
+        .api
+        .com
+        .atproto
+        .repo
+        .put_record(input.into())
+        .await
+        .map_err(AtmosphericError::protocol)?;
+    Ok(output.data.uri)
+}
+
+/// Fetch one record's body (`com.atproto.repo.getRecord`), or `None` when the
+/// record does not exist yet.
+pub async fn get_record(
+    agent: &Agent,
+    did: &str,
+    collection: &str,
+    rkey: &str,
+) -> Result<Option<Unknown>> {
+    use atrium_api::com::atproto::repo::get_record;
+    // getRecord is a GET: its fields travel as query parameters.
+    let parameters = get_record::ParametersData {
+        collection: collection.parse().expect("valid NSID"),
+        repo: did
+            .parse()
+            .map_err(|_| AtmosphericError::Message(format!("invalid DID: {did}")))?,
+        rkey: rkey
+            .parse()
+            .map_err(|_| AtmosphericError::Message(format!("invalid record key: {rkey}")))?,
+        cid: None,
+    };
+    match agent
+        .api
+        .com
+        .atproto
+        .repo
+        .get_record(parameters.into())
+        .await
+    {
+        Ok(output) => Ok(Some(output.data.value)),
+        // A missing record is not an error here: the caller upserts.
+        Err(atrium_xrpc::Error::XrpcResponse(xrpc))
+            if xrpc
+                .error
+                .as_ref()
+                .is_some_and(|kind| kind.to_string().starts_with("RecordNotFound")) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(AtmosphericError::protocol(error)),
+    }
+}
+
 /// Write a post record (`app.bsky.feed.post`) and return its `at://` URI.
 async fn create_post(
     agent: &Agent,

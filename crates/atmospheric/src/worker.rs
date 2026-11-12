@@ -356,6 +356,20 @@ impl Worker {
                     Err(error) => self.fail(error.to_string()),
                 }
             }
+            Command::PostSkin {
+                skin_path,
+                cape_path,
+                model,
+            } => {
+                self.ensure_oauth_fresh().await;
+                let result = self
+                    .post_skin(skin_path.as_deref(), cape_path.as_deref(), &model)
+                    .await;
+                match result {
+                    Ok(uri) => self.emit(Event::Posted { uri }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
             Command::PostDeathMessage { text } => {
                 if !self.post_death_messages {
                     return;
@@ -520,6 +534,122 @@ impl Worker {
             self.fail(format!("could not persist the snapshot version: {error}"));
         }
         Ok(uri)
+    }
+
+    /// Publish the player's skin/cape as an `at.atpcraft.player.skin` record
+    /// (M9, atpcraft port): upload the PNGs as blobs, then upsert the record
+    /// at the endorsing key id (`putRecord`) with a fresh Ed25519
+    /// endorsement, keeping endorsements from other keys. `None` paths fall
+    /// back to `skin_path`/`cape_path` in the settings file.
+    async fn post_skin(
+        &mut self,
+        skin_path: Option<&str>,
+        cape_path: Option<&str>,
+        model: &str,
+    ) -> crate::error::Result<String> {
+        let (Some(agent), Some(did)) = (&self.agent, &self.did) else {
+            return Err(AtmosphericError::NotLoggedIn);
+        };
+        let config = self.load_config().ok();
+        let configured = |value: Option<&str>, fallback: &str| {
+            value
+                .filter(|p| !p.is_empty())
+                .map(str::to_owned)
+                .or_else(|| (!fallback.is_empty()).then(|| fallback.to_owned()))
+        };
+        let skin_path = configured(
+            skin_path,
+            config.as_ref().map(|c| c.skin_path.as_str()).unwrap_or(""),
+        );
+        let cape_path = configured(
+            cape_path,
+            config.as_ref().map(|c| c.cape_path.as_str()).unwrap_or(""),
+        );
+        let model = records::SkinModel::from_key(model)
+            .or_else(|| {
+                config
+                    .as_ref()
+                    .and_then(|c| records::SkinModel::from_key(&c.skin_model))
+            })
+            .unwrap_or(records::SkinModel::Default);
+        if skin_path.is_none() && cape_path.is_none() {
+            return Err(AtmosphericError::Message(
+                "no skin file: pass a path to /atmospheric skin or set skin_path in config.json"
+                    .into(),
+            ));
+        }
+        // The skin lexicon accepts image/png blobs of at most 1 MiB.
+        let read_png = |path: &str| -> crate::error::Result<Vec<u8>> {
+            let bytes = std::fs::read(path)?;
+            if actions::image_mime(&bytes) != Some("image/png") {
+                return Err(AtmosphericError::Message(format!(
+                    "{path} is not a PNG (the skin lexicon accepts image/png only)"
+                )));
+            }
+            if bytes.len() > records::MAX_SKIN_BYTES {
+                return Err(AtmosphericError::Message(format!(
+                    "{path} is {} bytes; the skin lexicon caps blobs at {} bytes",
+                    bytes.len(),
+                    records::MAX_SKIN_BYTES
+                )));
+            }
+            Ok(bytes)
+        };
+        let skin = match &skin_path {
+            Some(path) => Some(actions::upload_blob(agent, read_png(path)?).await?),
+            None => None,
+        };
+        let cape = match &cape_path {
+            Some(path) => Some(actions::upload_blob(agent, read_png(path)?).await?),
+            None => None,
+        };
+
+        let key = match &self.signing_key {
+            Some(key) => key.clone(),
+            None => {
+                let key = self.load_or_create_signing_key()?;
+                self.signing_key = Some(key.clone());
+                key
+            }
+        };
+        let key_id = signing::key_id_of(&key.verifying_key());
+
+        // Keep endorsements from other keys, like atpcraft's create(existing).
+        let mut record = records::SkinRecord {
+            skin,
+            cape,
+            model,
+            timestamp: atrium_api::types::string::Datetime::now(),
+            endorsements: Vec::new(),
+        };
+        if let Some(existing) =
+            actions::get_record(agent, did, records::SKIN_COLLECTION, &key_id).await?
+            && let Ok(existing) =
+                serde_json::from_value::<records::SkinRecord>(serde_json::to_value(&existing)?)
+        {
+            record.endorsements = existing
+                .endorsements
+                .into_iter()
+                .filter(|e| e.server != key_id)
+                .collect();
+        }
+        let payload = record.signable_payload(did, &key_id);
+        record.endorsements.push(records::Endorsement {
+            server: key_id.clone(),
+            alg: signing::ALG_ED25519.into(),
+            sig: records::BytesB64 {
+                value: signing::sign_b64(&key, &payload),
+            },
+        });
+
+        actions::put_record(
+            agent,
+            did,
+            records::SKIN_COLLECTION,
+            &key_id,
+            record.to_unknown()?,
+        )
+        .await
     }
 
     /// Load the endorsement key from the storage folder, or generate and
@@ -863,6 +993,9 @@ mod tests {
             chat_server_id: "test-server".into(),
             persist_session: true,
             oauth_client_id: String::new(),
+            skin_path: String::new(),
+            cape_path: String::new(),
+            skin_model: "default".into(),
         }
     }
 
@@ -879,11 +1012,13 @@ mod tests {
         authorized: bool,
     }
 
-    /// A stub PDS on loopback: createSession, getSession and createRecord,
-    /// with every request recorded for the assertions.
+    /// A stub PDS on loopback: createSession, getSession, createRecord,
+    /// putRecord/getRecord (backed by a small in-memory store) and
+    /// uploadBlob, with every request recorded for the assertions.
     struct StubPds {
         url: String,
         requests: Arc<Mutex<Vec<Captured>>>,
+        records: Arc<Mutex<std::collections::HashMap<String, String>>>,
         shutdown: Arc<Mutex<bool>>,
     }
 
@@ -900,9 +1035,13 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let requests = Arc::new(Mutex::new(Vec::new()));
+            let records = Arc::new(Mutex::new(std::collections::HashMap::new()));
+            let uploads = Arc::new(Mutex::new(0usize));
             let shutdown = Arc::new(Mutex::new(false));
             {
                 let requests = Arc::clone(&requests);
+                let records = Arc::clone(&records);
+                let uploads = Arc::clone(&uploads);
                 let shutdown = Arc::clone(&shutdown);
                 std::thread::spawn(move || {
                     for stream in listener.incoming() {
@@ -911,10 +1050,14 @@ mod tests {
                         }
                         let Ok(mut stream) = stream else { break };
                         let requests = Arc::clone(&requests);
+                        let records = Arc::clone(&records);
+                        let uploads = Arc::clone(&uploads);
                         std::thread::spawn(move || {
                             handle_connection(
                                 &mut stream,
                                 &requests,
+                                &records,
+                                &uploads,
                                 accept_bad_password,
                                 reject_seen_at,
                             );
@@ -925,12 +1068,26 @@ mod tests {
             Self {
                 url,
                 requests,
+                records,
                 shutdown,
             }
         }
 
         fn requests(&self) -> Vec<Captured> {
             self.requests.lock().unwrap().clone()
+        }
+
+        /// The stored putRecord bodies, keyed by `<collection>/<rkey>`.
+        fn stored_records(&self) -> Vec<(String, String)> {
+            let mut entries: Vec<_> = self
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            entries.sort();
+            entries
         }
     }
 
@@ -944,6 +1101,8 @@ mod tests {
     fn handle_connection(
         stream: &mut std::net::TcpStream,
         requests: &Arc<Mutex<Vec<Captured>>>,
+        records: &Arc<Mutex<std::collections::HashMap<String, String>>>,
+        uploads: &Arc<Mutex<usize>>,
         accept_bad_password: bool,
         reject_seen_at: bool,
     ) {
@@ -1077,16 +1236,81 @@ mod tests {
                 "/xrpc/com.atproto.repo.uploadBlob" => {
                     if authorized {
                         let size = body.len();
-                        (
-                            "200 OK",
-                            format!(
-                                r#"{{"blob":{{"$type":"blob","ref":{{"$link":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy"}},"mimeType":"image/png","size":{size}}}}}"#
-                            ),
-                        )
+                        // A real CID per upload (alternating), so two uploads
+                        // (skin + cape) get distinct, parseable $links.
+                        let mut count = uploads.lock().unwrap();
+                        let cid = STUB_CIDS[*count % STUB_CIDS.len()];
+                        *count += 1;
+                        drop(count);
+                        let payload = serde_json::json!({
+                            "blob": {
+                                "$type": "blob",
+                                "ref": {"$link": cid},
+                                "mimeType": "image/png",
+                                "size": size,
+                            }
+                        });
+                        ("200 OK", payload.to_string())
                     } else {
                         (
                             "401 Unauthorized",
                             r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
+                        )
+                    }
+                }
+                "/xrpc/com.atproto.repo.putRecord" => {
+                    if authorized {
+                        let body_json: serde_json::Value =
+                            serde_json::from_str(&body_string).unwrap_or_default();
+                        let collection = body_json["collection"].as_str().unwrap_or("");
+                        let rkey = body_json["rkey"].as_str().unwrap_or("");
+                        records.lock().unwrap().insert(
+                            format!("{collection}/{rkey}"),
+                            body_json["record"].to_string(),
+                        );
+                        let payload = serde_json::json!({
+                            "uri": format!("at://did:plc:stubuser/{collection}/{rkey}"),
+                            "cid": STUB_CIDS[0],
+                        });
+                        ("200 OK", payload.to_string())
+                    } else {
+                        (
+                            "401 Unauthorized",
+                            r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
+                        )
+                    }
+                }
+                "/xrpc/com.atproto.repo.getRecord" => {
+                    // getRecord passes repo/collection/rkey as query params.
+                    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+                    let param = |name: &str| {
+                        query.split('&').find_map(|pair| {
+                            let (k, v) = pair.split_once('=')?;
+                            (k == name).then(|| v.to_string())
+                        })
+                    };
+                    let key = format!(
+                        "{}/{}",
+                        param("collection").unwrap_or_default(),
+                        param("rkey").unwrap_or_default()
+                    );
+                    if !authorized {
+                        (
+                            "401 Unauthorized",
+                            r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
+                        )
+                    } else if let Some(record) = records.lock().unwrap().get(&key).cloned() {
+                        (
+                            "200 OK",
+                            format!(
+                                r#"{{"uri":"at://did:plc:stubuser/{key}","cid":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy","value":{record}}}"#
+                            ),
+                        )
+                    } else {
+                        (
+                            "400 Bad Request",
+                            r#"{"error":"RecordNotFound","message":"record not found"}"#
+                                .to_string(),
                         )
                     }
                 }
@@ -1122,6 +1346,13 @@ mod tests {
             .windows(needle.len())
             .position(|window| window == needle)
     }
+
+    /// Real CIDs the stub hands out for uploads (a fake one would fail to
+    /// parse as a CidLink on the client). Alternated so skin + cape differ.
+    const STUB_CIDS: [&str; 2] = [
+        "bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy",
+        "bafkreibme22gw2h7y2h7tg2fhqotaqjucnbc24deqo72b6mkl2egezxhvy",
+    ];
 
     fn spawn_worker(
         storage_dir: PathBuf,
@@ -1294,6 +1525,9 @@ mod tests {
             chat_server_id: "my-server".into(),
             persist_session: true,
             oauth_client_id: String::new(),
+            skin_path: String::new(),
+            cape_path: String::new(),
+            skin_model: "default".into(),
         };
         command_tx
             .send(Command::SaveConfig {
@@ -1743,6 +1977,211 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(dir.join(SNAPSHOT_STATE_FILE)).unwrap())
                 .unwrap();
         assert_eq!(state.version, 2);
+    }
+
+    #[test]
+    fn post_skin_uploads_the_blob_and_upserts_an_endorsed_record() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("post-skin");
+        write_config(&dir, &test_config(pds.url.clone()));
+        let skin = dir.join("skin.png");
+        std::fs::write(&skin, tiny_png()).unwrap();
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir.clone());
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        command_tx
+            .send(Command::PostSkin {
+                skin_path: Some(skin.display().to_string()),
+                cape_path: None,
+                model: "slim".into(),
+            })
+            .unwrap();
+        let rkey = match wait_for(&event_rx, |e| matches!(e, Event::Posted { .. })) {
+            Event::Posted { uri } => {
+                let rkey = uri.rsplit('/').next().unwrap().to_string();
+                assert!(
+                    uri.starts_with("at://did:plc:stubuser/at.atpcraft.player.skin/"),
+                    "{uri}"
+                );
+                rkey
+            }
+            other => panic!("expected Posted, got {other:?}"),
+        };
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        // The rkey is the persisted signing key's id.
+        let key_file: signing::SigningKeyFile =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(SIGNING_KEY_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(rkey, key_file.key_id);
+
+        let requests = pds.requests();
+        let upload = requests
+            .iter()
+            .find(|r| r.path == "/xrpc/com.atproto.repo.uploadBlob")
+            .expect("the skin PNG was uploaded as a blob");
+        assert_eq!(upload.body_bytes, tiny_png());
+        let get = requests
+            .iter()
+            .find(|r| r.path.starts_with("/xrpc/com.atproto.repo.getRecord"))
+            .expect("the existing record was fetched to keep foreign endorsements");
+        assert!(get.path.contains("collection=at.atpcraft.player.skin"));
+        assert!(get.path.contains(&format!("rkey={rkey}")));
+        let put = requests
+            .iter()
+            .find(|r| r.path == "/xrpc/com.atproto.repo.putRecord")
+            .expect("putRecord upserted the skin record");
+        let body: serde_json::Value = serde_json::from_str(&put.body).unwrap();
+        assert_eq!(body["collection"], "at.atpcraft.player.skin");
+        assert_eq!(body["rkey"], rkey);
+        assert_eq!(body["validate"], false);
+        let record = &body["record"];
+        assert_eq!(record["$type"], "at.atpcraft.player.skin");
+        assert_eq!(record["model"], "slim");
+        assert_eq!(record["skin"]["$type"], "blob");
+        assert_eq!(record["skin"]["mimeType"], "image/png");
+        assert!(record.get("cape").is_none(), "no cape was sent");
+        assert_eq!(record["endorsements"].as_array().unwrap().len(), 1);
+        assert_eq!(record["endorsements"][0]["server"], rkey);
+        assert_eq!(record["endorsements"][0]["alg"], "ed25519");
+
+        // The endorsement verifies against the persisted key over the
+        // canonical payload (atpcraft's signablePayload shape).
+        let key = signing::from_key_file(&key_file).unwrap();
+        let stored: records::SkinRecord = serde_json::from_value(record.clone()).unwrap();
+        let payload = stored.signable_payload("did:plc:stubuser", &rkey);
+        signing::verify_b64(
+            &key.verifying_key(),
+            &payload,
+            record["endorsements"][0]["sig"]["$bytes"].as_str().unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn post_skin_keeps_foreign_endorsements_on_republish() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("post-skin-foreign");
+        write_config(&dir, &test_config(pds.url.clone()));
+        let skin = dir.join("skin.png");
+        std::fs::write(&skin, tiny_png()).unwrap();
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir.clone());
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        command_tx
+            .send(Command::PostSkin {
+                skin_path: Some(skin.display().to_string()),
+                cape_path: None,
+                model: "default".into(),
+            })
+            .unwrap();
+        let _ = wait_for(&event_rx, |e| matches!(e, Event::Posted { .. }));
+
+        // Another "server" endorses the same record on the PDS.
+        let key_file: signing::SigningKeyFile =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(SIGNING_KEY_FILE)).unwrap())
+                .unwrap();
+        let store_key = format!("at.atpcraft.player.skin/{}", key_file.key_id);
+        {
+            let mut records = pds.records.lock().unwrap();
+            let mut record: serde_json::Value = serde_json::from_str(&records[&store_key]).unwrap();
+            record["endorsements"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "server": "foreignserverkey1",
+                    "alg": "ed25519",
+                    "sig": {"$bytes": "Zm9yZWlnbg"}
+                }));
+            records.insert(store_key.clone(), record.to_string());
+        }
+
+        // Re-publish: the foreign endorsement survives, ours is replaced.
+        command_tx
+            .send(Command::PostSkin {
+                skin_path: Some(skin.display().to_string()),
+                cape_path: None,
+                model: "default".into(),
+            })
+            .unwrap();
+        let _ = wait_for(&event_rx, |e| matches!(e, Event::Posted { .. }));
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let stored = pds
+            .stored_records()
+            .into_iter()
+            .find(|(k, _)| k == &store_key)
+            .map(|(_, v)| v)
+            .unwrap();
+        let record: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        let servers: Vec<&str> = record["endorsements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["server"].as_str().unwrap())
+            .collect();
+        assert!(servers.contains(&"foreignserverkey1"), "{servers:?}");
+        assert_eq!(
+            servers.iter().filter(|s| **s == key_file.key_id).count(),
+            1,
+            "the local endorsement was replaced, not duplicated: {servers:?}"
+        );
+    }
+
+    #[test]
+    fn post_skin_rejects_non_png_and_missing_paths_without_uploading() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("post-skin-bad");
+        write_config(&dir, &test_config(pds.url.clone()));
+        let not_png = dir.join("notes.txt");
+        std::fs::write(&not_png, b"just text").unwrap();
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir.clone());
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        // No path argument and nothing configured: refused before any I/O.
+        command_tx
+            .send(Command::PostSkin {
+                skin_path: None,
+                cape_path: None,
+                model: "default".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => assert!(message.contains("no skin file"), "{message}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        // A non-PNG file is refused too.
+        command_tx
+            .send(Command::PostSkin {
+                skin_path: Some(not_png.display().to_string()),
+                cape_path: None,
+                model: "default".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => assert!(message.contains("not a PNG"), "{message}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        assert!(
+            !pds.requests()
+                .iter()
+                .any(|r| r.path == "/xrpc/com.atproto.repo.uploadBlob"),
+            "nothing was uploaded"
+        );
     }
 
     #[test]
