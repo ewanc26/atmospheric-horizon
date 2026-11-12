@@ -9,6 +9,7 @@
 //! ATMOSPHERIC_APP_PASSWORD="xxxx-xxxx-xxxx-xxxx" \
 //! ATMOSPHERIC_POST_TEXT="hello from atmospheric-horizon (M2 check)" \
 //! ATMOSPHERIC_POST_IMAGE="/path/to/screenshot.png" \   # optional, M3
+//! ATMOSPHERIC_POST_CHAT="hello from in-game chat" \     # optional, M5
 //! cargo run -p atmospheric --example pds_check
 //! ```
 //!
@@ -43,9 +44,12 @@ fn main() {
         app_password: required("ATMOSPHERIC_APP_PASSWORD"),
         poll_interval_secs: 60,
         post_death_messages: false,
+        post_chat_messages: false,
+        chat_server_id: "pds-check".into(),
     };
     let post_text = env::var("ATMOSPHERIC_POST_TEXT").ok();
     let post_image = env::var("ATMOSPHERIC_POST_IMAGE").ok();
+    let post_chat = env::var("ATMOSPHERIC_POST_CHAT").ok();
 
     // A throwaway settings folder: the worker reads its config from here.
     let storage_dir: PathBuf = env::temp_dir().join("atmospheric-pds-check");
@@ -86,40 +90,18 @@ fn main() {
         }
     }
 
-    // Poll notifications once after login (M4), printing the digest event.
-    command_tx
-        .send(Command::RefreshNotifications)
-        .expect("send RefreshNotifications");
-    loop {
-        match event_rx.recv_timeout(Duration::from_secs(60)) {
-            Ok(event) => {
-                println!("event: {event:?}");
-                match event {
-                    Event::Notifications { .. } => break,
-                    Event::Failed { message } => {
-                        eprintln!("notification poll failed: {message}");
-                        let _ = command_tx.send(Command::Shutdown);
-                        let _ = handle.join();
-                        exit(1);
-                    }
-                    _ => {}
-                }
-            }
-            Err(error) => {
-                eprintln!("no event from the worker: {error}");
-                let _ = handle.join();
-                exit(1);
-            }
-        }
-    }
-
-    // One wait loop per optional post; each ends on its Posted event.
+    // One wait loop per optional post; each ends on its Posted event. (A
+    // stray notification event from the poll timer is just printed.)
     let posts: Vec<Command> = [
         post_text.map(|text| Command::PostText { text }),
         post_image.map(|path| Command::PostImage {
             path,
             alt_text: "pds_check image post".into(),
             text: Some("atmospheric-horizon image check (test post, feel free to delete)".into()),
+        }),
+        post_chat.map(|message| Command::PostChat {
+            message,
+            automatic: false,
         }),
     ]
     .into_iter()
@@ -129,6 +111,7 @@ fn main() {
         let kind = match &post {
             Command::PostText { .. } => "text",
             Command::PostImage { .. } => "image",
+            Command::PostChat { .. } => "chat record",
             _ => unreachable!(),
         };
         command_tx.send(post).expect("send post");
@@ -152,6 +135,32 @@ fn main() {
                     let _ = handle.join();
                     exit(1);
                 }
+            }
+        }
+    }
+
+    // Poll notifications once at the end (M4), printing the digest event. A
+    // failure here is not fatal to the check: some PDSs reject the seenAt
+    // hint, and the timer poll may already have delivered the digest.
+    command_tx
+        .send(Command::RefreshNotifications)
+        .expect("send RefreshNotifications");
+    loop {
+        match event_rx.recv_timeout(Duration::from_secs(60)) {
+            Ok(event) => {
+                println!("event: {event:?}");
+                match event {
+                    Event::Notifications { .. } => break,
+                    Event::Failed { message } => {
+                        eprintln!("notification poll failed (non-fatal): {message}");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            Err(error) => {
+                eprintln!("no event from the worker: {error}");
+                break;
             }
         }
     }

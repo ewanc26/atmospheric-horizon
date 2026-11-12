@@ -11,6 +11,7 @@ use crate::{
     error::AtmosphericError,
     notifications::{self, SeenCursor},
     session::{self, Agent, SessionState},
+    tid::TidGen,
 };
 use std::{
     path::PathBuf,
@@ -127,6 +128,12 @@ struct Worker {
     did: Option<String>,
     cursor: SeenCursor,
     poll_interval_secs: u64,
+    /// TID generator for record keys (chat records, later more).
+    tid: TidGen,
+    /// `post_chat_messages` from the settings file, refreshed at login.
+    post_chat_messages: bool,
+    /// `chat_server_id` from the settings file, refreshed at login.
+    chat_server_id: String,
     events: Sender<Event>,
 }
 
@@ -144,6 +151,9 @@ impl Worker {
             did: None,
             cursor,
             poll_interval_secs: Config::default().poll_interval_secs,
+            tid: TidGen::new(),
+            post_chat_messages: false,
+            chat_server_id: Config::default().chat_server_id,
             events,
         }
     }
@@ -207,6 +217,30 @@ impl Worker {
                 Err(error) => self.fail(error.to_string()),
             },
             Command::RefreshNotifications => self.poll_notifications(true).await,
+            Command::PostChat { message, automatic } => {
+                // Hook-originated messages only publish when the settings say
+                // so; the explicit `/atmospheric chat` command always does.
+                if automatic && !self.post_chat_messages {
+                    return;
+                }
+                let result = match (&self.agent, &self.did) {
+                    (Some(agent), Some(did)) => {
+                        actions::post_chat(
+                            agent,
+                            did,
+                            &self.chat_server_id,
+                            &message,
+                            &mut self.tid,
+                        )
+                        .await
+                    }
+                    _ => Err(AtmosphericError::NotLoggedIn),
+                };
+                match result {
+                    Ok(uri) => self.emit(Event::Posted { uri }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
         }
     }
 
@@ -304,6 +338,8 @@ impl Worker {
                     self.agent = Some(agent);
                     self.did = Some(did.clone());
                     self.poll_interval_secs = config.poll_interval_secs.max(5);
+                    self.post_chat_messages = config.post_chat_messages;
+                    self.chat_server_id = config.chat_server_id.clone();
                     self.emit(Event::Session(SessionState::LoggedIn { did }));
                 }
                 Err(error) => self.emit(Event::Session(SessionState::Failed {
@@ -350,6 +386,8 @@ mod tests {
             app_password: "correct-horse".into(),
             poll_interval_secs: 60,
             post_death_messages: false,
+            post_chat_messages: false,
+            chat_server_id: "test-server".into(),
         }
     }
 
@@ -378,6 +416,12 @@ mod tests {
         /// `accept_bad_password` makes createSession answer 401, to exercise
         /// the login failure path.
         fn start(accept_bad_password: bool) -> Self {
+            Self::start_with(accept_bad_password, false)
+        }
+
+        /// `reject_seen_at` makes listNotifications answer 400 when a seenAt
+        /// parameter is present, like some third-party PDSs do.
+        fn start_with(accept_bad_password: bool, reject_seen_at: bool) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let requests = Arc::new(Mutex::new(Vec::new()));
@@ -393,7 +437,12 @@ mod tests {
                         let Ok(mut stream) = stream else { break };
                         let requests = Arc::clone(&requests);
                         std::thread::spawn(move || {
-                            handle_connection(&mut stream, &requests, accept_bad_password);
+                            handle_connection(
+                                &mut stream,
+                                &requests,
+                                accept_bad_password,
+                                reject_seen_at,
+                            );
                         });
                     }
                 });
@@ -421,6 +470,7 @@ mod tests {
         stream: &mut std::net::TcpStream,
         requests: &Arc<Mutex<Vec<Captured>>>,
         accept_bad_password: bool,
+        reject_seen_at: bool,
     ) {
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
@@ -482,6 +532,12 @@ mod tests {
                 (
                     "401 Unauthorized",
                     r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
+                )
+            } else if path.contains("seenAt=") && reject_seen_at {
+                (
+                    "400 Bad Request",
+                    r#"{"error":"InvalidRequest","message":"The seenAt parameter is unsupported"}"#
+                        .to_string(),
                 )
             } else if path.contains("seenAt=") {
                 (
@@ -735,6 +791,8 @@ mod tests {
             app_password: "abcd-1234-efgh-5678".into(),
             poll_interval_secs: 30,
             post_death_messages: true,
+            post_chat_messages: true,
+            chat_server_id: "my-server".into(),
         };
         command_tx
             .send(Command::SaveConfig {
@@ -751,6 +809,8 @@ mod tests {
         assert_eq!(back.app_password, config.app_password);
         assert_eq!(back.poll_interval_secs, 30);
         assert!(back.post_death_messages);
+        assert!(back.post_chat_messages);
+        assert_eq!(back.chat_server_id, "my-server");
     }
 
     /// A minimal PNG header (magic + IHDR with 2560x1440) for image tests.
@@ -919,6 +979,162 @@ mod tests {
         let raw = std::fs::read_to_string(dir.join(CURSOR_FILE)).unwrap();
         let cursor: notifications::SeenCursor = serde_json::from_str(&raw).unwrap();
         assert_eq!(cursor.seen_at.as_deref(), Some("2026-11-12T11:00:00.000Z"));
+    }
+
+    #[test]
+    fn post_chat_writes_an_atpcraft_chat_record_keyed_by_a_tid() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("post-chat");
+        let mut config = test_config(pds.url.clone());
+        config.post_chat_messages = true;
+        write_config(&dir, &config);
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+
+        command_tx
+            .send(Command::PostChat {
+                message: "hello from in-game chat".into(),
+                automatic: true,
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Posted { .. })) {
+            Event::Posted { uri } => {
+                assert_eq!(uri, "at://did:plc:stubuser/app.bsky.feed.post/3jub4stub");
+            }
+            other => panic!("expected Posted, got {other:?}"),
+        }
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let requests = pds.requests();
+        let create_record = requests
+            .iter()
+            .find(|r| r.path == "/xrpc/com.atproto.repo.createRecord")
+            .expect("createRecord was called");
+        assert!(create_record.authorized);
+        let body: serde_json::Value = serde_json::from_str(&create_record.body).unwrap();
+        assert_eq!(body["collection"], "at.atpcraft.player.chat");
+        assert_eq!(body["repo"], "did:plc:stubuser");
+        // The rkey is a 13-char sortable TID.
+        let rkey = body["rkey"].as_str().expect("rkey was sent");
+        assert_eq!(rkey.len(), 13);
+        assert!(crate::tid::decode(rkey).is_some());
+        // The record carries the atpcraft $type and the configured server id.
+        assert_eq!(body["record"]["$type"], "at.atpcraft.player.chat");
+        assert_eq!(body["record"]["message"], "hello from in-game chat");
+        assert_eq!(body["record"]["server"], "test-server");
+        assert!(body["record"]["sentAt"].is_string());
+    }
+
+    #[test]
+    fn automatic_chat_is_skipped_unless_enabled_but_the_command_always_posts() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("post-chat-flag");
+        let mut config = test_config(pds.url.clone());
+        config.post_chat_messages = false; // the default: off
+        write_config(&dir, &config);
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+
+        // An automatic (chat-hook) message with the flag off: no network call.
+        command_tx
+            .send(Command::PostChat {
+                message: "should not be published".into(),
+                automatic: true,
+            })
+            .unwrap();
+        // The explicit command always publishes, even with the flag off.
+        command_tx
+            .send(Command::PostChat {
+                message: "explicitly published".into(),
+                automatic: false,
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Posted { .. })) {
+            Event::Posted { uri } => assert!(!uri.is_empty()),
+            other => panic!("expected Posted, got {other:?}"),
+        }
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        // Exactly one createRecord went out, and it carried the explicit text.
+        let requests = pds.requests();
+        let create_records: Vec<_> = requests
+            .iter()
+            .filter(|r| r.path == "/xrpc/com.atproto.repo.createRecord")
+            .collect();
+        assert_eq!(create_records.len(), 1, "only the explicit post went out");
+        let body: serde_json::Value = serde_json::from_str(&create_records[0].body).unwrap();
+        assert_eq!(body["record"]["message"], "explicitly published");
+    }
+
+    #[test]
+    fn notifications_fall_back_when_the_pds_rejects_seen_at() {
+        // Some third-party PDSs answer 400 to the seenAt hint; the worker
+        // retries without it and the persisted cursor still dedupes.
+        let pds = StubPds::start_with(false, true);
+        let dir = temp_dir("notifications-seenat-400");
+        let mut config = test_config(pds.url.clone());
+        config.poll_interval_secs = 3600; // only the first (immediate) tick fires
+        write_config(&dir, &config);
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+
+        // First poll (no cursor yet): both notifications, via the fallback.
+        match wait_for(
+            &event_rx,
+            |e| matches!(e, Event::Notifications { items } if items.len() == 2),
+        ) {
+            Event::Notifications { items } => assert_eq!(items.len(), 2),
+            other => panic!("expected Notifications(2), got {other:?}"),
+        }
+
+        // The explicit refresh sends seenAt, gets the 400, retries without it,
+        // and the local cursor hides the already-seen items: no failure event.
+        command_tx.send(Command::RefreshNotifications).unwrap();
+        match wait_for(
+            &event_rx,
+            |e| matches!(e, Event::Notifications { items } if items.is_empty()),
+        ) {
+            Event::Notifications { items } => assert!(items.is_empty()),
+            other => panic!("expected Notifications(0), got {other:?}"),
+        }
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        // The stub did see a seenAt request (which it rejected) and then a
+        // retry without it.
+        let polls: Vec<_> = pds
+            .requests()
+            .iter()
+            .filter(|r| {
+                r.path
+                    .starts_with("/xrpc/app.bsky.notification.listNotifications")
+            })
+            .map(|r| r.path.clone())
+            .collect();
+        assert!(
+            polls.iter().any(|p| p.contains("seenAt=")),
+            "the seenAt hint was sent: {polls:?}"
+        );
+        assert!(
+            polls.iter().any(|p| !p.contains("seenAt=")),
+            "and retried without it: {polls:?}"
+        );
     }
 
     #[test]

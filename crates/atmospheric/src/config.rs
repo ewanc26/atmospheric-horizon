@@ -7,7 +7,16 @@ use serde::{Deserialize, Serialize};
 /// Credentials are app passwords, never account passwords. The config file
 /// lives in the mod's own storage folder (see the Horizon mod storage API) —
 /// not in a world save, and not next to one.
+/// The default `chat_server_id` written into `at.atpcraft.player.chat`
+/// records: this client mod has no server identity of its own.
+fn default_chat_server_id() -> String {
+    "horizon-client".into()
+}
+
+// `#[serde(default)]` keeps settings files written by older versions (which
+// lack the newer fields) loadable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     /// PDS URL, e.g. `https://bsky.social` or a self-hosted PDS.
     pub pds_url: String,
@@ -19,6 +28,11 @@ pub struct Config {
     pub poll_interval_secs: u64,
     /// Post the death message automatically when the player dies.
     pub post_death_messages: bool,
+    /// Publish every chat message as an `at.atpcraft.player.chat` record.
+    /// Off by default: chat is public once written to the repo.
+    pub post_chat_messages: bool,
+    /// The `server` field written into chat records (atpcraft port).
+    pub chat_server_id: String,
 }
 
 impl Default for Config {
@@ -29,6 +43,8 @@ impl Default for Config {
             app_password: String::new(),
             poll_interval_secs: 60,
             post_death_messages: false,
+            post_chat_messages: false,
+            chat_server_id: default_chat_server_id(),
         }
     }
 }
@@ -62,12 +78,34 @@ mod tests {
             app_password: "abcd-1234-efgh-5678".into(),
             poll_interval_secs: 30,
             post_death_messages: true,
+            post_chat_messages: true,
+            chat_server_id: "my-server".into(),
         };
         let raw = config.to_json().unwrap();
         let back = Config::from_json(&raw).unwrap();
         assert_eq!(config.pds_url, back.pds_url);
         assert_eq!(config.poll_interval_secs, back.poll_interval_secs);
         assert!(back.post_death_messages);
+        assert!(back.post_chat_messages);
+        assert_eq!(back.chat_server_id, "my-server");
+    }
+
+    #[test]
+    fn config_from_an_older_settings_file_gets_the_new_defaults() {
+        // A settings file written before the atpcraft-port fields existed.
+        let raw = r#"{
+            "pds_url": "https://pds.example",
+            "identifier": "ewan.example",
+            "app_password": "abcd-1234-efgh-5678",
+            "poll_interval_secs": 30,
+            "post_death_messages": false
+        }"#;
+        let config = Config::from_json(raw).unwrap();
+        assert!(
+            !config.post_chat_messages,
+            "chat publishing defaults to off"
+        );
+        assert_eq!(config.chat_server_id, "horizon-client");
     }
 
     #[test]

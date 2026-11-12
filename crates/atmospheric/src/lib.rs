@@ -10,7 +10,9 @@ pub mod actions;
 pub mod config;
 pub mod error;
 pub mod notifications;
+pub mod records;
 pub mod session;
+pub mod tid;
 pub mod worker;
 
 pub use config::Config;
@@ -33,6 +35,11 @@ pub enum Command {
     },
     /// Poll notifications now (the worker also does this on a timer).
     RefreshNotifications,
+    /// Publish a chat message as an `at.atpcraft.player.chat` record
+    /// (atpcraft port). `automatic` marks hook-originated messages, which the
+    /// worker only publishes when `post_chat_messages` is enabled; explicit
+    /// ones (the `/atmospheric chat` command) always publish.
+    PostChat { message: String, automatic: bool },
     /// Shut the worker thread down.
     Shutdown,
 }
