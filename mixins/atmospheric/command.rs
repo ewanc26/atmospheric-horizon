@@ -17,12 +17,12 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
         *ran = true;
         m::login();
         game.native_chat("atmospheric: logging in…");
-    } else if let Some(text) = rest.strip_prefix("post ") {
-        if text.trim().is_empty() {
-            *ran = true;
+    } else if rest == "post" || rest.starts_with("post ") {
+        let text = rest.strip_prefix("post").unwrap_or("").trim();
+        *ran = true;
+        if text.is_empty() {
             game.native_chat("atmospheric: /atmospheric post <text>");
         } else {
-            *ran = true;
             m::post_text(text);
             game.native_chat("atmospheric: posting…");
         }
