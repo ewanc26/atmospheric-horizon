@@ -41,6 +41,14 @@ pub struct Config {
     /// URL (see `oauth-client-metadata.json` in the repo root) for
     /// authorization servers that do not implement the loopback exception.
     pub oauth_client_id: String,
+    /// Path of the player's skin PNG used by `/atmospheric skin` when the
+    /// command gets no explicit path (M9). Empty means "not configured".
+    pub skin_path: String,
+    /// Optional path of the player's cape PNG (M9).
+    pub cape_path: String,
+    /// The skin model written into `at.atpcraft.player.skin` records (M9):
+    /// "default" or "slim".
+    pub skin_model: String,
 }
 
 impl Default for Config {
@@ -55,6 +63,9 @@ impl Default for Config {
             chat_server_id: default_chat_server_id(),
             persist_session: true,
             oauth_client_id: String::new(),
+            skin_path: String::new(),
+            cape_path: String::new(),
+            skin_model: "default".into(),
         }
     }
 }
@@ -102,6 +113,9 @@ mod tests {
             chat_server_id: "my-server".into(),
             persist_session: true,
             oauth_client_id: String::new(),
+            skin_path: String::new(),
+            cape_path: String::new(),
+            skin_model: "default".into(),
         };
         let raw = config.to_json().unwrap();
         let back = Config::from_json(&raw).unwrap();
