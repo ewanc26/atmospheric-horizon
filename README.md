@@ -25,21 +25,6 @@ atpcraft is a server-side Fabric mod; Horizon native mods can hook the server si
 | Join gate reading a public Bluesky list | later, server-side |
 | Web server for login pages / lexicons | not planned for the client mod; OAuth sign-in is the alternative |
 
-### Roadmap: porting atpcraft to Horizon
-
-atpcraft is a server-side Fabric mod; Horizon native mods can hook the server side too (`native_tick`/`native_world_lifecycle` run there), so the port maps onto milestones and later work:
-
-| atpcraft feature | atmospheric-horizon |
-|---|---|
-| Bluesky sign-in | app-password login (`com.atproto.server.createSession`, M2); a browser OAuth flow would need a tiny local web server on the worker — later milestone |
-| Chat messages as records (`at.atpcraft.player.chat`) | later, once the worker is linked in-game (issue #2) |
-| Player state snapshots (`at.atpcraft.player.snapshot`, `defs`) | later; position/facing already readable via `native_player` |
-| Skins and capes as blobs on the PDS | blob upload proven in M3; skin upload later |
-| Labeler publishing player activity | later (`com.atproto.label.*`) |
-| Server profile record (`at.atpcraft.server.profile`) | later, server-side |
-| Join gate reading a public Bluesky list | later, server-side |
-| Web server for login pages / lexicons | not planned for the client mod; OAuth sign-in is the alternative |
-
 ## Features
 
 - Post text and in-game screenshots to Bluesky from a keybind
