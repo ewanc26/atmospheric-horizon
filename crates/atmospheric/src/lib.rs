@@ -21,6 +21,8 @@ pub use error::AtmosphericError;
 pub enum Command {
     /// Log in with the configured credentials (app-password flow).
     Login,
+    /// Replace the settings file with these settings.
+    SaveConfig { config: Config },
     /// Post plain text to Bluesky.
     PostText { text: String },
     /// Upload an image file and post it as an embedded image.
