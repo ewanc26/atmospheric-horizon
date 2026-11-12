@@ -1,6 +1,7 @@
-// /atmospheric login logs in; /atmospheric post <text> posts text;
-// /atmospheric notifications polls now (the worker also polls on a timer);
-// /atmospheric chat <text> publishes one chat record (atpcraft port).
+// /atmospheric login [handle] logs in (app password from the settings, or
+// localhost OAuth when a handle is given); /atmospheric post <text> posts
+// text; /atmospheric notifications polls now (the worker also polls on a
+// timer); /atmospheric chat <text> publishes one chat record (atpcraft port).
 fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut bool) {
     use crate::game::atmospheric as m;
     if !game.native_on(m::ID) {
@@ -10,16 +11,24 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login, /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
         return;
     };
-    if rest == "login" {
+    if rest == "login" || rest.starts_with("login ") {
+        let handle = rest.strip_prefix("login").unwrap_or("").trim();
         *ran = true;
-        m::login();
-        game.native_chat("atmospheric: logging in…");
+        if handle.is_empty() {
+            m::login();
+            game.native_chat("atmospheric: logging in with the saved app password…");
+        } else {
+            m::login_oauth(handle);
+            game.native_chat(&format!(
+                "atmospheric: starting OAuth login for {handle} — finish it in the browser window that opens…"
+            ));
+        }
     } else if rest == "notifications" {
         *ran = true;
         m::refresh_notifications();

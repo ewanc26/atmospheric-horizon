@@ -58,6 +58,10 @@ pub struct Settings {
 pub enum GameCommand {
     /// Log in with the configured credentials (app-password flow).
     Login,
+    /// Log in with localhost OAuth (M8): the worker resolves the handle, opens
+    /// the browser at the authorization server, and completes the loopback
+    /// redirect.
+    LoginOAuth { handle: String },
     /// Replace the settings file with these settings.
     SaveConfig { settings: Settings },
     /// Post plain text to Bluesky.
@@ -158,6 +162,8 @@ pub enum ModEvent {
     Posted { uri: String },
     /// Something failed; carries a HUD-friendly message.
     Failed { message: String },
+    /// The OAuth authorize URL to open in a browser (M8).
+    OAuthAuthorize { url: String },
     /// The latest notification digest (M4).
     Notifications { items: Vec<NotificationDigest> },
 }
@@ -176,6 +182,7 @@ pub fn status_text(event: &ModEvent) -> String {
         }
         ModEvent::Posted { uri } => format!("atmospheric: posted {uri}"),
         ModEvent::Failed { message } => format!("atmospheric: {message}"),
+        ModEvent::OAuthAuthorize { url } => format!("atmospheric: finish login at {url}"),
         ModEvent::Notifications { items } => {
             if items.is_empty() {
                 "atmospheric: no new notifications".into()
@@ -299,6 +306,15 @@ pub fn login() {
     send(GameCommand::Login);
 }
 
+/// Ask the worker to log in with localhost OAuth for this handle (M8). The
+/// worker opens the system browser at the authorization server and completes
+/// the loopback redirect.
+pub fn login_oauth(handle: &str) {
+    send(GameCommand::LoginOAuth {
+        handle: handle.into(),
+    });
+}
+
 /// Ask the worker to post these settings to the settings file.
 #[allow(dead_code)]
 pub fn save_config(settings: Settings) {
@@ -393,6 +409,7 @@ mod tests {
 
         // Game side -> worker: the commands the hooks send.
         login();
+        login_oauth("someone.example");
         post_text("hello from the game");
         post_chat("a chat line", true);
         post_snapshot(snapshot_from_player(
@@ -425,6 +442,10 @@ mod tests {
             command_rx.recv_timeout(std::time::Duration::from_secs(5)),
             Ok(GameCommand::Login)
         ));
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::LoginOAuth { handle }) => assert_eq!(handle, "someone.example"),
+            other => panic!("expected LoginOAuth, got {:?}", other),
+        }
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::PostText { text }) => assert_eq!(text, "hello from the game"),
             other => panic!("expected PostText, got {:?}", other),
@@ -540,6 +561,12 @@ mod tests {
             "atmospheric: login failed: nope"
         );
         assert_eq!(status_text(&ModEvent::Status("custom".into())), "custom");
+        assert_eq!(
+            status_text(&ModEvent::OAuthAuthorize {
+                url: "https://auth.example/authorize?request_uri=x".into()
+            }),
+            "atmospheric: finish login at https://auth.example/authorize?request_uri=x"
+        );
     }
 
     #[test]
