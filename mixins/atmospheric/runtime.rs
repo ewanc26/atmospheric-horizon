@@ -42,6 +42,8 @@ pub struct Settings {
     pub app_password: String,
     pub poll_interval_secs: u64,
     pub post_death_messages: bool,
+    pub post_chat_messages: bool,
+    pub chat_server_id: String,
 }
 
 /// Commands the game side sends to the worker thread.
@@ -64,6 +66,10 @@ pub enum GameCommand {
     },
     /// Poll notifications now (the worker also does this on a timer, M4).
     RefreshNotifications,
+    /// Publish a chat message as an `at.atpcraft.player.chat` record (M5,
+    /// atpcraft port). `automatic` marks chat-hook messages, which the worker
+    /// only publishes when `post_chat_messages` is enabled.
+    PostChat { message: String, automatic: bool },
     /// Stop the worker thread.
     Shutdown,
 }
@@ -271,6 +277,17 @@ pub fn refresh_notifications() {
     send(GameCommand::RefreshNotifications);
 }
 
+/// Ask the worker to publish a chat message as an `at.atpcraft.player.chat`
+/// record. `automatic` is true for messages the chat hook mirrored (published
+/// only when `post_chat_messages` is enabled), false for the explicit
+/// `/atmospheric chat` command.
+pub fn post_chat(message: &str, automatic: bool) {
+    send(GameCommand::PostChat {
+        message: message.into(),
+        automatic,
+    });
+}
+
 /// Ask the worker to stop.
 #[allow(dead_code)]
 pub fn shutdown() {
@@ -293,6 +310,7 @@ mod tests {
         // Game side -> worker: the commands the hooks send.
         login();
         post_text("hello from the game");
+        post_chat("a chat line", true);
         assert!(!post_screenshot("no screenshot yet"));
         remember_screenshot("/tmp/shots/2026-11-12_07.00.00.png");
         assert_eq!(
@@ -306,6 +324,8 @@ mod tests {
             app_password: "abcd-1234-efgh-5678".into(),
             poll_interval_secs: 30,
             post_death_messages: false,
+            post_chat_messages: false,
+            chat_server_id: "horizon-client".into(),
         });
         shutdown();
         assert!(matches!(
@@ -315,6 +335,13 @@ mod tests {
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::PostText { text }) => assert_eq!(text, "hello from the game"),
             other => panic!("expected PostText, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::PostChat { message, automatic }) => {
+                assert_eq!(message, "a chat line");
+                assert!(automatic);
+            }
+            other => panic!("expected PostChat, got {:?}", other),
         }
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::PostImage {

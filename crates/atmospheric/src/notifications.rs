@@ -77,19 +77,12 @@ pub fn digest_of(notification: &list_notifications::Notification) -> Notificatio
     }
 }
 
-/// Poll `app.bsky.notification.listNotifications` and return the new digests,
-/// advancing `cursor` past everything shown. The cursor persists under the
-/// mod's storage folder (written by the worker) so restarts do not re-show
-/// old notifications — the pattern bsky-bot-sdk uses with `seenAt`.
-pub async fn poll(agent: &Agent, cursor: &mut SeenCursor) -> Result<Vec<NotificationDigest>> {
-    let seen_at = match &cursor.seen_at {
-        Some(stored) => Some(
-            stored
-                .parse()
-                .map_err(|_| AtmosphericError::Message(format!("bad stored seen_at: {stored}")))?,
-        ),
-        None => None,
-    };
+/// One listNotifications call. Split out so `poll` can retry without the
+/// `seenAt` hint when a PDS rejects it.
+async fn poll_once(
+    agent: &Agent,
+    seen_at: Option<atrium_api::types::string::Datetime>,
+) -> Result<list_notifications::OutputData> {
     let params = list_notifications::Parameters::from(list_notifications::ParametersData {
         cursor: None,
         limit: Some(
@@ -107,8 +100,38 @@ pub async fn poll(agent: &Agent, cursor: &mut SeenCursor) -> Result<Vec<Notifica
         .list_notifications(params)
         .await
         .map_err(AtmosphericError::protocol)?;
+    Ok(output.data)
+}
+
+/// Whether the error is a PDS rejecting the `seenAt` parameter (seen on some
+/// third-party PDSs); the local cursor still dedupes in that case.
+fn rejects_seen_at(error: &AtmosphericError) -> bool {
+    error.to_string().to_lowercase().contains("seenat")
+}
+
+/// Poll `app.bsky.notification.listNotifications` and return the new digests,
+/// advancing `cursor` past everything shown. The cursor persists under the
+/// mod's storage folder (written by the worker) so restarts do not re-show
+/// old notifications — the pattern bsky-bot-sdk uses with `seenAt`. Some PDSs
+/// reject the `seenAt` hint outright; those polls are retried without it and
+/// the local cursor alone dedupes.
+pub async fn poll(agent: &Agent, cursor: &mut SeenCursor) -> Result<Vec<NotificationDigest>> {
+    let seen_at = match &cursor.seen_at {
+        Some(stored) => Some(
+            stored
+                .parse()
+                .map_err(|_| AtmosphericError::Message(format!("bad stored seen_at: {stored}")))?,
+        ),
+        None => None,
+    };
+    let had_seen_at = seen_at.is_some();
+    let data = match poll_once(agent, seen_at).await {
+        Ok(data) => data,
+        Err(error) if had_seen_at && rejects_seen_at(&error) => poll_once(agent, None).await?,
+        Err(error) => return Err(error),
+    };
     let mut digests = Vec::new();
-    for notification in &output.data.notifications {
+    for notification in &data.notifications {
         let indexed_at = api_datetime(&notification.data.indexed_at);
         if cursor.should_show(&indexed_at) {
             digests.push(digest_of(notification));
