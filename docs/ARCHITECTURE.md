@@ -115,6 +115,28 @@ PDS — see "Manual check" below.
   shows; against a real PDS `pds_check` posted an actual in-game screenshot
   (see PR).
 
+### M4: notification polling
+
+- `notifications::poll` calls `app.bsky.notification.listNotifications` with
+  the persisted `seenAt`, reduces each item to a `NotificationDigest`
+  (uri, author handle, reason, 80-char text snippet), and advances the
+  `SeenCursor` past the newest `indexedAt`. The worker persists the cursor to
+  `<storage dir>/cursor.json` after any poll that showed something, so
+  restarts do not re-show old notifications (the bsky-bot-sdk pattern).
+- The worker owns a `tokio::time::Interval` (from `config.poll_interval_secs`,
+  minimum 5 s), recreated on each successful login, selected against the
+  command channel with `tokio::select!`. Timer ticks poll silently;
+  `Command::RefreshNotifications` (sent by `/atmospheric notifications`) polls
+  and always reports, emitting `Event::Notifications { items }`.
+- Game side: `ModEvent::Notifications` mirrors the digest with plain data, and
+  the HUD status line summarizes it ("atmospheric: 2 new: like from alice…").
+- Verified: offline worker tests against the stub PDS (which answers
+  `listNotifications`) assert the first poll returns both notifications and a
+  refresh after it returns none, and that `cursor.json` is persisted at the
+  newest timestamp; in the modded game `/atmospheric notifications` shows its
+  chat feedback; against a real PDS `pds_check` prints the digest event after
+  login.
+
 ### Manual check against a real PDS
 
 `crates/atmospheric/examples/pds_check.rs` spawns the worker exactly as the
