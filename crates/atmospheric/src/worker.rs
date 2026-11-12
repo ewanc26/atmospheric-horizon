@@ -161,16 +161,49 @@ impl Worker {
                     Err(error) => self.fail(error.to_string()),
                 }
             }
-            Command::PostImage { .. } => {
-                // TODO(M3): actions::post_image is still `todo!` — answer
-                // instead of panicking the worker thread.
-                self.fail("image posting lands in M3");
-            }
+            Command::PostImage {
+                path,
+                alt_text,
+                text,
+            } => match self.post_image(&path, &alt_text, text.as_deref()).await {
+                Ok(uri) => self.emit(Event::Posted { uri }),
+                Err(error) => self.fail(error.to_string()),
+            },
             Command::RefreshNotifications => {
                 // TODO(M4): notifications::poll with the persisted cursor.
                 self.fail("notification polling lands in M4");
             }
         }
+    }
+
+    /// Post an image file: read it here (the worker owns disk I/O), check it
+    /// is an image of a size the PDS accepts, then upload + post it.
+    async fn post_image(
+        &self,
+        path: &str,
+        alt_text: &str,
+        text: Option<&str>,
+    ) -> crate::error::Result<String> {
+        let (Some(agent), Some(did)) = (&self.agent, &self.did) else {
+            return Err(AtmosphericError::NotLoggedIn);
+        };
+        let bytes = std::fs::read(path).map_err(|error| {
+            AtmosphericError::Message(format!("could not read {path}: {error}"))
+        })?;
+        if bytes.len() > actions::MAX_IMAGE_BYTES {
+            return Err(AtmosphericError::Message(format!(
+                "{path} is {} bytes; the limit is {}",
+                bytes.len(),
+                actions::MAX_IMAGE_BYTES
+            )));
+        }
+        // Sniffed to reject non-images early; the PDS re-detects on upload.
+        if actions::image_mime(&bytes).is_none() {
+            return Err(AtmosphericError::Message(format!(
+                "{path} is not a PNG, JPEG, GIF or WebP image"
+            )));
+        }
+        actions::post_image(agent, did, bytes, alt_text, text).await
     }
 
     /// App-password login: read the settings file, log in, cache the agent
@@ -254,11 +287,12 @@ mod tests {
         std::fs::write(dir.join(CONFIG_FILE), config.to_json().unwrap()).unwrap();
     }
 
-    /// One captured HTTP request: the path and the JSON body.
+    /// One captured HTTP request: the path and the body (raw and as text).
     #[derive(Debug, Clone)]
     struct Captured {
         path: String,
         body: String,
+        body_bytes: Vec<u8>,
         authorized: bool,
     }
 
@@ -365,20 +399,21 @@ mod tests {
         requests.lock().unwrap().push(Captured {
             path: path.clone(),
             body: body_string.clone(),
+            body_bytes: body.clone(),
             authorized,
         });
 
-        let (status, payload) = match path.as_str() {
+        let (status, payload): (&str, String) = match path.as_str() {
             "/xrpc/com.atproto.server.createSession" => {
                 if accept_bad_password || !body_string.contains("correct-horse") {
                     (
                         "401 Unauthorized",
-                        r#"{"error":"AuthenticationRequired","message":"Invalid identifier or password"}"#,
+                        r#"{"error":"AuthenticationRequired","message":"Invalid identifier or password"}"#.to_string(),
                     )
                 } else {
                     (
                         "200 OK",
-                        r#"{"did":"did:plc:stubuser","handle":"stub.test","accessJwt":"stub-access","refreshJwt":"stub-refresh","active":true}"#,
+                        r#"{"did":"did:plc:stubuser","handle":"stub.test","accessJwt":"stub-access","refreshJwt":"stub-refresh","active":true}"#.to_string(),
                     )
                 }
             }
@@ -386,12 +421,29 @@ mod tests {
                 if authorized {
                     (
                         "200 OK",
-                        r#"{"did":"did:plc:stubuser","handle":"stub.test","active":true}"#,
+                        r#"{"did":"did:plc:stubuser","handle":"stub.test","active":true}"#
+                            .to_string(),
                     )
                 } else {
                     (
                         "401 Unauthorized",
-                        r#"{"error":"ExpiredToken","message":"no"}"#,
+                        r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
+                    )
+                }
+            }
+            "/xrpc/com.atproto.repo.uploadBlob" => {
+                if authorized {
+                    let size = body.len();
+                    (
+                        "200 OK",
+                        format!(
+                            r#"{{"blob":{{"$type":"blob","ref":{{"$link":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy"}},"mimeType":"image/png","size":{size}}}}}"#
+                        ),
+                    )
+                } else {
+                    (
+                        "401 Unauthorized",
+                        r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
                     )
                 }
             }
@@ -399,16 +451,19 @@ mod tests {
                 if authorized {
                     (
                         "200 OK",
-                        r#"{"uri":"at://did:plc:stubuser/app.bsky.feed.post/3jub4stub","cid":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy"}"#,
+                        r#"{"uri":"at://did:plc:stubuser/app.bsky.feed.post/3jub4stub","cid":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy"}"#.to_string(),
                     )
                 } else {
                     (
                         "401 Unauthorized",
-                        r#"{"error":"ExpiredToken","message":"no"}"#,
+                        r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
                     )
                 }
             }
-            _ => ("404 Not Found", r#"{"error":"UnknownEndpoint"}"#),
+            _ => (
+                "404 Not Found",
+                r#"{"error":"UnknownEndpoint"}"#.to_string(),
+            ),
         };
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
@@ -603,6 +658,126 @@ mod tests {
         assert_eq!(back.app_password, config.app_password);
         assert_eq!(back.poll_interval_secs, 30);
         assert!(back.post_death_messages);
+    }
+
+    /// A minimal PNG header (magic + IHDR with 2560x1440) for image tests.
+    fn tiny_png() -> Vec<u8> {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&2560u32.to_be_bytes());
+        png.extend_from_slice(&1440u32.to_be_bytes());
+        png.extend_from_slice(&[8, 6, 0, 0, 0]); // bit depth, colour type, …
+        png
+    }
+
+    #[test]
+    fn post_image_uploads_the_blob_and_posts_the_embed() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("post-image");
+        write_config(&dir, &test_config(pds.url.clone()));
+        let png = tiny_png();
+        let shot = dir.join("shot.png");
+        std::fs::write(&shot, &png).unwrap();
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        command_tx
+            .send(Command::PostImage {
+                path: shot.display().to_string(),
+                alt_text: "test screenshot".into(),
+                text: Some("with a caption".into()),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Posted { .. })) {
+            Event::Posted { uri } => {
+                assert_eq!(uri, "at://did:plc:stubuser/app.bsky.feed.post/3jub4stub")
+            }
+            other => panic!("expected Posted, got {other:?}"),
+        }
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let requests = pds.requests();
+        let upload = requests
+            .iter()
+            .find(|r| r.path == "/xrpc/com.atproto.repo.uploadBlob")
+            .expect("uploadBlob was called");
+        assert!(upload.authorized);
+        assert_eq!(upload.body_bytes, png, "the raw image bytes were uploaded");
+        let create_record = requests
+            .iter()
+            .find(|r| r.path == "/xrpc/com.atproto.repo.createRecord")
+            .expect("createRecord was called");
+        let body: serde_json::Value = serde_json::from_str(&create_record.body).unwrap();
+        assert_eq!(body["record"]["embed"]["$type"], "app.bsky.embed.images");
+        assert_eq!(
+            body["record"]["embed"]["images"][0]["alt"],
+            "test screenshot"
+        );
+        assert_eq!(
+            body["record"]["embed"]["images"][0]["image"]["$type"],
+            "blob"
+        );
+        assert_eq!(
+            body["record"]["embed"]["images"][0]["aspectRatio"]["width"],
+            2560
+        );
+        assert_eq!(
+            body["record"]["embed"]["images"][0]["aspectRatio"]["height"],
+            1440
+        );
+        assert_eq!(body["record"]["text"], "with a caption");
+    }
+
+    #[test]
+    fn post_image_rejects_missing_and_non_image_files_without_uploading() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("post-image-bad");
+        write_config(&dir, &test_config(pds.url.clone()));
+        let not_image = dir.join("notes.txt");
+        std::fs::write(&not_image, b"just text").unwrap();
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir.clone());
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+
+        command_tx
+            .send(Command::PostImage {
+                path: dir.join("missing.png").display().to_string(),
+                alt_text: "x".into(),
+                text: None,
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => assert!(message.contains("could not read")),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        command_tx
+            .send(Command::PostImage {
+                path: not_image.display().to_string(),
+                alt_text: "x".into(),
+                text: None,
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => assert!(message.contains("not a PNG, JPEG, GIF or WebP")),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        assert!(
+            !pds.requests()
+                .iter()
+                .any(|r| r.path == "/xrpc/com.atproto.repo.uploadBlob"),
+            "nothing was uploaded for the rejected files"
+        );
     }
 
     #[test]

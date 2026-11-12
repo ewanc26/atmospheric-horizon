@@ -24,7 +24,7 @@ kind = "HEAD"
 helper = "list.rs"
 bindings = [{ name = "mods", ty = "&mut Vec<crate::game::native_hooks::NativeMod>", value = "&mut *mods" }]
 
-# The keybind posts the player's location to Bluesky.
+# The keybinds: post the player's location, or the latest F2 screenshot.
 [[injection]]
 id = "key"
 hook = "key"
@@ -35,6 +35,18 @@ bindings = [
   { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
   { name = "key", ty = "&str", value = "key" },
   { name = "pressed", ty = "bool", value = "pressed" },
+]
+
+# Remember each finished F2 screenshot's path for the post-screenshot
+# keybind (a raw target, not one of the named hook points).
+[[injection]]
+id = "screenshot"
+kind = "HEAD"
+target = "horizon_client::game::chat::Game<'_>::finish_screenshot"
+helper = "shot.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "result", ty = "&std::result::Result<[u32; 2], String>", value = "result" },
 ]
 
 # /atmospheric login and /atmospheric post <text>.
