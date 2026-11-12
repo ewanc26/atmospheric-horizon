@@ -10,6 +10,7 @@ pub mod actions;
 pub mod config;
 pub mod error;
 pub mod notifications;
+pub mod oauth;
 pub mod records;
 pub mod session;
 pub mod signing;
@@ -24,6 +25,9 @@ pub use error::AtmosphericError;
 pub enum Command {
     /// Log in with the configured credentials (app-password flow).
     Login,
+    /// Log in with localhost OAuth (M8): resolve the handle, open the browser
+    /// at the authorization server, and exchange the loopback redirect.
+    LoginOAuth { handle: String },
     /// Replace the settings file with these settings.
     SaveConfig { config: Config },
     /// Post plain text to Bluesky.
@@ -63,6 +67,9 @@ pub enum Event {
     Posted { uri: String },
     /// Something failed; carries a HUD-friendly message.
     Failed { message: String },
+    /// The OAuth authorize URL to open in a browser (M8); the worker also
+    /// tries to open it itself.
+    OAuthAuthorize { url: String },
     /// The latest notification digest for the HUD panel.
     Notifications {
         items: Vec<notifications::NotificationDigest>,
