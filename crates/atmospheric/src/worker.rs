@@ -10,6 +10,7 @@ use crate::{
     Command, Config, Event, actions,
     error::AtmosphericError,
     notifications::{self, SeenCursor},
+    oauth::{self, DpopState, SharedDpop},
     records::{self, SnapshotRecord},
     session::{self, Agent, SessionState, StoredSession},
     signing::{self, SigningKey},
@@ -38,12 +39,16 @@ pub struct WorkerOptions {
     /// The mod's own storage folder (Horizon: `native_data_dir("atmospheric")`,
     /// i.e. `horizon-mods/.horizon-mod-data/atmospheric/`). Never a world save.
     pub storage_dir: PathBuf,
+    /// Where handles and DIDs resolve for OAuth logins. The public services
+    /// by default; tests point this at a stub.
+    pub resolver: oauth::Resolver,
 }
 
 impl WorkerOptions {
     pub fn new(storage_dir: impl Into<PathBuf>) -> Self {
         Self {
             storage_dir: storage_dir.into(),
+            resolver: oauth::Resolver::default(),
         }
     }
 }
@@ -77,6 +82,11 @@ pub fn spawn(
                 // sender, this thread ends, `rx` yields `None`, and the loop
                 // exits.
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+                // Results of spawned OAuth logins (M8) come back here, so the
+                // loop stays responsive while the browser is open.
+                let (oauth_tx, mut oauth_rx) = tokio::sync::mpsc::unbounded_channel::<
+                    crate::error::Result<oauth::OAuthLogin>,
+                >();
                 let bridge = std::thread::Builder::new()
                     .name("atmospheric-commands".into())
                     .spawn(move || {
@@ -93,7 +103,7 @@ pub fn spawn(
                     return;
                 }
 
-                let mut worker = Worker::new(options, events);
+                let mut worker = Worker::new(options, events, oauth_tx);
                 worker.emit(Event::Session(SessionState::LoggedOut));
                 // Resume a persisted session (refresh token) if there is one.
                 worker.try_resume().await;
@@ -119,6 +129,27 @@ pub fn spawn(
                                         );
                                     }
                                 }
+                            }
+                        }
+                        result = oauth_rx.recv() => {
+                            match result {
+                                Some(Ok(login)) => {
+                                    worker.finish_login_oauth(login).await;
+                                    if worker.is_logged_in() {
+                                        poll = tokio::time::interval(Duration::from_secs(
+                                            worker.poll_interval_secs,
+                                        ));
+                                        poll.set_missed_tick_behavior(
+                                            tokio::time::MissedTickBehavior::Delay,
+                                        );
+                                    }
+                                }
+                                Some(Err(error)) => worker.emit(Event::Session(
+                                    SessionState::Failed {
+                                        message: error.to_string(),
+                                    },
+                                )),
+                                None => {}
                             }
                         }
                         _ = poll.tick() => {
@@ -162,11 +193,24 @@ struct Worker {
     signing_key: Option<SigningKey>,
     /// The last published snapshot version (anti-rollback), persisted.
     snapshot_version: i64,
+    /// The shared DPoP state (OAuth mode): installed into every agent built
+    /// here, and updated when the access token is refreshed.
+    dpop: SharedDpop,
+    /// The HTTP client for the raw OAuth calls (resolution, PAR, token).
+    http: reqwest::Client,
+    /// Where handles/DIDs resolve for OAuth logins.
+    resolver: oauth::Resolver,
+    /// Where spawned OAuth logins report their result.
+    oauth_tx: tokio::sync::mpsc::UnboundedSender<crate::error::Result<oauth::OAuthLogin>>,
     events: Sender<Event>,
 }
 
 impl Worker {
-    fn new(options: WorkerOptions, events: Sender<Event>) -> Self {
+    fn new(
+        options: WorkerOptions,
+        events: Sender<Event>,
+        oauth_tx: tokio::sync::mpsc::UnboundedSender<crate::error::Result<oauth::OAuthLogin>>,
+    ) -> Self {
         // The seen-cursor persists across restarts, so old notifications are
         // not re-shown; a missing file just means "everything is new".
         let cursor = std::fs::read_to_string(options.storage_dir.join(CURSOR_FILE))
@@ -197,6 +241,13 @@ impl Worker {
             identifier: String::new(),
             signing_key: None,
             snapshot_version,
+            dpop: oauth::new_shared_dpop(),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+            resolver: options.resolver.clone(),
+            oauth_tx,
             events,
         }
     }
@@ -241,7 +292,9 @@ impl Worker {
                 }
             }
             Command::Login => self.login().await,
+            Command::LoginOAuth { handle } => self.start_login_oauth(handle),
             Command::PostText { text } => {
+                self.ensure_oauth_fresh().await;
                 let result = match (&self.agent, &self.did) {
                     (Some(agent), Some(did)) => actions::post_text(agent, did, &text).await,
                     _ => Err(AtmosphericError::NotLoggedIn),
@@ -255,12 +308,19 @@ impl Worker {
                 path,
                 alt_text,
                 text,
-            } => match self.post_image(&path, &alt_text, text.as_deref()).await {
-                Ok(uri) => self.emit(Event::Posted { uri }),
-                Err(error) => self.fail(error.to_string()),
-            },
-            Command::RefreshNotifications => self.poll_notifications(true).await,
+            } => {
+                self.ensure_oauth_fresh().await;
+                match self.post_image(&path, &alt_text, text.as_deref()).await {
+                    Ok(uri) => self.emit(Event::Posted { uri }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::RefreshNotifications => {
+                self.ensure_oauth_fresh().await;
+                self.poll_notifications(true).await;
+            }
             Command::PostSnapshot { mut summary } => {
+                self.ensure_oauth_fresh().await;
                 let result = self.post_snapshot(&mut summary).await;
                 match result {
                     Ok(uri) => self.emit(Event::Posted { uri }),
@@ -271,6 +331,7 @@ impl Worker {
                 if !self.post_death_messages {
                     return;
                 }
+                self.ensure_oauth_fresh().await;
                 let result = match (&self.agent, &self.did) {
                     (Some(agent), Some(did)) => {
                         actions::post_text(agent, did, &format!("☠ {text}")).await
@@ -285,6 +346,7 @@ impl Worker {
             Command::Logout => {
                 self.agent = None;
                 self.did = None;
+                *self.dpop.lock().unwrap() = None;
                 self.stored_session = None;
                 let _ = std::fs::remove_file(self.storage_dir.join(SESSION_FILE));
                 self.emit(Event::Session(SessionState::LoggedOut));
@@ -295,6 +357,7 @@ impl Worker {
                 if automatic && !self.post_chat_messages {
                     return;
                 }
+                self.ensure_oauth_fresh().await;
                 let result = match (&self.agent, &self.did) {
                     (Some(agent), Some(did)) => {
                         actions::post_chat(
@@ -478,7 +541,7 @@ impl Worker {
             }));
             return;
         }
-        match session::login(&config).await {
+        match session::login(&config, self.dpop.clone()).await {
             Ok((agent, stored)) => {
                 // Session check after login, as the docs promise.
                 if let Err(error) = agent.api.com.atproto.server.get_session().await {
@@ -510,13 +573,174 @@ impl Worker {
         }
     }
 
+    /// Start a localhost OAuth login (M8). The browser flow runs on a spawned
+    /// task so the command loop stays responsive (Shutdown works while the
+    /// browser is open); its result arrives on the oauth channel.
+    fn start_login_oauth(&mut self, handle: String) {
+        self.emit(Event::Session(SessionState::LoggingIn));
+        // The client_id comes from the settings file when set (hosted client
+        // metadata URL); otherwise the loopback default.
+        let client_id = self
+            .load_config()
+            .map(|config| config.oauth_client_id(oauth::DEFAULT_SCOPE))
+            .unwrap_or_else(|_| oauth::client_id(oauth::DEFAULT_SCOPE));
+        let http = self.http.clone();
+        let events = self.events.clone();
+        let oauth_tx = self.oauth_tx.clone();
+        let resolver = self.resolver.clone();
+        tokio::spawn(async move {
+            let result = oauth::run_login(
+                &http,
+                &resolver,
+                &handle,
+                &client_id,
+                oauth::DEFAULT_SCOPE,
+                oauth::REDIRECT_WAIT,
+                &events,
+            )
+            .await;
+            let _ = oauth_tx.send(result);
+        });
+    }
+
+    /// Apply a finished OAuth login: build the DPoP-signed agent, validate the
+    /// session, persist the refresh token and DPoP key, report LoggedIn.
+    async fn finish_login_oauth(&mut self, login: oauth::OAuthLogin) {
+        let oauth::OAuthLogin {
+            tokens,
+            key,
+            pds_url,
+            did,
+            handle,
+            token_endpoint,
+            issuer,
+            client_id,
+            scope,
+        } = login;
+        match session::agent_for_oauth(&pds_url, &did, &handle, &tokens, key.clone()).await {
+            Ok((agent, dpop)) => {
+                self.agent = Some(agent);
+                self.did = Some(did.clone());
+                self.dpop = dpop;
+                self.identifier = handle.clone();
+                // The settings file may carry newer flags/intervals.
+                if let Ok(config) = self.load_config() {
+                    self.poll_interval_secs = config.poll_interval_secs.max(5);
+                    self.post_chat_messages = config.post_chat_messages;
+                    self.post_death_messages = config.post_death_messages;
+                    self.persist_session = config.persist_session;
+                    self.chat_server_id = config.chat_server_id.clone();
+                }
+                let stored = StoredSession {
+                    pds_url,
+                    did: did.clone(),
+                    handle: handle.clone(),
+                    refresh_jwt: tokens.refresh_token.clone().unwrap_or_default(),
+                    oauth: Some(session::StoredOAuth {
+                        dpop_jwk: key.to_jwk_json(),
+                        token_endpoint,
+                        issuer,
+                        client_id,
+                        scope,
+                    }),
+                };
+                self.stored_session = Some(stored.clone());
+                if self.persist_session
+                    && let Err(error) = self.save_session(&stored)
+                {
+                    self.fail(format!("could not persist the session file: {error}"));
+                }
+                self.emit(Event::Session(SessionState::LoggedIn { did }));
+            }
+            Err(error) => self.emit(Event::Session(SessionState::Failed {
+                message: error.to_string(),
+            })),
+        }
+    }
+
+    /// Refresh the OAuth access token when it is close to expiry. The agent's
+    /// own ExpiredToken auto-refresh only knows the app-password
+    /// `refreshSession` endpoint, which an OAuth session cannot use, so the
+    /// worker refreshes proactively at the authorization server instead.
+    async fn ensure_oauth_fresh(&mut self) {
+        let needs_refresh = self
+            .dpop
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|state| state.expires_within(60));
+        if !needs_refresh {
+            return;
+        }
+        let (Some(state), Some(mut stored)) = (
+            self.dpop.lock().unwrap().clone(),
+            self.stored_session.clone(),
+        ) else {
+            return;
+        };
+        let Some(oauth) = stored.oauth.clone() else {
+            return;
+        };
+        match oauth::refresh(
+            &self.http,
+            &oauth.token_endpoint,
+            &oauth.client_id,
+            &state.refresh_token,
+            &state.key,
+        )
+        .await
+        {
+            Ok(tokens) => {
+                *self.dpop.lock().unwrap() = Some(DpopState::from_tokens(state.key, &tokens));
+                stored.refresh_jwt = tokens.refresh_token.clone().unwrap_or(stored.refresh_jwt);
+                self.stored_session = Some(stored.clone());
+                if self.persist_session
+                    && let Err(error) = self.save_session(&stored)
+                {
+                    self.fail(format!("could not persist the session file: {error}"));
+                }
+            }
+            Err(error) => self.fail(format!("could not refresh the OAuth session: {error}")),
+        }
+    }
+
     /// Resume a persisted session (refresh token) without the app password.
     /// Runs once at startup; failure just leaves the worker logged out.
     async fn try_resume(&mut self) {
         let Some(stored) = self.stored_session.clone() else {
             return;
         };
-        match session::resume(&stored).await {
+        // An OAuth session resumes through the authorization server's token
+        // endpoint (DPoP-bound refresh), not the PDS's refreshSession.
+        if let Some(oauth) = &stored.oauth {
+            match session::resume_oauth(&self.http, &stored, oauth).await {
+                Ok((agent, dpop, rotated)) => {
+                    let did = rotated.did.clone();
+                    self.agent = Some(agent);
+                    self.did = Some(did.clone());
+                    self.dpop = dpop;
+                    self.identifier = rotated.handle.clone();
+                    self.stored_session = Some(rotated.clone());
+                    if let Err(error) = self.save_session(&rotated) {
+                        self.fail(format!("could not persist the session file: {error}"));
+                    }
+                    if let Ok(config) = self.load_config() {
+                        self.poll_interval_secs = config.poll_interval_secs.max(5);
+                        self.post_chat_messages = config.post_chat_messages;
+                        self.post_death_messages = config.post_death_messages;
+                        self.persist_session = config.persist_session;
+                        self.chat_server_id = config.chat_server_id.clone();
+                    }
+                    self.emit(Event::Session(SessionState::LoggedIn { did }));
+                }
+                Err(_) => {
+                    // Expired/revoked OAuth refresh token: stay logged out.
+                    self.stored_session = None;
+                }
+            }
+            return;
+        }
+        match session::resume(&stored, self.dpop.clone()).await {
             Ok((agent, stored)) => {
                 let did = stored.did.clone();
                 self.agent = Some(agent);
@@ -590,6 +814,7 @@ mod tests {
             post_chat_messages: false,
             chat_server_id: "test-server".into(),
             persist_session: true,
+            oauth_client_id: String::new(),
         }
     }
 
@@ -1016,6 +1241,7 @@ mod tests {
             post_chat_messages: true,
             chat_server_id: "my-server".into(),
             persist_session: true,
+            oauth_client_id: String::new(),
         };
         command_tx
             .send(Command::SaveConfig {
@@ -1478,6 +1704,7 @@ mod tests {
             did: "did:plc:stubuser".into(),
             handle: "stub.test".into(),
             refresh_jwt: "stub-refresh".into(),
+            oauth: None,
         };
         std::fs::write(
             dir.join(SESSION_FILE),
@@ -1614,5 +1841,250 @@ mod tests {
         }
         command_tx.send(Command::Shutdown).unwrap();
         handle.join().unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // M8: localhost OAuth login
+    // -----------------------------------------------------------------------
+
+    use crate::oauth::tests::{StubAuthServer, follow_authorize_redirect};
+
+    /// Spawn a worker whose handle/DID resolution points at the stub.
+    fn spawn_worker_at(
+        storage_dir: PathBuf,
+        stub: &StubAuthServer,
+    ) -> (
+        mpsc::Sender<Command>,
+        mpsc::Receiver<Event>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (command_tx, command_rx) = mpsc::channel::<Command>();
+        let (event_tx, event_rx) = mpsc::channel::<Event>();
+        let options = WorkerOptions {
+            storage_dir,
+            resolver: stub.resolver(),
+        };
+        let handle = spawn(command_rx, event_tx, options);
+        (command_tx, event_rx, handle)
+    }
+
+    /// Drive the browser side of an OAuth login: the worker emitted the
+    /// authorize URL; follow it and land on the loopback listener.
+    fn simulate_browser(event_rx: &mpsc::Receiver<Event>) -> String {
+        match wait_for(event_rx, |e| matches!(e, Event::OAuthAuthorize { .. })) {
+            Event::OAuthAuthorize { url } => {
+                let status = follow_authorize_redirect(&url);
+                assert!(
+                    status.contains("200"),
+                    "the loopback page accepts the redirect: {status}"
+                );
+                url
+            }
+            other => panic!("expected OAuthAuthorize, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn login_oauth_full_flow_then_post_text_with_dpop() {
+        let stub = StubAuthServer::start(false);
+        let dir = temp_dir("oauth-login");
+        let (command_tx, event_rx, handle) = spawn_worker_at(dir.clone(), &stub);
+
+        command_tx
+            .send(Command::LoginOAuth {
+                handle: "stub.test".into(),
+            })
+            .unwrap();
+        // LoggingIn first, then the authorize URL for the browser.
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggingIn))
+        });
+        let authorize_url = simulate_browser(&event_rx);
+        assert!(
+            authorize_url.starts_with(&format!("{}/authorize?", stub.url)),
+            "the authorize URL points at the discovered authorization server"
+        );
+        match wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        }) {
+            Event::Session(SessionState::LoggedIn { did }) => assert_eq!(did, "did:plc:stubuser"),
+            other => panic!("expected Session(LoggedIn), got {other:?}"),
+        }
+
+        // A post goes out with `Authorization: DPoP …` and a proof (the stub
+        // verifies both and would panic the connection thread otherwise).
+        command_tx
+            .send(Command::PostText {
+                text: "hello over oauth".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Posted { .. })) {
+            Event::Posted { uri } => {
+                assert_eq!(uri, "at://did:plc:stubuser/app.bsky.feed.post/stubrec")
+            }
+            other => panic!("expected Posted, got {other:?}"),
+        }
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let requests = stub.requests();
+        let create_record = requests
+            .iter()
+            .find(|r| r.path == "/xrpc/com.atproto.repo.createRecord")
+            .expect("createRecord was called");
+        assert_eq!(
+            create_record.authorization.as_deref(),
+            Some("DPoP stub-oauth-access-1")
+        );
+        assert!(create_record.dpop.is_some(), "a DPoP proof was sent");
+        let body: serde_json::Value = serde_json::from_str(&create_record.body).unwrap();
+        assert_eq!(body["record"]["text"], "hello over oauth");
+
+        // The session file carries the OAuth block (DPoP key + token endpoint),
+        // and never an app password.
+        let raw = std::fs::read_to_string(dir.join(SESSION_FILE)).unwrap();
+        let stored: session::StoredSession = serde_json::from_str(&raw).unwrap();
+        let oauth = stored.oauth.expect("the OAuth block is persisted");
+        assert_eq!(oauth.token_endpoint, format!("{}/token", stub.url));
+        assert_eq!(stored.refresh_jwt, "stub-oauth-refresh-1");
+        assert!(!raw.contains("password"));
+        // The persisted DPoP key rebuilds.
+        assert!(oauth::DpopKey::from_jwk_json(&oauth.dpop_jwk).is_ok());
+    }
+
+    #[test]
+    fn startup_resumes_a_persisted_oauth_session_via_dpop_refresh() {
+        let stub = StubAuthServer::start(false);
+        let dir = temp_dir("oauth-resume");
+        // A session.json as written by a previous OAuth login.
+        let key = oauth::DpopKey::generate();
+        let stored = session::StoredSession {
+            pds_url: stub.url.clone(),
+            did: "did:plc:stubuser".into(),
+            handle: "stub.test".into(),
+            refresh_jwt: "stub-oauth-refresh-1".into(),
+            oauth: Some(session::StoredOAuth {
+                dpop_jwk: key.to_jwk_json(),
+                token_endpoint: format!("{}/token", stub.url),
+                issuer: stub.url.clone(),
+                client_id: oauth::client_id(oauth::DEFAULT_SCOPE),
+                scope: oauth::DEFAULT_SCOPE.into(),
+            }),
+        };
+        std::fs::write(
+            dir.join(SESSION_FILE),
+            serde_json::to_string(&stored).unwrap(),
+        )
+        .unwrap();
+
+        let (command_tx, event_rx, handle) = spawn_worker_at(dir.clone(), &stub);
+        // No Login command: the startup resume logs in on its own.
+        match wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        }) {
+            Event::Session(SessionState::LoggedIn { did }) => assert_eq!(did, "did:plc:stubuser"),
+            other => panic!("expected Session(LoggedIn), got {other:?}"),
+        }
+
+        // Posting works straight away, with the refreshed token.
+        command_tx
+            .send(Command::PostText {
+                text: "after resume".into(),
+            })
+            .unwrap();
+        let _ = wait_for(&event_rx, |e| matches!(e, Event::Posted { .. }));
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let requests = stub.requests();
+        // The refresh grant went to the token endpoint with the stored
+        // DPoP-bound refresh token…
+        let token = requests
+            .iter()
+            .find(|r| r.path == "/token")
+            .expect("the token endpoint was called");
+        assert!(token.body.contains("grant_type=refresh_token"));
+        assert!(token.body.contains("stub-oauth-refresh-1"));
+        assert!(token.dpop.is_some(), "the refresh is DPoP-signed");
+        // …no app-password createSession happened…
+        assert!(
+            !requests
+                .iter()
+                .any(|r| r.path == "/xrpc/com.atproto.server.createSession"),
+            "no password login happened"
+        );
+        // …and the post used the rotated access token.
+        let create_record = requests
+            .iter()
+            .find(|r| r.path == "/xrpc/com.atproto.repo.createRecord")
+            .unwrap();
+        assert_eq!(
+            create_record.authorization.as_deref(),
+            Some("DPoP stub-oauth-access-2")
+        );
+        // The rotated refresh token was persisted.
+        let saved: session::StoredSession =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(SESSION_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(saved.refresh_jwt, "stub-oauth-refresh-2");
+    }
+
+    #[test]
+    fn login_oauth_with_a_mismatched_redirect_state_fails() {
+        let stub = StubAuthServer::start(true); // wrong_state
+        let dir = temp_dir("oauth-bad-state");
+        let (command_tx, event_rx, handle) = spawn_worker_at(dir.clone(), &stub);
+
+        command_tx
+            .send(Command::LoginOAuth {
+                handle: "stub.test".into(),
+            })
+            .unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggingIn))
+        });
+        match wait_for(&event_rx, |e| matches!(e, Event::OAuthAuthorize { .. })) {
+            Event::OAuthAuthorize { url } => {
+                let status = follow_authorize_redirect(&url);
+                assert!(
+                    status.contains("400"),
+                    "the bad state is rejected: {status}"
+                );
+            }
+            other => panic!("expected OAuthAuthorize, got {other:?}"),
+        }
+        match wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::Failed { .. }))
+        }) {
+            Event::Session(SessionState::Failed { message }) => {
+                assert!(message.contains("state"), "{message}")
+            }
+            other => panic!("expected Session(Failed), got {other:?}"),
+        }
+        // No session file was written for the failed login.
+        assert!(!std::path::Path::new(&dir.join(SESSION_FILE)).exists());
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn shutdown_stays_responsive_while_an_oauth_login_waits_for_the_browser() {
+        let stub = StubAuthServer::start(false);
+        let dir = temp_dir("oauth-shutdown");
+        let (command_tx, event_rx, handle) = spawn_worker_at(dir, &stub);
+
+        command_tx
+            .send(Command::LoginOAuth {
+                handle: "stub.test".into(),
+            })
+            .unwrap();
+        // The authorize URL arrives; nobody completes the redirect.
+        let _ = wait_for(&event_rx, |e| matches!(e, Event::OAuthAuthorize { .. }));
+        // Shutdown is honoured immediately even though the login task is
+        // still waiting on the loopback listener.
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+        assert!(event_rx.recv_timeout(Duration::from_millis(200)).is_err());
     }
 }
