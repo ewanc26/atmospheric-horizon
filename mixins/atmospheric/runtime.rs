@@ -150,7 +150,9 @@ static STATUS: OnceLock<Mutex<String>> = OnceLock::new();
 static LAST_SHOT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 fn status_slot() -> &'static Mutex<String> {
-    STATUS.get_or_init(|| Mutex::new("atmospheric: worker not attached".into()))
+    // Empty until the first worker event: with no worker attached (see
+    // issue #2) there is nothing worth showing, so the HUD box stays hidden.
+    STATUS.get_or_init(|| Mutex::new(String::new()))
 }
 
 fn last_shot_slot() -> &'static Mutex<Option<String>> {
@@ -202,12 +204,13 @@ pub fn drain_events(max: usize) -> Vec<ModEvent> {
     drained
 }
 
-/// The current HUD status line.
+/// The current HUD status line; empty until the first worker event, in which
+/// case the HUD draws nothing.
 pub fn status_line() -> String {
     status_slot()
         .lock()
         .map(|status| status.clone())
-        .unwrap_or_else(|_| "atmospheric: worker not attached".into())
+        .unwrap_or_default()
 }
 
 /// Send a command to the worker, if installed. Never blocks, never panics
@@ -284,6 +287,8 @@ mod tests {
     fn install_forwards_and_drains() {
         let (command_rx, event_tx) = install().expect("first install succeeds");
         assert!(install().is_none(), "second install fails");
+        // No worker event yet: the HUD line is empty, so nothing is drawn.
+        assert!(status_line().is_empty());
 
         // Game side -> worker: the commands the hooks send.
         login();
