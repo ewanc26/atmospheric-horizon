@@ -1,0 +1,30 @@
+[package]
+name = "atmospheric"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "AGPL-3.0-only"
+description = "AT Protocol client logic for the atmospheric Horizon mod — builds and tests without a game"
+
+[dependencies]
+# AT Protocol: generated lexicon types, the agent with session handling, and
+# the reqwest-backed XRPC client. The `bluesky` feature is required:
+# app.bsky.feed.post and app.bsky.notification.listNotifications are app.bsky
+# lexicons, so com.atproto alone does not cover posting.
+atrium-api = { version = "0.26", features = ["agent", "bluesky"] }
+atrium-xrpc-client = { version = "0.5", default-features = false, features = ["reqwest"] }
+
+# TLS: the xrpc client's `reqwest` feature brings reqwest with no TLS backend
+# at all, so rustls is enabled here by feature unification. WebPKI roots keep
+# the build free of system TLS libraries on every platform.
+reqwest = { version = "0.12", default-features = false, features = ["gzip", "rustls-tls-webpki-roots"] }
+
+# Async runtime: only the worker thread ever builds one.
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+
+# Settings and session-file serialisation.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors.
+thiserror = "2"

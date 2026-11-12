@@ -1,0 +1,17 @@
+[package]
+name = "atmospheric-horizon"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "AGPL-3.0-only"
+description = "AT Protocol (Bluesky) integration for Horizon, the Rust rewrite of Minecraft: Java Edition"
+
+[lib]
+# This exact source is also injected as a same-crate module by horizon-mixins,
+# so it must stay std-only: no external crates, no game imports. All AT Protocol
+# work happens off-thread in the `atmospheric` crate (crates/atmospheric).
+path = "mixins/atmospheric/runtime.rs"
+
+[workspace]
+members = ["crates/atmospheric"]
+resolver = "2"
