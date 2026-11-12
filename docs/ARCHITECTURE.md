@@ -200,6 +200,11 @@ PDS — see "Manual check" below.
 
 ### Issue sweep (session resume, death messages, HUD history)
 
+- **#17 HUD lines expire**: the HUD status box keeps at most
+  `STATUS_LINES_MAX` lines and each line now carries a timestamp; lines older
+  than `STATUS_LINE_TTL` (30 s) are dropped on every drain/read, so stale
+  statuses do not linger forever.
+
 - **#5 session persistence**: `session::login` now returns the `StoredSession`
   (pds_url/did/handle/refresh_jwt — never the app password), persisted by the
   worker to `<storage>/session.json` when `persist_session` is on (default).
