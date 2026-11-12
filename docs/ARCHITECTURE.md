@@ -231,9 +231,13 @@ profile (atproto.com/specs/oauth), reimplemented from the spec:
 2. bind a loopback listener on `http://127.0.0.1:<port>/` and push the
    authorization request (PAR) with PKCE S256, the DPoP key thumbprint
    (`dpop_jkt`) and `login_hint`, retrying with the server's `DPoP-Nonce`;
-3. emit `Event::OAuthAuthorize { url }` (HUD shows it) and open the system
-   browser at the authorize URL; wait for the redirect on the loopback
-   listener, checking `state`;
+3. emit `Event::OAuthAuthorize { url }` (HUD/chat shows it) *before* trying
+   to open the system browser at the authorize URL; if no browser can be
+   launched, emit `Event::Failed` with the manual link (the same fallback
+   Sequoia's CLI uses) — then wait for the redirect on the loopback
+   listener, checking `state`. Tests and headless runs pass
+   `WorkerOptions::launch_browser = false` so `cargo test` never spawns a
+   browser (`pds_check`: `ATMOSPHERIC_NO_BROWSER=1`);
 4. exchange the code at the token endpoint with a DPoP proof; validate
    `sub` == the resolved DID, `token_type` == `DPoP`, and that the granted
    scope contains `atproto`.
@@ -283,7 +287,9 @@ cargo run -p atmospheric --example pds_check
 ```
 
 OAuth (M8) instead of the app password — finish the login in the browser that
-opens; a second run resumes the persisted session without a browser:
+opens (set `ATMOSPHERIC_NO_BROWSER=1` on a headless machine: the authorize URL
+is printed via the `OAuthAuthorize` event instead); a second run resumes the
+persisted session without a browser:
 
 ```sh
 ATMOSPHERIC_OAUTH_HANDLE="you.example" \

@@ -42,6 +42,9 @@ pub struct WorkerOptions {
     /// Where handles and DIDs resolve for OAuth logins. The public services
     /// by default; tests point this at a stub.
     pub resolver: oauth::Resolver,
+    /// Whether OAuth logins may spawn the system browser. Tests turn this
+    /// off so `cargo test` never opens windows on the dev machine.
+    pub launch_browser: bool,
 }
 
 impl WorkerOptions {
@@ -49,7 +52,14 @@ impl WorkerOptions {
         Self {
             storage_dir: storage_dir.into(),
             resolver: oauth::Resolver::default(),
+            launch_browser: true,
         }
+    }
+
+    /// Do not spawn a browser for OAuth logins (tests, headless runs).
+    pub fn no_browser(mut self) -> Self {
+        self.launch_browser = false;
+        self
     }
 }
 
@@ -200,6 +210,8 @@ struct Worker {
     http: reqwest::Client,
     /// Where handles/DIDs resolve for OAuth logins.
     resolver: oauth::Resolver,
+    /// Whether OAuth logins may spawn the system browser.
+    launch_browser: bool,
     /// Where spawned OAuth logins report their result.
     oauth_tx: tokio::sync::mpsc::UnboundedSender<crate::error::Result<oauth::OAuthLogin>>,
     events: Sender<Event>,
@@ -247,6 +259,7 @@ impl Worker {
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             resolver: options.resolver.clone(),
+            launch_browser: options.launch_browser,
             oauth_tx,
             events,
         }
@@ -588,16 +601,18 @@ impl Worker {
         let events = self.events.clone();
         let oauth_tx = self.oauth_tx.clone();
         let resolver = self.resolver.clone();
+        let launch_browser = self.launch_browser;
         tokio::spawn(async move {
-            let result = oauth::run_login(
-                &http,
-                &resolver,
-                &handle,
-                &client_id,
-                oauth::DEFAULT_SCOPE,
-                oauth::REDIRECT_WAIT,
-                &events,
-            )
+            let result = oauth::run_login(oauth::LoginFlow {
+                http: &http,
+                resolver: &resolver,
+                handle: &handle,
+                client_id: &client_id,
+                scope: oauth::DEFAULT_SCOPE,
+                redirect_timeout: oauth::REDIRECT_WAIT,
+                launch_browser,
+                events: &events,
+            })
             .await;
             let _ = oauth_tx.send(result);
         });
@@ -1084,7 +1099,11 @@ mod tests {
     ) {
         let (command_tx, command_rx) = mpsc::channel::<Command>();
         let (event_tx, event_rx) = mpsc::channel::<Event>();
-        let handle = spawn(command_rx, event_tx, WorkerOptions::new(storage_dir));
+        let handle = spawn(
+            command_rx,
+            event_tx,
+            WorkerOptions::new(storage_dir).no_browser(),
+        );
         (command_tx, event_rx, handle)
     }
 
@@ -1863,6 +1882,7 @@ mod tests {
         let options = WorkerOptions {
             storage_dir,
             resolver: stub.resolver(),
+            launch_browser: false,
         };
         let handle = spawn(command_rx, event_tx, options);
         (command_tx, event_rx, handle)

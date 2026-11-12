@@ -26,7 +26,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
         } else {
             m::login_oauth(handle);
             game.native_chat(&format!(
-                "atmospheric: starting OAuth login for {handle} — finish it in the browser window that opens…"
+                "atmospheric: starting OAuth login for {handle} — a browser window should open; otherwise use the authorize link shown in chat"
             ));
         }
     } else if rest == "notifications" {
