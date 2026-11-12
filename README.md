@@ -1,4 +1,4 @@
-# atmospheric-horizon
+# Atmospheric Horizon
 
 AT Protocol (Bluesky) integration for [Horizon](https://playhorizon.dev), the Rust rewrite of Minecraft: Java Edition — post screenshots and milestones to Bluesky, and read your notifications, without leaving the game.
 
