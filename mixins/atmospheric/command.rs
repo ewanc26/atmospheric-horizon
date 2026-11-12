@@ -10,7 +10,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login, /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login, /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -33,6 +33,10 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
             m::post_text(text);
             game.native_chat("atmospheric: posting…");
         }
+    } else if rest == "logout" {
+        *ran = true;
+        m::logout();
+        game.native_chat("atmospheric: logging out…");
     } else if rest == "snapshot" {
         *ran = true;
         match game.native_player() {

@@ -47,6 +47,7 @@ fn main() {
         post_death_messages: false,
         post_chat_messages: false,
         chat_server_id: "pds-check".into(),
+        persist_session: true,
     };
     let post_text = env::var("ATMOSPHERIC_POST_TEXT").ok();
     let post_image = env::var("ATMOSPHERIC_POST_IMAGE").ok();

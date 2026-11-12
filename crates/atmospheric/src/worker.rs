@@ -11,7 +11,7 @@ use crate::{
     error::AtmosphericError,
     notifications::{self, SeenCursor},
     records::{self, SnapshotRecord},
-    session::{self, Agent, SessionState},
+    session::{self, Agent, SessionState, StoredSession},
     signing::{self, SigningKey},
     tid::TidGen,
 };
@@ -29,6 +29,8 @@ pub const CURSOR_FILE: &str = "cursor.json";
 pub const SIGNING_KEY_FILE: &str = "signing-key.json";
 /// The snapshot version counter, same folder (M6).
 pub const SNAPSHOT_STATE_FILE: &str = "snapshot-state.json";
+/// The persisted refresh token, same folder (session resume across restarts).
+pub const SESSION_FILE: &str = "session.json";
 
 /// What the worker needs besides the channels: where its files live.
 #[derive(Debug, Clone)]
@@ -93,6 +95,8 @@ pub fn spawn(
 
                 let mut worker = Worker::new(options, events);
                 worker.emit(Event::Session(SessionState::LoggedOut));
+                // Resume a persisted session (refresh token) if there is one.
+                worker.try_resume().await;
                 // The notification poll timer (M4): ticks at the configured
                 // interval once logged in; before that the ticks are no-ops.
                 let mut poll =
@@ -144,6 +148,12 @@ struct Worker {
     tid: TidGen,
     /// `post_chat_messages` from the settings file, refreshed at login.
     post_chat_messages: bool,
+    /// `post_death_messages` from the settings file, refreshed at login.
+    post_death_messages: bool,
+    /// `persist_session` from the settings file, refreshed at login.
+    persist_session: bool,
+    /// The persisted session, if any, for resuming across restarts.
+    stored_session: Option<StoredSession>,
     /// `chat_server_id` from the settings file, refreshed at login.
     chat_server_id: String,
     /// The login identifier, kept so snapshots can default the username.
@@ -169,6 +179,9 @@ impl Worker {
                 .and_then(|raw| serde_json::from_str::<SnapshotState>(&raw).ok())
                 .map(|state| state.version)
                 .unwrap_or(0);
+        let stored_session = std::fs::read_to_string(options.storage_dir.join(SESSION_FILE))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok());
         Self {
             storage_dir: options.storage_dir,
             agent: None,
@@ -177,6 +190,9 @@ impl Worker {
             poll_interval_secs: Config::default().poll_interval_secs,
             tid: TidGen::new(),
             post_chat_messages: false,
+            post_death_messages: false,
+            persist_session: true,
+            stored_session,
             chat_server_id: Config::default().chat_server_id,
             identifier: String::new(),
             signing_key: None,
@@ -250,6 +266,28 @@ impl Worker {
                     Ok(uri) => self.emit(Event::Posted { uri }),
                     Err(error) => self.fail(error.to_string()),
                 }
+            }
+            Command::PostDeathMessage { text } => {
+                if !self.post_death_messages {
+                    return;
+                }
+                let result = match (&self.agent, &self.did) {
+                    (Some(agent), Some(did)) => {
+                        actions::post_text(agent, did, &format!("☠ {text}")).await
+                    }
+                    _ => Err(AtmosphericError::NotLoggedIn),
+                };
+                match result {
+                    Ok(uri) => self.emit(Event::Posted { uri }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::Logout => {
+                self.agent = None;
+                self.did = None;
+                self.stored_session = None;
+                let _ = std::fs::remove_file(self.storage_dir.join(SESSION_FILE));
+                self.emit(Event::Session(SessionState::LoggedOut));
             }
             Command::PostChat { message, automatic } => {
                 // Hook-originated messages only publish when the settings say
@@ -441,25 +479,78 @@ impl Worker {
             return;
         }
         match session::login(&config).await {
-            Ok(agent) => match agent.api.com.atproto.server.get_session().await {
-                Ok(session) => {
-                    let did = session.did.as_str().to_owned();
-                    self.agent = Some(agent);
-                    self.did = Some(did.clone());
-                    self.poll_interval_secs = config.poll_interval_secs.max(5);
-                    self.post_chat_messages = config.post_chat_messages;
-                    self.chat_server_id = config.chat_server_id.clone();
-                    self.identifier = config.identifier.clone();
-                    self.emit(Event::Session(SessionState::LoggedIn { did }));
+            Ok((agent, stored)) => {
+                // Session check after login, as the docs promise.
+                if let Err(error) = agent.api.com.atproto.server.get_session().await {
+                    self.emit(Event::Session(SessionState::Failed {
+                        message: AtmosphericError::protocol(error).to_string(),
+                    }));
+                    return;
                 }
-                Err(error) => self.emit(Event::Session(SessionState::Failed {
-                    message: AtmosphericError::protocol(error).to_string(),
-                })),
-            },
+                let did = stored.did.clone();
+                self.agent = Some(agent);
+                self.did = Some(did.clone());
+                self.poll_interval_secs = config.poll_interval_secs.max(5);
+                self.post_chat_messages = config.post_chat_messages;
+                self.post_death_messages = config.post_death_messages;
+                self.persist_session = config.persist_session;
+                self.chat_server_id = config.chat_server_id.clone();
+                self.identifier = config.identifier.clone();
+                if config.persist_session {
+                    self.stored_session = Some(stored.clone());
+                    if let Err(error) = self.save_session(&stored) {
+                        self.fail(format!("could not persist the session file: {error}"));
+                    }
+                }
+                self.emit(Event::Session(SessionState::LoggedIn { did }));
+            }
             Err(error) => self.emit(Event::Session(SessionState::Failed {
                 message: AtmosphericError::protocol(error).to_string(),
             })),
         }
+    }
+
+    /// Resume a persisted session (refresh token) without the app password.
+    /// Runs once at startup; failure just leaves the worker logged out.
+    async fn try_resume(&mut self) {
+        let Some(stored) = self.stored_session.clone() else {
+            return;
+        };
+        match session::resume(&stored).await {
+            Ok((agent, stored)) => {
+                let did = stored.did.clone();
+                self.agent = Some(agent);
+                self.did = Some(did.clone());
+                self.stored_session = Some(stored.clone());
+                if let Err(error) = self.save_session(&stored) {
+                    self.fail(format!("could not persist the session file: {error}"));
+                }
+                // The settings file may carry newer flags/intervals.
+                if let Ok(config) = self.load_config() {
+                    self.poll_interval_secs = config.poll_interval_secs.max(5);
+                    self.post_chat_messages = config.post_chat_messages;
+                    self.post_death_messages = config.post_death_messages;
+                    self.persist_session = config.persist_session;
+                    self.chat_server_id = config.chat_server_id.clone();
+                    self.identifier = config.identifier.clone();
+                }
+                self.emit(Event::Session(SessionState::LoggedIn { did }));
+            }
+            Err(_) => {
+                // Expired/revoked refresh token: stay logged out.
+                self.stored_session = None;
+            }
+        }
+    }
+
+    /// Persist the session's refresh token (worker owns disk I/O).
+    fn save_session(&self, stored: &StoredSession) -> crate::error::Result<()> {
+        std::fs::create_dir_all(&self.storage_dir)?;
+        std::fs::write(
+            self.storage_dir.join(SESSION_FILE),
+            serde_json::to_string_pretty(stored)?,
+        )?;
+        Ok(())
     }
 }
 
@@ -498,6 +589,7 @@ mod tests {
             post_death_messages: false,
             post_chat_messages: false,
             chat_server_id: "test-server".into(),
+            persist_session: true,
         }
     }
 
@@ -604,13 +696,19 @@ mod tests {
         let request_line = lines.next().unwrap_or_default().to_string();
         let mut content_length = 0usize;
         let mut authorized = false;
+        let mut refresh_authorized = false;
         for line in lines {
             let lower = line.to_ascii_lowercase();
             if let Some(value) = lower.strip_prefix("content-length:") {
                 content_length = value.trim().parse().unwrap_or(0);
             }
-            if lower.starts_with("authorization:") && lower.contains("bearer stub-access") {
-                authorized = true;
+            if lower.starts_with("authorization:") {
+                if lower.contains("bearer stub-access") {
+                    authorized = true;
+                }
+                if lower.contains("bearer stub-refresh") {
+                    refresh_authorized = true;
+                }
             }
         }
         let mut body = buf[header_end + 4..].to_vec();
@@ -673,6 +771,20 @@ mod tests {
                         "200 OK",
                         r#"{"did":"did:plc:stubuser","handle":"stub.test","accessJwt":"stub-access","refreshJwt":"stub-refresh","active":true}"#.to_string(),
                     )
+                    }
+                }
+                "/xrpc/com.atproto.server.refreshSession" => {
+                    if refresh_authorized {
+                        (
+                            "200 OK",
+                            r#"{"did":"did:plc:stubuser","handle":"stub.test","accessJwt":"stub-access","refreshJwt":"stub-refresh-2","active":true}"#.to_string(),
+                        )
+                    } else {
+                        (
+                            "400 Bad Request",
+                            r#"{"error":"ExpiredToken","message":"refresh token expired"}"#
+                                .to_string(),
+                        )
                     }
                 }
                 "/xrpc/com.atproto.server.getSession" => {
@@ -903,6 +1015,7 @@ mod tests {
             post_death_messages: true,
             post_chat_messages: true,
             chat_server_id: "my-server".into(),
+            persist_session: true,
         };
         command_tx
             .send(Command::SaveConfig {
@@ -921,6 +1034,7 @@ mod tests {
         assert!(back.post_death_messages);
         assert!(back.post_chat_messages);
         assert_eq!(back.chat_server_id, "my-server");
+        assert!(back.persist_session);
     }
 
     /// A minimal PNG header (magic + IHDR with 2560x1440) for image tests.
@@ -1351,6 +1465,138 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(dir.join(SNAPSHOT_STATE_FILE)).unwrap())
                 .unwrap();
         assert_eq!(state.version, 2);
+    }
+
+    #[test]
+    fn startup_resumes_a_persisted_session_without_login() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("resume");
+        write_config(&dir, &test_config(pds.url.clone()));
+        // A session persisted by a previous run.
+        let stored = session::StoredSession {
+            pds_url: pds.url.clone(),
+            did: "did:plc:stubuser".into(),
+            handle: "stub.test".into(),
+            refresh_jwt: "stub-refresh".into(),
+        };
+        std::fs::write(
+            dir.join(SESSION_FILE),
+            serde_json::to_string(&stored).unwrap(),
+        )
+        .unwrap();
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir.clone());
+        // No Login command: the startup resume logs in on its own.
+        match wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        }) {
+            Event::Session(SessionState::LoggedIn { did }) => {
+                assert_eq!(did, "did:plc:stubuser");
+            }
+            other => panic!("expected Session(LoggedIn), got {other:?}"),
+        }
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        // The PDS saw a refreshSession with the stored refresh token, and the
+        // rotated token was persisted.
+        let requests = pds.requests();
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.path == "/xrpc/com.atproto.server.refreshSession")
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| r.path == "/xrpc/com.atproto.server.createSession"),
+            "no password login happened"
+        );
+        let saved: session::StoredSession =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(SESSION_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(saved.refresh_jwt, "stub-refresh-2", "the rotated token");
+    }
+
+    #[test]
+    fn logout_clears_the_session_and_the_persisted_file() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("logout");
+        write_config(&dir, &test_config(pds.url.clone()));
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir.clone());
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        assert!(
+            dir.join(SESSION_FILE).exists(),
+            "login persisted the session"
+        );
+
+        command_tx.send(Command::Logout).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedOut))
+        });
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+        assert!(!dir.join(SESSION_FILE).exists(), "logout deleted the file");
+    }
+
+    #[test]
+    fn death_message_posts_only_when_enabled() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("death-off");
+        let mut config = test_config(pds.url.clone());
+        config.post_death_messages = false;
+        write_config(&dir, &config);
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir.clone());
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        command_tx
+            .send(Command::PostDeathMessage {
+                text: "Player was slain by Zombie".into(),
+            })
+            .unwrap();
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+        assert!(
+            !pds.requests()
+                .iter()
+                .any(|r| r.path == "/xrpc/com.atproto.repo.createRecord"),
+            "flag off: nothing was posted"
+        );
+
+        // Flag on: the death message is posted as a text post.
+        let pds = StubPds::start(false);
+        let dir = temp_dir("death-on");
+        let mut config = test_config(pds.url.clone());
+        config.post_death_messages = true;
+        write_config(&dir, &config);
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        command_tx
+            .send(Command::PostDeathMessage {
+                text: "Player was slain by Zombie".into(),
+            })
+            .unwrap();
+        let _ = wait_for(&event_rx, |e| matches!(e, Event::Posted { .. }));
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+        let requests = pds.requests();
+        let create_record = requests
+            .iter()
+            .find(|r| r.path == "/xrpc/com.atproto.repo.createRecord")
+            .expect("the death message was posted");
+        let body: serde_json::Value = serde_json::from_str(&create_record.body).unwrap();
+        assert_eq!(body["collection"], "app.bsky.feed.post");
+        assert_eq!(body["record"]["text"], "☠ Player was slain by Zombie");
     }
 
     #[test]

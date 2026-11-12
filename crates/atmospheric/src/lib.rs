@@ -45,6 +45,11 @@ pub enum Command {
     /// endorsed with the mod's own Ed25519 key (atpcraft port, M6). An empty
     /// `summary.username` is filled from the configured identifier.
     PostSnapshot { summary: records::SnapshotSummary },
+    /// Post the player's death message to Bluesky (only when
+    /// `post_death_messages` is enabled).
+    PostDeathMessage { text: String },
+    /// Log out: drop the session and delete the persisted refresh token.
+    Logout,
     /// Shut the worker thread down.
     Shutdown,
 }
