@@ -384,6 +384,32 @@ impl Worker {
                     Err(error) => self.fail(error.to_string()),
                 }
             }
+            Command::FetchLabels { subject } => {
+                // Public AppView read: works logged out, no token refresh.
+                match self.fetch_labels(&subject).await {
+                    Ok((subject, via, labels)) => self.emit(Event::Labels {
+                        subject,
+                        via,
+                        labels,
+                    }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::FetchLabelerLabels { labeler, subject } => {
+                // Public labeler read: works logged out when a subject is
+                // given; the default subject (own DID) needs a session.
+                match self
+                    .fetch_labeler_labels(&labeler, subject.as_deref())
+                    .await
+                {
+                    Ok((subject, via, labels)) => self.emit(Event::Labels {
+                        subject,
+                        via,
+                        labels,
+                    }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
             Command::PostDeathMessage { text } => {
                 if !self.post_death_messages {
                     return;
@@ -760,6 +786,62 @@ impl Worker {
         };
         let members = crate::lists::fetch_list_members(&self.http, &appview, &list).await?;
         Ok((list, members))
+    }
+
+    /// Read the labels the AppView attaches to a subject's view (M12, the
+    /// labeler read side (a)). Works logged out: the public AppView serves the
+    /// view endpoints. Handles resolve via the same directory service as
+    /// OAuth login.
+    async fn fetch_labels(
+        &self,
+        subject: &str,
+    ) -> crate::error::Result<(String, String, Vec<crate::labels::LabelDigest>)> {
+        let config = self.load_config().unwrap_or_default();
+        let appview = if config.appview_url.is_empty() {
+            crate::lists::DEFAULT_APPVIEW.to_string()
+        } else {
+            config.appview_url.clone()
+        };
+        let reference = crate::labels::parse_subject_reference(subject)?;
+        let resolved =
+            crate::labels::resolve_subject(&self.http, &self.resolver, &reference).await?;
+        let labels = crate::labels::view_labels(&self.http, &appview, &resolved).await?;
+        Ok((resolved.at_uri, appview, labels))
+    }
+
+    /// Query a labeler directly (M12, the labeler read side (b)): resolve the
+    /// labeler DID's document, take its `#atproto_labeler` service endpoint,
+    /// and page `com.atproto.label.queryLabels` for the subject (default: the
+    /// logged-in account's own DID — the atpcraft case is a server labeler
+    /// labeling player accounts).
+    async fn fetch_labeler_labels(
+        &self,
+        labeler: &str,
+        subject: Option<&str>,
+    ) -> crate::error::Result<(String, String, Vec<crate::labels::LabelDigest>)> {
+        // The default subject is the logged-in account's DID — fail before any
+        // network call when there is no session.
+        let pattern = match subject {
+            Some(raw) => {
+                let reference = crate::labels::parse_subject_reference(raw)?;
+                crate::labels::resolve_subject(&self.http, &self.resolver, &reference)
+                    .await?
+                    .pattern
+            }
+            None => self.did.clone().ok_or(AtmosphericError::NotLoggedIn)?,
+        };
+        let labeler_did = if labeler.starts_with("did:") {
+            labeler.to_string()
+        } else {
+            crate::oauth::resolve_handle(&self.http, &self.resolver, labeler).await?
+        };
+        let doc =
+            crate::oauth::resolve_did_document(&self.http, &self.resolver, &labeler_did).await?;
+        let endpoint = crate::labels::labeler_endpoint(&doc)?;
+        let labels =
+            crate::labels::query_labels(&self.http, &endpoint, std::slice::from_ref(&pattern))
+                .await?;
+        Ok((pattern, format!("{labeler_did} ({endpoint})"), labels))
     }
 
     /// Load the endorsement key from the storage folder, or generate and
@@ -1161,6 +1243,7 @@ mod tests {
                 let records = Arc::clone(&records);
                 let uploads = Arc::clone(&uploads);
                 let shutdown = Arc::clone(&shutdown);
+                let url = url.clone();
                 std::thread::spawn(move || {
                     for stream in listener.incoming() {
                         if *shutdown.lock().unwrap() {
@@ -1170,9 +1253,11 @@ mod tests {
                         let requests = Arc::clone(&requests);
                         let records = Arc::clone(&records);
                         let uploads = Arc::clone(&uploads);
+                        let url = url.clone();
                         std::thread::spawn(move || {
                             handle_connection(
                                 &mut stream,
+                                &url,
                                 &requests,
                                 &records,
                                 &uploads,
@@ -1215,9 +1300,12 @@ mod tests {
         }
     }
 
-    /// Read one HTTP request and answer it like a PDS would.
+    /// Read one HTTP request and answer it like a PDS would. The stub also
+    /// doubles as the handle service, PLC directory, AppView and labeler for
+    /// the M11/M12 read-side tests (`server_url` goes into the DID docs).
     fn handle_connection(
         stream: &mut std::net::TcpStream,
+        server_url: &str,
         requests: &Arc<Mutex<Vec<Captured>>>,
         records: &Arc<Mutex<std::collections::HashMap<String, String>>>,
         uploads: &Arc<Mutex<usize>>,
@@ -1434,6 +1522,7 @@ mod tests {
                 }
                 "/xrpc/app.bsky.graph.getList" => {
                     // Two pages: cursor "c2" on the first, none on the second.
+                    // The first page's list view carries labels (M12).
                     if path.contains("cursor=c2") {
                         (
                             "200 OK",
@@ -1443,12 +1532,69 @@ mod tests {
                     } else if path.contains("list=") {
                         (
                             "200 OK",
-                            r#"{"items":[{"subject":{"did":"did:plc:alice","handle":"alice.test"}},{"subject":{"did":"did:plc:bob","handle":"bob.test"}}],"cursor":"c2"}"#.to_string(),
+                            r#"{"list":{"uri":"at://did:plc:owner/app.bsky.graph.list/3abc","labels":[{"ver":1,"src":"did:plc:labeler","uri":"at://did:plc:owner/app.bsky.graph.list/3abc","val":"curated","cts":"2026-11-12T09:00:00.000Z"}]},"items":[{"subject":{"did":"did:plc:alice","handle":"alice.test"}},{"subject":{"did":"did:plc:bob","handle":"bob.test"}}],"cursor":"c2"}"#.to_string(),
                         )
                     } else {
                         (
                             "400 Bad Request",
                             r#"{"error":"InvalidRequest","message":"missing list"}"#.to_string(),
+                        )
+                    }
+                }
+                // The stub doubles as the handle service for M11/M12 reads.
+                "/xrpc/com.atproto.identity.resolveHandle" => (
+                    "200 OK",
+                    r#"{"did":"did:plc:stubuser"}"#.to_string(),
+                ),
+                // The stub doubles as the PLC directory; the DID documents
+                // advertise the stub itself as PDS and (for the labeler DIDs)
+                // labeler service endpoint.
+                "/did:plc:stubuser" | "/did:plc:labeler" => {
+                    let doc = serde_json::json!({
+                        "@context": ["https://www.w3.org/ns/did/v1"],
+                        "id": "did:plc:stubuser",
+                        "service": [
+                            {"id": "#atproto_pds", "type": "AtprotoPersonalDataServer", "serviceEndpoint": server_url},
+                            {"id": "#atproto_labeler", "type": "AtprotoLabeler", "serviceEndpoint": server_url}
+                        ],
+                    });
+                    ("200 OK", doc.to_string())
+                }
+                "/did:plc:nolabeler" => {
+                    let doc = serde_json::json!({
+                        "id": "did:plc:nolabeler",
+                        "service": [
+                            {"id": "#atproto_pds", "type": "AtprotoPersonalDataServer", "serviceEndpoint": server_url}
+                        ],
+                    });
+                    ("200 OK", doc.to_string())
+                }
+                // The stub doubles as the AppView for the M12 view-label reads.
+                "/xrpc/app.bsky.actor.getProfile" => (
+                    "200 OK",
+                    r#"{"did":"did:plc:stubuser","handle":"stub.test","labels":[{"ver":1,"src":"did:plc:labeler","uri":"did:plc:stubuser","val":"player","cts":"2026-11-12T10:00:00.000Z"}]}"#.to_string(),
+                ),
+                "/xrpc/app.bsky.feed.getPosts" => (
+                    "200 OK",
+                    r#"{"posts":[{"uri":"at://did:plc:stubuser/app.bsky.feed.post/3abc","labels":[{"ver":1,"src":"did:plc:labeler","uri":"at://did:plc:stubuser/app.bsky.feed.post/3abc","val":"spam","neg":true,"cts":"2026-11-12T11:00:00.000Z","exp":"2026-12-12T11:00:00.000Z"}]}]}"#.to_string(),
+                ),
+                // The stub doubles as a labeler for the M12 queryLabels read:
+                // two pages, cursor "2" on the first.
+                "/xrpc/com.atproto.label.queryLabels" => {
+                    if !path.contains("uriPatterns=") {
+                        (
+                            "400 Bad Request",
+                            r#"{"error":"InvalidRequest","message":"Parameter 'uriPatterns' is required"}"#.to_string(),
+                        )
+                    } else if path.contains("cursor=2") {
+                        (
+                            "200 OK",
+                            r#"{"labels":[{"ver":1,"src":"did:plc:labeler","uri":"did:plc:stubuser","val":"online","cts":"2026-11-12T12:00:00.000Z"}]}"#.to_string(),
+                        )
+                    } else {
+                        (
+                            "200 OK",
+                            r#"{"labels":[{"ver":1,"src":"did:plc:labeler","uri":"did:plc:stubuser","val":"player","cts":"2026-11-12T10:00:00.000Z"}],"cursor":"2"}"#.to_string(),
                         )
                     }
                 }
@@ -1506,6 +1652,27 @@ mod tests {
             event_tx,
             WorkerOptions::new(storage_dir).no_browser(),
         );
+        (command_tx, event_rx, handle)
+    }
+
+    /// Spawn a worker whose handle/DID resolution points at a stub (M11/M12
+    /// read-side tests).
+    fn spawn_worker_with_resolver(
+        storage_dir: PathBuf,
+        resolver: crate::oauth::Resolver,
+    ) -> (
+        mpsc::Sender<Command>,
+        mpsc::Receiver<Event>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (command_tx, command_rx) = mpsc::channel::<Command>();
+        let (event_tx, event_rx) = mpsc::channel::<Event>();
+        let options = WorkerOptions {
+            storage_dir,
+            resolver,
+            launch_browser: false,
+        };
+        let handle = spawn(command_rx, event_tx, options);
         (command_tx, event_rx, handle)
     }
 
@@ -2474,6 +2641,208 @@ mod tests {
         assert_eq!(hits.len(), 2, "two pages fetched: {hits:?}");
         assert!(hits[0].path.contains("limit=100"));
         assert!(hits[1].path.contains("cursor=c2"));
+    }
+
+    #[test]
+    fn fetch_labels_reads_view_labels_from_the_appview() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("fetch-labels");
+        let mut config = test_config(pds.url.clone());
+        config.appview_url = pds.url.clone(); // the stub doubles as the AppView
+        write_config(&dir, &config);
+        let resolver = crate::oauth::Resolver {
+            handle_service: pds.url.clone(),
+            plc_directory: pds.url.clone(),
+        };
+        let (command_tx, event_rx, handle) = spawn_worker_with_resolver(dir.clone(), resolver);
+
+        // A post subject: the getPosts view carries the labels.
+        command_tx
+            .send(Command::FetchLabels {
+                subject: "at://did:plc:stubuser/app.bsky.feed.post/3abc".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Labels { .. })) {
+            Event::Labels {
+                subject,
+                via,
+                labels,
+            } => {
+                assert_eq!(subject, "at://did:plc:stubuser/app.bsky.feed.post/3abc");
+                assert_eq!(via, pds.url);
+                assert_eq!(labels.len(), 1);
+                assert_eq!(labels[0].val, "spam");
+                assert!(labels[0].neg);
+                assert_eq!(labels[0].src, "did:plc:labeler");
+            }
+            other => panic!("expected Labels, got {other:?}"),
+        }
+
+        // A handle account subject: resolveHandle first, then getProfile.
+        command_tx
+            .send(Command::FetchLabels {
+                subject: "stub.test".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Labels { .. })) {
+            Event::Labels {
+                subject, labels, ..
+            } => {
+                assert_eq!(subject, "at://did:plc:stubuser");
+                assert_eq!(labels.len(), 1);
+                assert_eq!(labels[0].val, "player");
+            }
+            other => panic!("expected Labels, got {other:?}"),
+        }
+
+        // A list subject reads the labels off the list view (limit=1).
+        command_tx
+            .send(Command::FetchLabels {
+                subject: "at://did:plc:owner/app.bsky.graph.list/3abc".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Labels { .. })) {
+            Event::Labels { labels, .. } => {
+                assert_eq!(labels.len(), 1);
+                assert_eq!(labels[0].val, "curated");
+            }
+            other => panic!("expected Labels, got {other:?}"),
+        }
+
+        // A bad subject fails without any HTTP call.
+        let before = pds.requests().len();
+        command_tx
+            .send(Command::FetchLabels {
+                subject: "https://example.com/nope".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("not a subject reference"), "{message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            pds.requests().len(),
+            before,
+            "no HTTP call for a bad subject"
+        );
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let hits = pds
+            .requests()
+            .into_iter()
+            .map(|r| r.path)
+            .collect::<Vec<_>>();
+        assert!(
+            hits.iter()
+                .any(|p| p.starts_with("/xrpc/app.bsky.feed.getPosts?uris=")),
+            "{hits:?}"
+        );
+        assert!(
+            hits.iter()
+                .any(|p| p == "/xrpc/com.atproto.identity.resolveHandle?handle=stub.test"),
+            "{hits:?}"
+        );
+        assert!(
+            hits.iter()
+                .any(|p| p == "/xrpc/app.bsky.actor.getProfile?actor=did:plc:stubuser"),
+            "{hits:?}"
+        );
+        assert!(
+            hits.iter()
+                .any(|p| p.starts_with("/xrpc/app.bsky.graph.getList?list=")
+                    && p.contains("limit=1")),
+            "{hits:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_labeler_labels_resolves_the_did_doc_and_queries_the_labeler() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("fetch-labeler");
+        write_config(&dir, &test_config(pds.url.clone()));
+        let resolver = crate::oauth::Resolver {
+            handle_service: pds.url.clone(),
+            plc_directory: pds.url.clone(),
+        };
+        let (command_tx, event_rx, handle) = spawn_worker_with_resolver(dir.clone(), resolver);
+
+        // A labeler DID with an explicit subject: DID doc → #atproto_labeler
+        // endpoint → paged queryLabels.
+        command_tx
+            .send(Command::FetchLabelerLabels {
+                labeler: "did:plc:labeler".into(),
+                subject: Some("did:plc:stubuser".into()),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Labels { .. })) {
+            Event::Labels {
+                subject,
+                via,
+                labels,
+            } => {
+                assert_eq!(subject, "did:plc:stubuser");
+                assert!(via.contains("did:plc:labeler"), "{via}");
+                assert!(via.contains(&pds.url), "{via}");
+                assert_eq!(labels.len(), 2);
+                assert_eq!(labels[0].val, "player");
+                assert_eq!(labels[1].val, "online");
+            }
+            other => panic!("expected Labels, got {other:?}"),
+        }
+
+        // A DID without a labeler service fails after the DID-doc read.
+        command_tx
+            .send(Command::FetchLabelerLabels {
+                labeler: "did:plc:nolabeler".into(),
+                subject: Some("did:plc:stubuser".into()),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("#atproto_labeler"), "{message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+
+        // Logged out with no subject: fails as not logged in, before any
+        // labeler HTTP call.
+        let before = pds.requests().len();
+        command_tx
+            .send(Command::FetchLabelerLabels {
+                labeler: "did:plc:labeler".into(),
+                subject: None,
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("not logged in"), "{message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(pds.requests().len(), before, "no HTTP call when logged out");
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let hits = pds
+            .requests()
+            .into_iter()
+            .map(|r| r.path)
+            .collect::<Vec<_>>();
+        assert!(hits.iter().any(|p| p == "/did:plc:labeler"), "{hits:?}");
+        assert!(hits.iter().any(|p| p == "/did:plc:nolabeler"), "{hits:?}");
+        let queries: Vec<&String> = hits
+            .iter()
+            .filter(|p| p.starts_with("/xrpc/com.atproto.label.queryLabels"))
+            .collect();
+        assert_eq!(queries.len(), 2, "two pages queried: {queries:?}");
+        assert!(queries[0].contains("uriPatterns=did%3Aplc%3Astubuser"));
+        assert!(queries[0].contains("limit=100"));
+        assert!(queries[1].contains("cursor=2"));
     }
 
     #[test]
