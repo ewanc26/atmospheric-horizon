@@ -329,6 +329,26 @@ stored record read back matched the lexicon exactly (test record deleted
 after). Stub-PDS tests cover the shape, key-id/public-key match against the
 persisted key, capability sorting, and `createdAt` preservation.
 
+### M11: join-gate list reads (`app.bsky.graph.getList`)
+
+`/atmospheric list <reference>` sends `Command::FetchList`; the worker parses
+the reference (an `at://<did>/app.bsky.graph.list/<rkey>` URI, or a
+`https://bsky.app/profile/<owner>/lists/<rkey>` URL — a handle owner is
+resolved to a DID via the same `resolveHandle` service OAuth login uses),
+then pages `app.bsky.graph.getList` (`limit=100`, cursor until absent, capped
+at 200 pages) against the AppView in `config.json` (`appview_url`, default
+`https://public.api.bsky.app` — the public, unauthenticated AppView atpcraft
+uses) and emits `Event::ListMembers { list, members }` with
+`items[].subject.did`. Works logged out. This is the read side of atpcraft's
+join gate (`AtprotoListResolver`), reimplemented from the lexicon semantics
+only.
+
+Verified against the real public AppView: `pds_check` with
+`ATMOSPHERIC_FETCH_LIST` fetched 9 members of the test account's "My
+Supporters" list (matching its `listItemCount`) and 21 members via a
+`bsky.app/profile/bsky.app/lists/…` URL (handle resolved to the owner DID).
+Stub tests cover reference parsing, two-page pagination, and the error path.
+
 ### Manual check against a real PDS
 
 `crates/atmospheric/examples/pds_check.rs` spawns the worker exactly as the
@@ -347,6 +367,7 @@ ATMOSPHERIC_POST_SKIN="/path/to/skin.png" \                    # optional, M9
 ATMOSPHERIC_POST_CAPE="/path/to/cape.png" \                    # optional, M9
 ATMOSPHERIC_SKIN_MODEL="slim" \                                # optional, M9
 ATMOSPHERIC_POST_SERVER_PROFILE=1 \                            # optional, M10
+ATMOSPHERIC_FETCH_LIST="at://did:…/app.bsky.graph.list/<rkey>" \ # optional, M11
 cargo run -p atmospheric --example pds_check
 ```
 
