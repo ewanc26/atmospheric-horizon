@@ -89,6 +89,9 @@ pub enum GameCommand {
         cape_path: Option<String>,
         model: String,
     },
+    /// Publish/refresh the account's server profile record
+    /// (`at.atpcraft.server.profile` at rkey `self`, M9-era atpcraft port).
+    PostServerProfile,
     /// Post the player's death message (only when `post_death_messages` is on).
     PostDeathMessage { text: String },
     /// Log out: drop the session and delete the persisted refresh token.
@@ -406,6 +409,11 @@ pub fn post_skin(skin_path: Option<String>, cape_path: Option<String>, model: &s
         cape_path,
         model: model.into(),
     });
+}
+
+/// Ask the worker to publish/refresh the server profile record (M10).
+pub fn post_server_profile() {
+    send(GameCommand::PostServerProfile);
 }
 
 /// Ask the worker to post a death message (published only when the settings

@@ -14,6 +14,7 @@
 //! ATMOSPHERIC_POST_SKIN="/path/to/skin.png" \          # optional, M9
 //! ATMOSPHERIC_POST_CAPE="/path/to/cape.png" \          # optional, M9
 //! ATMOSPHERIC_SKIN_MODEL="slim" \                        # optional, M9
+//! ATMOSPHERIC_POST_SERVER_PROFILE=1 \                    # optional, M10
 //! cargo run -p atmospheric --example pds_check
 //! ```
 //!
@@ -84,6 +85,13 @@ fn main() {
         skin_path: String::new(),
         cape_path: String::new(),
         skin_model: "default".into(),
+        server_name: env::var("ATMOSPHERIC_SERVER_NAME").unwrap_or_default(),
+        server_description: String::new(),
+        server_address: String::new(),
+        server_website: String::new(),
+        server_contact: String::new(),
+        server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
+        game_version: "26.3".into(),
     };
     if oauth_handle.is_none() {
         // App-password mode needs all three; OAuth mode needs none of them.
@@ -98,6 +106,7 @@ fn main() {
     let post_skin = env::var("ATMOSPHERIC_POST_SKIN").ok();
     let post_cape = env::var("ATMOSPHERIC_POST_CAPE").ok();
     let skin_model = env::var("ATMOSPHERIC_SKIN_MODEL").unwrap_or_else(|_| "default".into());
+    let post_server_profile = env::var("ATMOSPHERIC_POST_SERVER_PROFILE").is_ok();
 
     // A throwaway settings folder: the worker reads its config from here.
     let storage_dir: PathBuf = env::temp_dir().join("atmospheric-pds-check");
@@ -202,6 +211,7 @@ fn main() {
             cape_path: post_cape,
             model: skin_model,
         }),
+        post_server_profile.then_some(Command::PostServerProfile),
     ]
     .into_iter()
     .flatten()
@@ -213,6 +223,7 @@ fn main() {
             Command::PostChat { .. } => "chat record",
             Command::PostSnapshot { .. } => "snapshot record",
             Command::PostSkin { .. } => "skin record",
+            Command::PostServerProfile => "server profile",
             _ => unreachable!(),
         };
         command_tx.send(post).expect("send post");
