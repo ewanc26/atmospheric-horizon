@@ -27,6 +27,13 @@ pub const SKIN_COLLECTION: &str = "at.atpcraft.player.skin";
 /// The lexicon's blob cap for skins and capes (`maxSize` 1048576).
 pub const MAX_SKIN_BYTES: usize = 1_048_576;
 
+/// The `at.atpcraft.server.profile` collection: the account's self-published
+/// server descriptor, a singleton at the literal rkey `self` (M10).
+pub const SERVER_PROFILE_COLLECTION: &str = "at.atpcraft.server.profile";
+
+/// The fixed record key of the server-profile singleton.
+pub const SERVER_PROFILE_RKEY: &str = "self";
+
 /// The lexicon's `message` cap (maxLength 1024).
 pub const MAX_CHAT_MESSAGE_LEN: usize = 1024;
 
@@ -298,6 +305,107 @@ impl SkinRecord {
             payload["capeCid"] = serde_json::Value::String(cid);
         }
         canonical_json(&payload).into_bytes()
+    }
+}
+
+/// The `signingKey` sub-object of a server profile: the Ed25519 endorsement
+/// public key (base64-standard SPKI) so consumers can resolve player-record
+/// endorsement key ids without out-of-band key sharing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileSigningKey {
+    pub key_id: String,
+    /// Base64 (standard, padded) of the X.509/SPKI encoding.
+    pub public_key: String,
+    pub alg: String,
+}
+
+/// The optional `operator` sub-object; blank fields are omitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileOperator {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub did: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub handle: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub website: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub contact: String,
+}
+
+impl ProfileOperator {
+    /// The operator object is omitted entirely when every field is blank.
+    fn is_empty(&self) -> bool {
+        self.did.is_empty()
+            && self.handle.is_empty()
+            && self.website.is_empty()
+            && self.contact.is_empty()
+    }
+}
+
+/// One `at.atpcraft.server.profile` record (M10): the account's self-published
+/// server descriptor. Blank/empty optionals are omitted from the wire body,
+/// matching atpcraft's `toJson`. The record itself carries no signature — it
+/// lives in the account's own repo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerProfileRecord {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub address: String,
+    pub minecraft_version: String,
+    pub atpcraft_version: String,
+    pub signing_key: ProfileSigningKey,
+    /// Sorted, unique (the lexicon requires it); omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<ProfileOperator>,
+    /// Preserved from the existing record on re-publish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    pub updated_at: Datetime,
+}
+
+impl ServerProfileRecord {
+    /// Build a record, sorting/deduping capabilities as the lexicon requires.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        name: String,
+        description: String,
+        address: String,
+        minecraft_version: String,
+        atpcraft_version: String,
+        signing_key: ProfileSigningKey,
+        capabilities: Vec<String>,
+        operator: Option<ProfileOperator>,
+        created_at: Option<String>,
+        updated_at: Datetime,
+    ) -> Self {
+        let mut capabilities = capabilities;
+        capabilities.sort();
+        capabilities.dedup();
+        Self {
+            name,
+            description,
+            address,
+            minecraft_version,
+            atpcraft_version,
+            signing_key,
+            capabilities,
+            operator: operator.filter(|o| !o.is_empty()),
+            created_at,
+            updated_at,
+        }
+    }
+
+    /// The record body to write to the PDS, with the `$type` put_record
+    /// requires.
+    pub fn to_unknown(&self) -> Result<Unknown> {
+        crate::actions::record_to_unknown(SERVER_PROFILE_COLLECTION, self)
     }
 }
 
