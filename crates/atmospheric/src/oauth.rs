@@ -771,8 +771,11 @@ pub async fn wait_for_redirect(
             .map_err(AtmosphericError::Io)?;
         let (mut socket, _) = accepted;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        // Read until the request line is complete (a single read may return
-        // only a fragment), bounded by the deadline and a size cap.
+        // Read until the end of the request headers (a single read may return
+        // only a fragment), bounded by the deadline and a size cap. Reading
+        // the whole header block matters: closing a socket that still has
+        // unread received data makes Linux send a RST, which can destroy the
+        // response before the browser reads it.
         let mut buf: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 4096];
         loop {
@@ -784,7 +787,7 @@ pub async fn wait_for_redirect(
                 break;
             }
             buf.extend_from_slice(&chunk[..read]);
-            if buf.windows(2).any(|w| w == b"\r\n") || buf.len() > 8192 {
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() > 8192 {
                 break;
             }
         }
@@ -815,6 +818,7 @@ pub async fn wait_for_redirect(
                             .as_bytes(),
                         )
                         .await;
+                    let _ = socket.shutdown().await;
                     return Err(AtmosphericError::Message(
                         "the redirect's state did not match the authorization request".into(),
                     ));
@@ -827,6 +831,10 @@ pub async fn wait_for_redirect(
             .write_all(response(status, &message).as_bytes())
             .await;
         let _ = socket.shutdown().await;
+        // Drain whatever the client still sends so the close is a clean FIN
+        // rather than a RST on Linux.
+        let mut sink = [0u8; 4096];
+        let _ = tokio::time::timeout(Duration::from_secs(2), socket.read(&mut sink)).await;
 
         if let Some(code) = params.get("code")
             && params.get("state").map(|s| s.as_str()) == Some(authorization.state.as_str())
