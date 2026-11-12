@@ -81,6 +81,14 @@ pub enum GameCommand {
     /// Publish the player's state as an `at.atpcraft.player.snapshot` record
     /// (M6, atpcraft port).
     PostSnapshot { summary: SnapshotSummary },
+    /// Publish the player's skin (and optional cape) as an
+    /// `at.atpcraft.player.skin` record (M9, atpcraft port). `None` paths fall
+    /// back to the settings file's `skin_path`/`cape_path`.
+    PostSkin {
+        skin_path: Option<String>,
+        cape_path: Option<String>,
+        model: String,
+    },
     /// Post the player's death message (only when `post_death_messages` is on).
     PostDeathMessage { text: String },
     /// Log out: drop the session and delete the persisted refresh token.
@@ -388,6 +396,16 @@ pub fn post_chat(message: &str, automatic: bool) {
 /// Ask the worker to publish a player-state snapshot record (M6).
 pub fn post_snapshot(summary: SnapshotSummary) {
     send(GameCommand::PostSnapshot { summary });
+}
+
+/// Ask the worker to publish a skin record (M9). `None` paths mean "use the
+/// settings file"; `model` is "default" or "slim".
+pub fn post_skin(skin_path: Option<String>, cape_path: Option<String>, model: &str) {
+    send(GameCommand::PostSkin {
+        skin_path,
+        cape_path,
+        model: model.into(),
+    });
 }
 
 /// Ask the worker to post a death message (published only when the settings

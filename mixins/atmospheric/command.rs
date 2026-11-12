@@ -1,7 +1,8 @@
 // /atmospheric login [handle] logs in (app password from the settings, or
 // localhost OAuth when a handle is given); /atmospheric post <text> posts
 // text; /atmospheric notifications polls now (the worker also polls on a
-// timer); /atmospheric chat <text> publishes one chat record (atpcraft port).
+// timer); /atmospheric chat <text> publishes one chat record (atpcraft port);
+// /atmospheric skin [path] [default|slim] publishes a skin record (M9).
 fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut bool) {
     use crate::game::atmospheric as m;
     if !game.native_on(m::ID) {
@@ -11,7 +12,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -54,6 +55,21 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
                 game.native_chat("atmospheric: publishing the snapshot record…");
             }
             None => game.native_chat("atmospheric: no player in this world"),
+        }
+    } else if rest == "skin" || rest.starts_with("skin ") {
+        let args: Vec<&str> = rest
+            .strip_prefix("skin")
+            .unwrap_or("")
+            .split_whitespace()
+            .collect();
+        *ran = true;
+        let skin_path = args.first().map(|s| s.to_string());
+        let model = args.get(1).copied().unwrap_or("default");
+        if args.len() > 2 || !["default", "slim"].contains(&model) {
+            game.native_chat("atmospheric: /atmospheric skin [path/to/skin.png] [default|slim]");
+        } else {
+            m::post_skin(skin_path, None, model);
+            game.native_chat("atmospheric: publishing the skin record…");
         }
     } else if rest == "chat" || rest.starts_with("chat ") {
         let text = rest.strip_prefix("chat").unwrap_or("").trim();
