@@ -49,6 +49,9 @@ Everything else, with zero Horizon imports so it builds and tests with plain
   dimensions are pure helpers here
 - `notifications` — polling with a persisted seen-cursor (dedup across
   restarts, the pattern bsky-bot-sdk uses)
+- `lists` — M11 public list reads (`app.bsky.graph.getList` pagination)
+- `labels` — M12 labeler read side (AppView view `labels`, labeler
+  `#atproto_labeler` endpoint resolution, `com.atproto.label.queryLabels`)
 - `worker` — owns the tokio runtime, the agent, and the files; the **only**
   module that performs network or disk I/O
 - `error` — one error enum, mapped to HUD strings at the edge
@@ -349,6 +352,51 @@ Supporters" list (matching its `listItemCount`) and 21 members via a
 `bsky.app/profile/bsky.app/lists/…` URL (handle resolved to the owner DID).
 Stub tests cover reference parsing, two-page pagination, and the error path.
 
+### M12: labeler read side (`com.atproto.label.*`)
+
+Issue #29 kept only the client-side halves of the labeler item: (a) reading
+labels on a subject, and (b) resolving a labeler's DID-document service
+endpoint. Label issuance stays server-side (a client mod cannot host the
+labeler HTTP endpoint).
+
+- `labels.rs` parses a subject reference — an `at://` URI (account or
+  record), a bare DID, a handle, or a bsky.app profile/post/list URL — and
+  resolves handles to DIDs via the same `resolveHandle` service OAuth login
+  uses. Account labels carry the bare DID as their `uri`; record labels the
+  full AT-URI, so `ResolvedSubject` exposes both forms.
+- `Command::FetchLabels { subject }` (`/atmospheric labels <subject>`) reads
+  the `labels` array off the subject's AppView view: `app.bsky.actor.getProfile`
+  for accounts, `app.bsky.feed.getPosts` for posts, `app.bsky.graph.getList`
+  (first page, limit 1) for lists. Unauthenticated against the configured
+  AppView (`appview_url`, default `https://public.api.bsky.app`), so it works
+  logged out; other collections have no AppView view with labels and get a
+  readable error pointing at the labeler command.
+- `Command::FetchLabelerLabels { labeler, subject }`
+  (`/atmospheric labeler <did> [subject]`) resolves the labeler DID's
+  document (plc.directory / did:web, as in M8), extracts the
+  `#atproto_labeler` (`AtprotoLabeler`) service endpoint — the same service
+  extraction shape as `#atproto_pds` — and pages
+  `com.atproto.label.queryLabels` (`uriPatterns`, limit 100, cursor until
+  absent, capped at 100 pages) at that endpoint. `subject` defaults to the
+  logged-in account's own DID (the atpcraft case: a server labeler labeling
+  player accounts); logged out with no subject it fails fast as
+  "not logged in" before any labeler HTTP call.
+- Both emit `Event::Labels { subject, via, labels }` with
+  `labels::LabelDigest { val, src, neg, cts, exp }` reduced from
+  `com.atproto.label.defs#label`; the game side mirrors it as plain data and
+  the HUD summarizes it ("atmospheric: 2 label(s) on did:plc:… via …:
+  player, -spam"). Wire shapes come from the lexicons/spec only — no code is
+  copied from atpcraft (its repo carries no licence); atpcraft's labeler
+  answers the same spec endpoints.
+- Verified: `labels` unit tests (subject parsing, `#atproto_labeler`
+  extraction, view routing per collection, two-page `queryLabels` against a
+  stub) and worker tests against the stub (which doubles as AppView, PLC
+  directory and labeler): post/handle/list subjects, the labeler query with
+  DID-doc resolution, the no-labeler-service failure, and the bad-subject /
+  logged-out paths making no HTTP calls. Real-AppView wire check: `pds_check`
+  with `ATMOSPHERIC_FETCH_LABELS` / `ATMOSPHERIC_LABELER` (optional
+  `ATMOSPHERIC_LABELER_SUBJECT`).
+
 ### Manual check against a real PDS
 
 `crates/atmospheric/examples/pds_check.rs` spawns the worker exactly as the
@@ -368,6 +416,9 @@ ATMOSPHERIC_POST_CAPE="/path/to/cape.png" \                    # optional, M9
 ATMOSPHERIC_SKIN_MODEL="slim" \                                # optional, M9
 ATMOSPHERIC_POST_SERVER_PROFILE=1 \                            # optional, M10
 ATMOSPHERIC_FETCH_LIST="at://did:…/app.bsky.graph.list/<rkey>" \ # optional, M11
+ATMOSPHERIC_FETCH_LABELS="at://did:…/app.bsky.feed.post/<rkey>" \ # optional, M12
+ATMOSPHERIC_LABELER="did:plc:…" \                  # optional, M12 (labeler query)
+ATMOSPHERIC_LABELER_SUBJECT="did:plc:…" \          # optional, M12 (default: own DID)
 cargo run -p atmospheric --example pds_check
 ```
 
