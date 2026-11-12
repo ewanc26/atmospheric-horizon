@@ -9,6 +9,7 @@
 pub mod actions;
 pub mod config;
 pub mod error;
+pub mod labels;
 pub mod lists;
 pub mod notifications;
 pub mod oauth;
@@ -69,6 +70,19 @@ pub enum Command {
     /// atpcraft's join gate (M11). The reference is an
     /// `at://…/app.bsky.graph.list/<rkey>` URI or a bsky.app list URL.
     FetchList { reference: String },
+    /// Read the labels on a subject (M12, labeler read side): an AT-URI, a
+    /// DID, a handle, or a bsky.app profile/post/list URL. Labels come from
+    /// the subject's AppView view (`labels` field). Works logged out.
+    FetchLabels { subject: String },
+    /// Query a labeler directly (M12, labeler read side): resolve the
+    /// labeler's `#atproto_labeler` DID-doc service endpoint and page
+    /// `com.atproto.label.queryLabels` for `subject` (an AT-URI/DID/handle;
+    /// `None` means the logged-in account's own DID). Works logged out when
+    /// `subject` is given.
+    FetchLabelerLabels {
+        labeler: String,
+        subject: Option<String>,
+    },
     /// Post the player's death message to Bluesky (only when
     /// `post_death_messages` is enabled).
     PostDeathMessage { text: String },
@@ -97,4 +111,12 @@ pub enum Event {
     /// The members of a fetched Bluesky list (M11): the AT-URI and the
     /// member DIDs, in page order.
     ListMembers { list: String, members: Vec<String> },
+    /// The labels found on a subject (M12, labeler read side): the subject
+    /// (AT-URI or DID), where the labels came from (`via`: the AppView URL or
+    /// the labeler's endpoint), and the labels themselves.
+    Labels {
+        subject: String,
+        via: String,
+        labels: Vec<labels::LabelDigest>,
+    },
 }
