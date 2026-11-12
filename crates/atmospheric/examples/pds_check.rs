@@ -4,17 +4,20 @@
 //! the throwaway settings file in the system temp folder:
 //!
 //! ```sh
-//! ATMOSPHERIC_PDS_URL="https://bsky.social" \
-//! ATMOSPHERIC_IDENTIFIER="you.bsky.social" \
+//! ATMOSPHERIC_PDS_URL="https://eurosky.social" \
+//! ATMOSPHERIC_IDENTIFIER="you.example" \
 //! ATMOSPHERIC_APP_PASSWORD="xxxx-xxxx-xxxx-xxxx" \
 //! ATMOSPHERIC_POST_TEXT="hello from atmospheric-horizon (M2 check)" \
+//! ATMOSPHERIC_POST_IMAGE="/path/to/screenshot.png" \   # optional, M3
 //! cargo run -p atmospheric --example pds_check
 //! ```
 //!
 //! It spawns the worker exactly as the game side will, sends `Login`, waits
-//! for the session event, optionally sends `PostText`, prints every event,
-//! and shuts the worker down. Exit status is 0 only if login (and the post,
-//! when `ATMOSPHERIC_POST_TEXT` is set) succeeded.
+//! for the session event, optionally sends `PostText` and/or `PostImage`,
+//! prints every event, and shuts the worker down. Exit status is 0 only if
+//! login (and the posts, when the env vars are set) succeeded. The PDS URL
+//! must be the account's own PDS (resolve the handle's DID to find it), not
+//! always bsky.social.
 
 use atmospheric::{
     Command, Config, Event,
@@ -42,6 +45,7 @@ fn main() {
         post_death_messages: false,
     };
     let post_text = env::var("ATMOSPHERIC_POST_TEXT").ok();
+    let post_image = env::var("ATMOSPHERIC_POST_IMAGE").ok();
 
     // A throwaway settings folder: the worker reads its config from here.
     let storage_dir: PathBuf = env::temp_dir().join("atmospheric-pds-check");
@@ -82,10 +86,25 @@ fn main() {
         }
     }
 
-    if let Some(text) = post_text {
-        command_tx
-            .send(Command::PostText { text })
-            .expect("send PostText");
+    // One wait loop per optional post; each ends on its Posted event.
+    let posts: Vec<Command> = [
+        post_text.map(|text| Command::PostText { text }),
+        post_image.map(|path| Command::PostImage {
+            path,
+            alt_text: "pds_check image post".into(),
+            text: Some("atmospheric-horizon image check (test post, feel free to delete)".into()),
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    for post in posts {
+        let kind = match &post {
+            Command::PostText { .. } => "text",
+            Command::PostImage { .. } => "image",
+            _ => unreachable!(),
+        };
+        command_tx.send(post).expect("send post");
         loop {
             match event_rx.recv_timeout(Duration::from_secs(60)) {
                 Ok(event) => {
@@ -93,7 +112,7 @@ fn main() {
                     match event {
                         Event::Posted { .. } => break,
                         Event::Failed { message } => {
-                            eprintln!("post failed: {message}");
+                            eprintln!("{kind} post failed: {message}");
                             let _ = command_tx.send(Command::Shutdown);
                             let _ = handle.join();
                             exit(1);

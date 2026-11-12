@@ -44,7 +44,9 @@ Everything else, with zero Horizon imports so it builds and tests with plain
 
 - `config` — settings, stored under the mod's own folder
 - `session` — `AtpAgent` construction and app-password login
-- `actions` — `create_record` posts; `uploadBlob` arrives in M3
+- `actions` — `create_record` posts (text, and image posts with an
+  `app.bsky.embed.images` embed after `uploadBlob`); MIME sniffing and PNG
+  dimensions are pure helpers here
 - `notifications` — polling with a persisted seen-cursor (dedup across
   restarts, the pattern bsky-bot-sdk uses)
 - `worker` — owns the tokio runtime, the agent, and the files; the **only**
@@ -89,6 +91,30 @@ PDS — see "Manual check" below.
   thread cleanly (the blocking channel is bridged into the tokio runtime so
   the loop can later `select!` a notification timer, M4).
 
+### M3: screenshot posts
+
+- `actions::post_image` uploads the raw image bytes with
+  `com.atproto.repo.uploadBlob`, then writes an `app.bsky.feed.post` whose
+  `embed` is `app.bsky.embed.images` (the generated `RecordEmbedRefs` enum
+  carries its own `$type`, so only the top-level record needs the injected
+  one). PNG posts get an `aspectRatio` read from the IHDR chunk.
+- The worker handles `Command::PostImage { path, .. }`: it is the only module
+  that reads the image file, rejects files over 2 MB or with a non-image
+  magic, and emits `Posted { uri }` / `Failed` as for text.
+- Game side: a raw-target HEAD hook on
+  `horizon_client::game::chat::Game<'_>::finish_screenshot` (pinned by hash in
+  `compatibility.json`) remembers the path of each successfully saved F2
+  screenshot in memory — the mod never scans the screenshots folder. The
+  second mod keybind (`post_screenshot`, default `key.keyboard.v`) sends
+  `GameCommand::PostImage` with that path, or chats "take a screenshot first
+  (F2)" when there is none.
+- Verified: offline worker tests assert the stub PDS receives the exact image
+  bytes on `uploadBlob` and an embed with `$type`/`alt`/`aspectRatio` on
+  `createRecord`; in the modded game, F2 saves a screenshot, the keybind after
+  it sends the command (no "screenshot first" hint), and before it the hint
+  shows; against a real PDS `pds_check` posted an actual in-game screenshot
+  (see PR).
+
 ### Manual check against a real PDS
 
 `crates/atmospheric/examples/pds_check.rs` spawns the worker exactly as the
@@ -96,10 +122,11 @@ glue will, with a throwaway settings folder in the system temp dir, and
 prints every event:
 
 ```sh
-ATMOSPHERIC_PDS_URL="https://bsky.social" \
-ATMOSPHERIC_IDENTIFIER="you.bsky.social" \
+ATMOSPHERIC_PDS_URL="https://your-pds.example" \   # the account's own PDS, not always bsky.social
+ATMOSPHERIC_IDENTIFIER="you.example" \
 ATMOSPHERIC_APP_PASSWORD="xxxx-xxxx-xxxx-xxxx" \
-ATMOSPHERIC_POST_TEXT="hello from atmospheric-horizon (M2 check)" \
+ATMOSPHERIC_POST_TEXT="hello from atmospheric-horizon" \      # optional
+ATMOSPHERIC_POST_IMAGE="/path/to/screenshot.png" \            # optional, M3
 cargo run -p atmospheric --example pds_check
 ```
 
