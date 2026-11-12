@@ -282,6 +282,34 @@ and shutdown-during-pending-login. Real-PDS wire check: `pds_check` with
 `ATMOSPHERIC_OAUTH_PAR_ONLY=1` (see below) pushed a PAR accepted by
 eurosky.social and bsky.social.
 
+### M9: player skin records (`at.atpcraft.player.skin`)
+
+`/atmospheric skin [path] [default|slim]` sends `Command::PostSkin`; with no
+path the worker falls back to `skin_path`/`cape_path` in `config.json` (the
+worker is the only module that touches disk). The flow, matching atpcraft's
+`PlayerSkinWriter`/`PlayerSkinRecord` wire format (reimplemented as data from
+its lexicons, no code copied):
+
+1. read the PNG(s), reject anything that is not `image/png` or over the
+   lexicon's 1 MiB blob cap before any network call;
+2. `com.atproto.repo.uploadBlob` each PNG (`$type: "blob"` refs come back);
+3. `com.atproto.repo.getRecord` at rkey = the mod's Ed25519 key id and keep
+   endorsements from *other* keys (atpcraft's `create(existing)` semantics);
+4. build the record `{skin?, cape?, model, timestamp, endorsements}` and sign
+   the canonical payload `{did, skinCid?, capeCid?, model, timestamp, server}`
+   (key-sorted JSON, same `canonical_json` as M6; asset keys omitted when
+   absent) — signature is base64-no-pad Ed25519, alg `ed25519`;
+5. `com.atproto.repo.putRecord` (upsert, `validate: false`) at the key id —
+   not `createRecord`, so re-publishing replaces rather than fails.
+
+Verified against the real PDS: `pds_check` with `ATMOSPHERIC_POST_SKIN=…`
+logged in as the test account and upserted
+`at://…/at.atpcraft.player.skin/<key id>` on eurosky.social; the stored record
+was read back and matches the lexicon exactly (test record deleted after).
+Stub-PDS tests cover the upload+upsert path, the endorsement verifying against
+the persisted key, foreign-endorsement preservation across re-publish, and
+the non-PNG/no-path rejections (no upload happens).
+
 ### Manual check against a real PDS
 
 `crates/atmospheric/examples/pds_check.rs` spawns the worker exactly as the
@@ -296,6 +324,9 @@ ATMOSPHERIC_POST_TEXT="hello from atmospheric-horizon" \      # optional
 ATMOSPHERIC_POST_IMAGE="/path/to/screenshot.png" \            # optional, M3
 ATMOSPHERIC_POST_CHAT="hello from in-game chat" \              # optional, M5
 ATMOSPHERIC_POST_SNAPSHOT=1 \                                  # optional, M6
+ATMOSPHERIC_POST_SKIN="/path/to/skin.png" \                    # optional, M9
+ATMOSPHERIC_POST_CAPE="/path/to/cape.png" \                    # optional, M9
+ATMOSPHERIC_SKIN_MODEL="slim" \                                # optional, M9
 cargo run -p atmospheric --example pds_check
 ```
 
