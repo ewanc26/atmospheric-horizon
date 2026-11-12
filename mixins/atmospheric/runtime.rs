@@ -79,6 +79,16 @@ pub enum SessionState {
     Failed { message: String },
 }
 
+/// One notification, reduced to what the HUD shows. Plain data: the worker
+/// side has the same struct with protocol types behind it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationDigest {
+    pub uri: String,
+    pub author_handle: String,
+    pub reason: String,
+    pub text_snippet: String,
+}
+
 /// Events the worker thread reports back to the game side.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +101,8 @@ pub enum ModEvent {
     Posted { uri: String },
     /// Something failed; carries a HUD-friendly message.
     Failed { message: String },
+    /// The latest notification digest (M4).
+    Notifications { items: Vec<NotificationDigest> },
 }
 
 /// The HUD line one event leaves behind.
@@ -107,6 +119,18 @@ pub fn status_text(event: &ModEvent) -> String {
         }
         ModEvent::Posted { uri } => format!("atmospheric: posted {uri}"),
         ModEvent::Failed { message } => format!("atmospheric: {message}"),
+        ModEvent::Notifications { items } => {
+            if items.is_empty() {
+                "atmospheric: no new notifications".into()
+            } else {
+                let heads: Vec<String> = items
+                    .iter()
+                    .take(3)
+                    .map(|i| format!("{} from {}", i.reason, i.author_handle))
+                    .collect();
+                format!("atmospheric: {} new: {}", items.len(), heads.join(", "))
+            }
+        }
     }
 }
 
@@ -239,6 +263,11 @@ pub fn post_screenshot(alt_text: &str) -> bool {
     }
 }
 
+/// Ask the worker to poll notifications now (it also polls on a timer).
+pub fn refresh_notifications() {
+    send(GameCommand::RefreshNotifications);
+}
+
 /// Ask the worker to stop.
 #[allow(dead_code)]
 pub fn shutdown() {
@@ -327,9 +356,19 @@ mod tests {
                 message: "boom".into(),
             })
             .unwrap();
+        event_tx
+            .send(ModEvent::Notifications {
+                items: vec![NotificationDigest {
+                    uri: "at://did:plc:bob/app.bsky.feed.post/2".into(),
+                    author_handle: "bob.test".into(),
+                    reason: "reply".into(),
+                    text_snippet: "nice post!".into(),
+                }],
+            })
+            .unwrap();
         assert_eq!(drain_events(1).len(), 1);
-        assert!(drain_events(16).is_empty());
-        assert_eq!(status_line(), "atmospheric: boom");
+        assert_eq!(drain_events(16).len(), 1);
+        assert_eq!(status_line(), "atmospheric: 1 new: reply from bob.test");
 
         // The worker side stays usable after the game side drops it.
         drop(event_tx);
