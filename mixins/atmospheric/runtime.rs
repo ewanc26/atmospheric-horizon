@@ -210,16 +210,24 @@ pub fn location_line(x: f64, y: f64, z: f64, dimension: &str) -> String {
 
 static COMMAND_TX: OnceLock<Sender<GameCommand>> = OnceLock::new();
 static EVENTS_RX: OnceLock<Mutex<Receiver<ModEvent>>> = OnceLock::new();
-static STATUS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+static STATUS: OnceLock<Mutex<Vec<(String, std::time::Instant)>>> = OnceLock::new();
 static LAST_SHOT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 /// How many status lines the HUD shows at once.
 pub const STATUS_LINES_MAX: usize = 3;
 
-fn status_slot() -> &'static Mutex<Vec<String>> {
+/// How long a HUD status line stays visible before it expires (#17).
+pub const STATUS_LINE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn status_slot() -> &'static Mutex<Vec<(String, std::time::Instant)>> {
     // Empty until the first worker event: with no worker attached (see
     // issue #2) there is nothing worth showing, so the HUD box stays hidden.
     STATUS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Drop status lines older than [`STATUS_LINE_TTL`].
+fn prune_expired(status: &mut Vec<(String, std::time::Instant)>, now: std::time::Instant) {
+    status.retain(|(_, at)| now.duration_since(*at) < STATUS_LINE_TTL);
 }
 
 fn last_shot_slot() -> &'static Mutex<Option<String>> {
@@ -264,12 +272,14 @@ pub fn drain_events(max: usize) -> Vec<ModEvent> {
         }
     }
     if let Ok(mut status) = status_slot().lock() {
+        let now = std::time::Instant::now();
+        prune_expired(&mut status, now);
         for event in &drained {
             let line = status_text(event);
             // Keep a short history instead of only the latest event, so a
             // notification digest is not overwritten immediately (#7).
-            if status.last() != Some(&line) {
-                status.push(line);
+            if status.last().map(|(l, _)| l) != Some(&line) {
+                status.push((line, now));
             }
             while status.len() > STATUS_LINES_MAX {
                 status.remove(0);
@@ -280,11 +290,15 @@ pub fn drain_events(max: usize) -> Vec<ModEvent> {
 }
 
 /// The current HUD status lines, oldest first; empty until the first worker
-/// event, in which case the HUD draws nothing.
+/// event, in which case the HUD draws nothing. Lines older than
+/// [`STATUS_LINE_TTL`] have expired and are dropped (#17).
 pub fn status_lines() -> Vec<String> {
     status_slot()
         .lock()
-        .map(|status| status.clone())
+        .map(|mut status| {
+            prune_expired(&mut status, std::time::Instant::now());
+            status.iter().map(|(line, _)| line.clone()).collect()
+        })
         .unwrap_or_default()
 }
 
@@ -544,6 +558,18 @@ mod tests {
         // The worker side stays usable after the game side drops it.
         drop(event_tx);
         post_text("still works");
+    }
+
+    #[test]
+    fn status_lines_expire_after_the_ttl() {
+        let now = std::time::Instant::now();
+        let old = now
+            .checked_sub(STATUS_LINE_TTL + std::time::Duration::from_secs(1))
+            .expect("the test clock supports this");
+        let mut status = vec![("stale".to_string(), old), ("fresh".to_string(), now)];
+        prune_expired(&mut status, now);
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0].0, "fresh");
     }
 
     #[test]
