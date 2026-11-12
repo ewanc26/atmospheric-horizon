@@ -36,6 +36,11 @@ pub struct Config {
     /// Persist the session's refresh token so restarts resume without the
     /// app password (`session.json` in the mod's storage folder).
     pub persist_session: bool,
+    /// The OAuth `client_id` (M8). Empty means the default loopback form
+    /// (`http://localhost?client_id=…`); set it to a hosted client-metadata
+    /// URL (see `oauth-client-metadata.json` in the repo root) for
+    /// authorization servers that do not implement the loopback exception.
+    pub oauth_client_id: String,
 }
 
 impl Default for Config {
@@ -49,6 +54,7 @@ impl Default for Config {
             post_chat_messages: false,
             chat_server_id: default_chat_server_id(),
             persist_session: true,
+            oauth_client_id: String::new(),
         }
     }
 }
@@ -68,6 +74,16 @@ impl Config {
     pub fn is_usable(&self) -> bool {
         !self.identifier.is_empty() && !self.app_password.is_empty()
     }
+
+    /// The OAuth client_id to use: the configured hosted metadata URL when
+    /// set, otherwise the loopback default for the given scope.
+    pub fn oauth_client_id(&self, scope: &str) -> String {
+        if self.oauth_client_id.is_empty() {
+            crate::oauth::client_id(scope)
+        } else {
+            self.oauth_client_id.clone()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -85,6 +101,7 @@ mod tests {
             post_chat_messages: true,
             chat_server_id: "my-server".into(),
             persist_session: true,
+            oauth_client_id: String::new(),
         };
         let raw = config.to_json().unwrap();
         let back = Config::from_json(&raw).unwrap();

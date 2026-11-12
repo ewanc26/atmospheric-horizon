@@ -1,0 +1,12 @@
+{
+  "client_id": "https://ewanc26.github.io/atmospheric-horizon/oauth-client-metadata.json",
+  "client_name": "atmospheric — Horizon mod",
+  "client_uri": "https://ewanc26.github.io/atmospheric-horizon/",
+  "redirect_uris": ["http://127.0.0.1/", "http://[::1]/"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "scope": "atproto transition:generic",
+  "token_endpoint_auth_method": "none",
+  "application_type": "native",
+  "dpop_bound_access_tokens": true
+}
