@@ -12,7 +12,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric list <list>, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -75,6 +75,17 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
         *ran = true;
         m::post_server_profile();
         game.native_chat("atmospheric: publishing the server profile record…");
+    } else if rest == "list" || rest.starts_with("list ") {
+        let reference = rest.strip_prefix("list").unwrap_or("").trim();
+        *ran = true;
+        if reference.is_empty() {
+            game.native_chat(
+                "atmospheric: /atmospheric list <at://…/app.bsky.graph.list/<rkey> | bsky.app list URL>",
+            );
+        } else {
+            m::fetch_list(reference);
+            game.native_chat("atmospheric: fetching the list…");
+        }
     } else if rest == "chat" || rest.starts_with("chat ") {
         let text = rest.strip_prefix("chat").unwrap_or("").trim();
         *ran = true;

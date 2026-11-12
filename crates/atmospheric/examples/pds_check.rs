@@ -15,6 +15,7 @@
 //! ATMOSPHERIC_POST_CAPE="/path/to/cape.png" \          # optional, M9
 //! ATMOSPHERIC_SKIN_MODEL="slim" \                        # optional, M9
 //! ATMOSPHERIC_POST_SERVER_PROFILE=1 \                    # optional, M10
+//! ATMOSPHERIC_FETCH_LIST="at://did:…/app.bsky.graph.list/<rkey>" \  # optional, M11
 //! cargo run -p atmospheric --example pds_check
 //! ```
 //!
@@ -92,6 +93,7 @@ fn main() {
         server_contact: String::new(),
         server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
         game_version: "26.3".into(),
+        appview_url: "https://public.api.bsky.app".into(),
     };
     if oauth_handle.is_none() {
         // App-password mode needs all three; OAuth mode needs none of them.
@@ -245,6 +247,38 @@ fn main() {
                 Err(error) => {
                     eprintln!("no event from the worker: {error}");
                     let _ = handle.join();
+                    exit(1);
+                }
+            }
+        }
+    }
+
+    // Optionally fetch a public list (M11, join-gate read side).
+    if let Some(reference) = env::var("ATMOSPHERIC_FETCH_LIST")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        command_tx
+            .send(Command::FetchList { reference })
+            .expect("send FetchList");
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(event) => {
+                    println!("event: {event:?}");
+                    match event {
+                        Event::ListMembers { members, .. } => {
+                            println!("list has {} members", members.len());
+                            break;
+                        }
+                        Event::Failed { message } => {
+                            eprintln!("list fetch failed: {message}");
+                            exit(1);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(error) => {
+                    eprintln!("no event from the worker: {error}");
                     exit(1);
                 }
             }
