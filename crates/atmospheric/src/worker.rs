@@ -9,15 +9,19 @@
 use crate::{
     Command, Config, Event, actions,
     error::AtmosphericError,
+    notifications::{self, SeenCursor},
     session::{self, Agent, SessionState},
 };
 use std::{
     path::PathBuf,
     sync::mpsc::{Receiver, Sender},
+    time::Duration,
 };
 
 /// The settings file's name inside the mod's storage folder.
 pub const CONFIG_FILE: &str = "config.json";
+/// The notification cursor's file, same folder.
+pub const CURSOR_FILE: &str = "cursor.json";
 
 /// What the worker needs besides the channels: where its files live.
 #[derive(Debug, Clone)]
@@ -82,16 +86,35 @@ pub fn spawn(
 
                 let mut worker = Worker::new(options, events);
                 worker.emit(Event::Session(SessionState::LoggedOut));
-                while let Some(command) = rx.recv().await {
-                    let shutdown = matches!(command, Command::Shutdown);
-                    worker.handle(command).await;
-                    if shutdown {
-                        break;
+                // The notification poll timer (M4): ticks at the configured
+                // interval once logged in; before that the ticks are no-ops.
+                let mut poll =
+                    tokio::time::interval(Duration::from_secs(worker.poll_interval_secs));
+                poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tokio::select! {
+                        command = rx.recv() => {
+                            match command {
+                                Some(Command::Shutdown) | None => break,
+                                Some(command) => {
+                                    let login = matches!(command, Command::Login);
+                                    worker.handle(command).await;
+                                    if login && worker.is_logged_in() {
+                                        poll = tokio::time::interval(Duration::from_secs(
+                                            worker.poll_interval_secs,
+                                        ));
+                                        poll.set_missed_tick_behavior(
+                                            tokio::time::MissedTickBehavior::Delay,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        _ = poll.tick() => {
+                            worker.poll_notifications(false).await;
+                        }
                     }
                 }
-                // TODO(M4): a poll interval (`config.poll_interval_secs`)
-                // ticks `Command::RefreshNotifications` here, selected
-                // against `rx` with `tokio::select!`.
             });
         })
         .expect("spawn the atmospheric worker thread")
@@ -102,17 +125,31 @@ struct Worker {
     storage_dir: PathBuf,
     agent: Option<Agent>,
     did: Option<String>,
+    cursor: SeenCursor,
+    poll_interval_secs: u64,
     events: Sender<Event>,
 }
 
 impl Worker {
     fn new(options: WorkerOptions, events: Sender<Event>) -> Self {
+        // The seen-cursor persists across restarts, so old notifications are
+        // not re-shown; a missing file just means "everything is new".
+        let cursor = std::fs::read_to_string(options.storage_dir.join(CURSOR_FILE))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
         Self {
             storage_dir: options.storage_dir,
             agent: None,
             did: None,
+            cursor,
+            poll_interval_secs: Config::default().poll_interval_secs,
             events,
         }
+    }
+
+    fn is_logged_in(&self) -> bool {
+        self.agent.is_some() && self.did.is_some()
     }
 
     fn config_path(&self) -> PathBuf {
@@ -169,11 +206,43 @@ impl Worker {
                 Ok(uri) => self.emit(Event::Posted { uri }),
                 Err(error) => self.fail(error.to_string()),
             },
-            Command::RefreshNotifications => {
-                // TODO(M4): notifications::poll with the persisted cursor.
-                self.fail("notification polling lands in M4");
+            Command::RefreshNotifications => self.poll_notifications(true).await,
+        }
+    }
+
+    /// Poll notifications (M4): on the timer (`explicit == false`) or on
+    /// request. The cursor persists to disk so restarts do not re-show old
+    /// notifications. Timer ticks while logged out are silent no-ops.
+    async fn poll_notifications(&mut self, explicit: bool) {
+        if !self.is_logged_in() {
+            if explicit {
+                self.fail(AtmosphericError::NotLoggedIn.to_string());
+            }
+            return;
+        }
+        let agent = self.agent.as_ref().expect("checked above");
+        match notifications::poll(agent, &mut self.cursor).await {
+            Ok(items) => {
+                if !items.is_empty()
+                    && let Err(error) = self.save_cursor()
+                {
+                    self.fail(format!("could not save the cursor file: {error}"));
+                }
+                self.emit(Event::Notifications { items });
+            }
+            Err(error) => {
+                if explicit {
+                    self.fail(error.to_string());
+                }
             }
         }
+    }
+
+    /// Persist the seen-cursor (worker owns disk I/O).
+    fn save_cursor(&self) -> crate::error::Result<()> {
+        let raw = serde_json::to_string(&self.cursor)?;
+        std::fs::write(self.storage_dir.join(CURSOR_FILE), raw)?;
+        Ok(())
     }
 
     /// Post an image file: read it here (the worker owns disk I/O), check it
@@ -234,6 +303,7 @@ impl Worker {
                     let did = session.did.as_str().to_owned();
                     self.agent = Some(agent);
                     self.did = Some(did.clone());
+                    self.poll_interval_secs = config.poll_interval_secs.max(5);
                     self.emit(Event::Session(SessionState::LoggedIn { did }));
                 }
                 Err(error) => self.emit(Event::Session(SessionState::Failed {
@@ -403,67 +473,90 @@ mod tests {
             authorized,
         });
 
-        let (status, payload): (&str, String) = match path.as_str() {
-            "/xrpc/com.atproto.server.createSession" => {
-                if accept_bad_password || !body_string.contains("correct-horse") {
-                    (
+        let (status, payload): (&str, String) = if path
+            .starts_with("/xrpc/app.bsky.notification.listNotifications")
+        {
+            // First poll (no seenAt) returns two notifications; once the
+            // client sends seenAt, the list is empty.
+            if !authorized {
+                (
+                    "401 Unauthorized",
+                    r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
+                )
+            } else if path.contains("seenAt=") {
+                (
+                    "200 OK",
+                    r#"{"seenAt":"2026-11-12T12:00:00.000Z","notifications":[]}"#.to_string(),
+                )
+            } else {
+                (
+                    "200 OK",
+                    r#"{"cursor":"c2","seenAt":"2026-11-12T12:00:00.000Z","notifications":[{"uri":"at://did:plc:alice/app.bsky.feed.like/1","cid":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy","indexedAt":"2026-11-12T10:00:00.000Z","isRead":false,"reason":"like","record":{"$type":"app.bsky.feed.like"},"author":{"did":"did:plc:alice","handle":"alice.test"}},{"uri":"at://did:plc:bob/app.bsky.feed.post/2","cid":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy","indexedAt":"2026-11-12T11:00:00.000Z","isRead":false,"reason":"reply","record":{"$type":"app.bsky.feed.post","text":"nice post!"},"author":{"did":"did:plc:bob","handle":"bob.test"}}]}"#.to_string(),
+                )
+            }
+        } else {
+            match path.split('?').next().unwrap_or(&path) {
+                "/xrpc/com.atproto.server.createSession" => {
+                    if accept_bad_password || !body_string.contains("correct-horse") {
+                        (
                         "401 Unauthorized",
                         r#"{"error":"AuthenticationRequired","message":"Invalid identifier or password"}"#.to_string(),
                     )
-                } else {
-                    (
+                    } else {
+                        (
                         "200 OK",
                         r#"{"did":"did:plc:stubuser","handle":"stub.test","accessJwt":"stub-access","refreshJwt":"stub-refresh","active":true}"#.to_string(),
                     )
+                    }
                 }
-            }
-            "/xrpc/com.atproto.server.getSession" => {
-                if authorized {
-                    (
-                        "200 OK",
-                        r#"{"did":"did:plc:stubuser","handle":"stub.test","active":true}"#
-                            .to_string(),
-                    )
-                } else {
-                    (
-                        "401 Unauthorized",
-                        r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
-                    )
+                "/xrpc/com.atproto.server.getSession" => {
+                    if authorized {
+                        (
+                            "200 OK",
+                            r#"{"did":"did:plc:stubuser","handle":"stub.test","active":true}"#
+                                .to_string(),
+                        )
+                    } else {
+                        (
+                            "401 Unauthorized",
+                            r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
+                        )
+                    }
                 }
-            }
-            "/xrpc/com.atproto.repo.uploadBlob" => {
-                if authorized {
-                    let size = body.len();
-                    (
-                        "200 OK",
-                        format!(
-                            r#"{{"blob":{{"$type":"blob","ref":{{"$link":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy"}},"mimeType":"image/png","size":{size}}}}}"#
-                        ),
-                    )
-                } else {
-                    (
-                        "401 Unauthorized",
-                        r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
-                    )
+                "/xrpc/com.atproto.repo.uploadBlob" => {
+                    if authorized {
+                        let size = body.len();
+                        (
+                            "200 OK",
+                            format!(
+                                r#"{{"blob":{{"$type":"blob","ref":{{"$link":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy"}},"mimeType":"image/png","size":{size}}}}}"#
+                            ),
+                        )
+                    } else {
+                        (
+                            "401 Unauthorized",
+                            r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
+                        )
+                    }
                 }
-            }
-            "/xrpc/com.atproto.repo.createRecord" => {
-                if authorized {
-                    (
+                "/xrpc/com.atproto.repo.createRecord" => {
+                    if authorized {
+                        (
                         "200 OK",
                         r#"{"uri":"at://did:plc:stubuser/app.bsky.feed.post/3jub4stub","cid":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy"}"#.to_string(),
                     )
-                } else {
-                    (
-                        "401 Unauthorized",
-                        r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
-                    )
+                    } else {
+                        (
+                            "401 Unauthorized",
+                            r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
+                        )
+                    }
                 }
+                _ => (
+                    "404 Not Found",
+                    r#"{"error":"UnknownEndpoint"}"#.to_string(),
+                ),
             }
-            _ => (
-                "404 Not Found",
-                r#"{"error":"UnknownEndpoint"}"#.to_string(),
-            ),
         };
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
@@ -778,6 +871,54 @@ mod tests {
                 .any(|r| r.path == "/xrpc/com.atproto.repo.uploadBlob"),
             "nothing was uploaded for the rejected files"
         );
+    }
+
+    #[test]
+    fn notifications_poll_dedupes_with_the_persisted_cursor() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("notifications");
+        let mut config = test_config(pds.url.clone());
+        config.poll_interval_secs = 3600; // only the first (immediate) tick fires
+        write_config(&dir, &config);
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir.clone());
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+
+        // The timer's first tick polls right after login: two new items.
+        match wait_for(
+            &event_rx,
+            |e| matches!(e, Event::Notifications { items } if items.len() == 2),
+        ) {
+            Event::Notifications { items } => {
+                assert_eq!(items[0].author_handle, "alice.test");
+                assert_eq!(items[0].reason, "like");
+                assert_eq!(items[1].author_handle, "bob.test");
+                assert_eq!(items[1].reason, "reply");
+                assert_eq!(items[1].text_snippet, "nice post!");
+            }
+            other => panic!("expected Notifications(2), got {other:?}"),
+        }
+
+        // An explicit refresh now sees nothing new (the cursor advanced).
+        command_tx.send(Command::RefreshNotifications).unwrap();
+        match wait_for(
+            &event_rx,
+            |e| matches!(e, Event::Notifications { items } if items.is_empty()),
+        ) {
+            Event::Notifications { items } => assert!(items.is_empty()),
+            other => panic!("expected Notifications(0), got {other:?}"),
+        }
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        // The cursor was persisted, at the newest notification's timestamp.
+        let raw = std::fs::read_to_string(dir.join(CURSOR_FILE)).unwrap();
+        let cursor: notifications::SeenCursor = serde_json::from_str(&raw).unwrap();
+        assert_eq!(cursor.seen_at.as_deref(), Some("2026-11-12T11:00:00.000Z"));
     }
 
     #[test]
