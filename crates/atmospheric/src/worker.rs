@@ -370,6 +370,13 @@ impl Worker {
                     Err(error) => self.fail(error.to_string()),
                 }
             }
+            Command::PostServerProfile => {
+                self.ensure_oauth_fresh().await;
+                match self.post_server_profile().await {
+                    Ok(uri) => self.emit(Event::Posted { uri }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
             Command::PostDeathMessage { text } => {
                 if !self.post_death_messages {
                     return;
@@ -647,6 +654,80 @@ impl Worker {
             did,
             records::SKIN_COLLECTION,
             &key_id,
+            record.to_unknown()?,
+        )
+        .await
+    }
+
+    /// Publish/refresh the account's server profile
+    /// (`at.atpcraft.server.profile` at rkey `self`, M10, atpcraft port).
+    /// Identity fields and capabilities come from the settings file; the
+    /// `signingKey` block is the mod's persisted Ed25519 key; `createdAt` is
+    /// preserved from the existing record.
+    async fn post_server_profile(&mut self) -> crate::error::Result<String> {
+        let (Some(agent), Some(did)) = (&self.agent, &self.did) else {
+            return Err(AtmosphericError::NotLoggedIn);
+        };
+        let config = self.load_config().unwrap_or_default();
+        let key = match &self.signing_key {
+            Some(key) => key.clone(),
+            None => {
+                let key = self.load_or_create_signing_key()?;
+                self.signing_key = Some(key.clone());
+                key
+            }
+        };
+        let key_id = signing::key_id_of(&key.verifying_key());
+        // Preserve createdAt across re-publishes (atpcraft's writer does the
+        // same via getRecord).
+        let created_at = actions::get_record(
+            agent,
+            did,
+            records::SERVER_PROFILE_COLLECTION,
+            records::SERVER_PROFILE_RKEY,
+        )
+        .await?
+        .and_then(|value| serde_json::to_value(&value).ok())
+        .and_then(|value| serde_json::from_value::<records::ServerProfileRecord>(value).ok())
+        .and_then(|existing| existing.created_at);
+        let name = if config.server_name.is_empty() {
+            self.identifier.clone()
+        } else {
+            config.server_name.clone()
+        };
+        // First publish stamps createdAt too (atpcraft: existing ?: now).
+        let now = atrium_api::types::string::Datetime::now();
+        let now_str = serde_json::to_value(&now)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let created_at = created_at.or(Some(now_str));
+        let record = records::ServerProfileRecord::new(
+            name,
+            config.server_description.clone(),
+            config.server_address.clone(),
+            config.game_version.clone(),
+            format!("atmospheric-horizon {}", env!("CARGO_PKG_VERSION")),
+            records::ProfileSigningKey {
+                key_id,
+                public_key: signing::public_key_spki_b64(&key.verifying_key()),
+                alg: signing::ALG_ED25519.into(),
+            },
+            config.server_capabilities.clone(),
+            Some(records::ProfileOperator {
+                did: did.clone(),
+                handle: self.identifier.clone(),
+                website: config.server_website.clone(),
+                contact: config.server_contact.clone(),
+            }),
+            created_at,
+            now,
+        );
+        actions::put_record(
+            agent,
+            did,
+            records::SERVER_PROFILE_COLLECTION,
+            records::SERVER_PROFILE_RKEY,
             record.to_unknown()?,
         )
         .await
@@ -996,6 +1077,13 @@ mod tests {
             skin_path: String::new(),
             cape_path: String::new(),
             skin_model: "default".into(),
+            server_name: String::new(),
+            server_description: String::new(),
+            server_address: String::new(),
+            server_website: String::new(),
+            server_contact: String::new(),
+            server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
+            game_version: "26.3".into(),
         }
     }
 
@@ -1528,6 +1616,13 @@ mod tests {
             skin_path: String::new(),
             cape_path: String::new(),
             skin_model: "default".into(),
+            server_name: String::new(),
+            server_description: String::new(),
+            server_address: String::new(),
+            server_website: String::new(),
+            server_contact: String::new(),
+            server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
+            game_version: "26.3".into(),
         };
         command_tx
             .send(Command::SaveConfig {
@@ -2182,6 +2277,99 @@ mod tests {
                 .any(|r| r.path == "/xrpc/com.atproto.repo.uploadBlob"),
             "nothing was uploaded"
         );
+    }
+
+    #[test]
+    fn post_server_profile_upserts_the_descriptor_at_self() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("server-profile");
+        let mut config = test_config(pds.url.clone());
+        config.server_name = "Test Server".into();
+        config.server_address = "play.example.com:25565".into();
+        config.server_capabilities =
+            vec!["skin-sync".into(), "join-gate".into(), "skin-sync".into()];
+        write_config(&dir, &config);
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir.clone());
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        command_tx.send(Command::PostServerProfile).unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Posted { .. })) {
+            Event::Posted { uri } => {
+                assert_eq!(uri, "at://did:plc:stubuser/at.atpcraft.server.profile/self");
+            }
+            other => panic!("expected Posted, got {other:?}"),
+        }
+        // Re-publish: createdAt is preserved, updatedAt moves on.
+        command_tx.send(Command::PostServerProfile).unwrap();
+        let _ = wait_for(&event_rx, |e| matches!(e, Event::Posted { .. }));
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let key_file: signing::SigningKeyFile =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(SIGNING_KEY_FILE)).unwrap())
+                .unwrap();
+        let requests = pds.requests();
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.path.starts_with("/xrpc/com.atproto.repo.getRecord")
+                    && r.path.contains("collection=at.atpcraft.server.profile")
+                    && r.path.contains("rkey=self")),
+            "the existing profile was fetched to preserve createdAt"
+        );
+        let puts: Vec<&Captured> = requests
+            .iter()
+            .filter(|r| r.path == "/xrpc/com.atproto.repo.putRecord")
+            .collect();
+        assert_eq!(puts.len(), 2, "two publishes = two upserts");
+        let body: serde_json::Value = serde_json::from_str(&puts[1].body).unwrap();
+        assert_eq!(body["collection"], "at.atpcraft.server.profile");
+        assert_eq!(body["rkey"], "self");
+        assert_eq!(body["validate"], false);
+        let record = &body["record"];
+        assert_eq!(record["$type"], "at.atpcraft.server.profile");
+        assert_eq!(record["name"], "Test Server");
+        assert_eq!(record["address"], "play.example.com:25565");
+        assert_eq!(record["minecraftVersion"], "26.3");
+        assert!(
+            record["atpcraftVersion"]
+                .as_str()
+                .unwrap()
+                .starts_with("atmospheric-horizon "),
+            "{}",
+            record["atpcraftVersion"]
+        );
+        // capabilities sorted + deduped (the lexicon requires it)
+        assert_eq!(record["capabilities"][0], "join-gate");
+        assert_eq!(record["capabilities"][1], "skin-sync");
+        assert_eq!(record["capabilities"].as_array().unwrap().len(), 2);
+        // signingKey block matches the persisted key
+        assert_eq!(record["signingKey"]["keyId"], key_file.key_id);
+        assert_eq!(record["signingKey"]["alg"], "ed25519");
+        let key = signing::from_key_file(&key_file).unwrap();
+        assert_eq!(
+            record["signingKey"]["publicKey"].as_str().unwrap(),
+            signing::public_key_spki_b64(&key.verifying_key())
+        );
+        // operator block
+        assert_eq!(record["operator"]["did"], "did:plc:stubuser");
+        assert_eq!(record["operator"]["handle"], "stub.test");
+        // no per-record signature (repo-authenticated), createdAt preserved
+        assert!(record.get("sig").is_none() && record.get("endorsements").is_none());
+        let first: serde_json::Value = serde_json::from_str(
+            &serde_json::from_str::<serde_json::Value>(&puts[0].body).unwrap()["record"]
+                .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            record["createdAt"].as_str().unwrap(),
+            first["createdAt"].as_str().unwrap(),
+            "createdAt survives re-publish"
+        );
+        assert!(!record["updatedAt"].as_str().unwrap().is_empty());
     }
 
     #[test]

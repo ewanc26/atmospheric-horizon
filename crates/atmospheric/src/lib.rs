@@ -59,6 +59,11 @@ pub enum Command {
         cape_path: Option<String>,
         model: String,
     },
+    /// Publish/refresh the account's server profile
+    /// (`at.atpcraft.server.profile` at rkey `self`, atpcraft port, M10).
+    /// Identity fields come from the settings file; the signing key block is
+    /// the mod's persisted Ed25519 key.
+    PostServerProfile,
     /// Post the player's death message to Bluesky (only when
     /// `post_death_messages` is enabled).
     PostDeathMessage { text: String },

@@ -49,6 +49,18 @@ pub struct Config {
     /// The skin model written into `at.atpcraft.player.skin` records (M9):
     /// "default" or "slim".
     pub skin_model: String,
+    /// Server-profile identity fields (M10); blank means "omit from the
+    /// record", except `server_name`, which falls back to the login handle.
+    pub server_name: String,
+    pub server_description: String,
+    pub server_address: String,
+    pub server_website: String,
+    pub server_contact: String,
+    /// The `capabilities` list of the server profile (M10); sorted and
+    /// deduped on write.
+    pub server_capabilities: Vec<String>,
+    /// The `minecraftVersion` written into the server profile (M10).
+    pub game_version: String,
 }
 
 impl Default for Config {
@@ -66,6 +78,13 @@ impl Default for Config {
             skin_path: String::new(),
             cape_path: String::new(),
             skin_model: "default".into(),
+            server_name: String::new(),
+            server_description: String::new(),
+            server_address: String::new(),
+            server_website: String::new(),
+            server_contact: String::new(),
+            server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
+            game_version: "26.3".into(),
         }
     }
 }
@@ -116,6 +135,13 @@ mod tests {
             skin_path: String::new(),
             cape_path: String::new(),
             skin_model: "default".into(),
+            server_name: String::new(),
+            server_description: String::new(),
+            server_address: String::new(),
+            server_website: String::new(),
+            server_contact: String::new(),
+            server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
+            game_version: "26.3".into(),
         };
         let raw = config.to_json().unwrap();
         let back = Config::from_json(&raw).unwrap();
