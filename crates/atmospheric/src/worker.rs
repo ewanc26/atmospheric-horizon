@@ -764,9 +764,16 @@ impl Worker {
                     }
                     self.emit(Event::Session(SessionState::LoggedIn { did }));
                 }
-                Err(_) => {
-                    // Expired/revoked OAuth refresh token: stay logged out.
+                Err(error) => {
+                    // Expired/revoked OAuth refresh token (or the
+                    // authorization server unreachable): stay logged out,
+                    // but say so instead of failing silently (#18).
                     self.stored_session = None;
+                    self.emit(Event::Session(SessionState::Failed {
+                        message: format!(
+                            "could not resume the stored OAuth session ({error}) — log in again with /atmospheric login <handle>"
+                        ),
+                    }));
                 }
             }
             return;
@@ -791,9 +798,17 @@ impl Worker {
                 }
                 self.emit(Event::Session(SessionState::LoggedIn { did }));
             }
-            Err(_) => {
-                // Expired/revoked refresh token: stay logged out.
+            Err(error) => {
+                // Expired/revoked refresh token (or the PDS unreachable):
+                // stay logged out, but say so instead of failing silently
+                // (#18). The persisted file stays, so a later restart with
+                // network access retries the resume.
                 self.stored_session = None;
+                self.emit(Event::Session(SessionState::Failed {
+                    message: format!(
+                        "could not resume the stored session ({error}) — log in again with /atmospheric login"
+                    ),
+                }));
             }
         }
     }
@@ -1780,6 +1795,43 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(dir.join(SESSION_FILE)).unwrap())
                 .unwrap();
         assert_eq!(saved.refresh_jwt, "stub-refresh-2", "the rotated token");
+    }
+
+    #[test]
+    fn startup_reports_a_failed_resume_instead_of_staying_silent() {
+        let dir = temp_dir("resume-fails");
+        // A persisted session whose PDS is unreachable (port 1 refuses).
+        let stored = session::StoredSession {
+            pds_url: "http://127.0.0.1:1".into(),
+            did: "did:plc:stubuser".into(),
+            handle: "stub.test".into(),
+            refresh_jwt: "stub-refresh".into(),
+            oauth: None,
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(SESSION_FILE),
+            serde_json::to_string(&stored).unwrap(),
+        )
+        .unwrap();
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir.clone());
+        // #18: the resume failure surfaces as an event, not silence.
+        match wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::Failed { .. }))
+        }) {
+            Event::Session(SessionState::Failed { message }) => {
+                assert!(
+                    message.contains("could not resume the stored session"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected Session(Failed), got {other:?}"),
+        }
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+        // The persisted file is kept so a later start can retry.
+        assert!(dir.join(SESSION_FILE).exists());
     }
 
     #[test]
