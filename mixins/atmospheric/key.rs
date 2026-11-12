@@ -14,5 +14,10 @@ fn atmospheric_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
         && !m::post_screenshot("Screenshot from Horizon")
     {
         game.native_chat("atmospheric: take a screenshot first (F2)");
+    } else if key == game.native_mod_key(m::ID, m::KEY_SNAPSHOT, m::KEY_SNAPSHOT_DEFAULT) {
+        if let Some(p) = game.native_player() {
+            // The worker fills an empty username from the configured identifier.
+            m::post_snapshot(m::snapshot_from_player("", p.dimension, p.x, p.y, p.z));
+        }
     }
 }

@@ -26,5 +26,14 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Ed25519 endorsement signing for at.atpcraft.player.snapshot records
+# (BSD-3-Clause; sha2/base64 are MIT OR Apache-2.0 — all AGPL-compatible).
+# Pure Rust, so players' machines need no system crypto libraries.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+sha2 = "0.10"
+base64 = "0.22"
+# For the signing key's random seed (MIT OR Apache-2.0).
+rand_core = { version = "0.6", features = ["getrandom"] }
+
 # Errors.
 thiserror = "2"

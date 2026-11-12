@@ -16,6 +16,11 @@ fn atmospheric_listed(mods: &mut Vec<crate::game::native_hooks::NativeMod>) {
                 m::KEY_SHOT_LABEL.into(),
                 m::KEY_SHOT_DEFAULT.into(),
             ],
+            [
+                m::KEY_SNAPSHOT.into(),
+                m::KEY_SNAPSHOT_LABEL.into(),
+                m::KEY_SNAPSHOT_DEFAULT.into(),
+            ],
         ],
     });
 }

@@ -10,6 +10,7 @@
 //! ATMOSPHERIC_POST_TEXT="hello from atmospheric-horizon (M2 check)" \
 //! ATMOSPHERIC_POST_IMAGE="/path/to/screenshot.png" \   # optional, M3
 //! ATMOSPHERIC_POST_CHAT="hello from in-game chat" \     # optional, M5
+//! ATMOSPHERIC_POST_SNAPSHOT=1 \                          # optional, M6
 //! cargo run -p atmospheric --example pds_check
 //! ```
 //!
@@ -50,6 +51,7 @@ fn main() {
     let post_text = env::var("ATMOSPHERIC_POST_TEXT").ok();
     let post_image = env::var("ATMOSPHERIC_POST_IMAGE").ok();
     let post_chat = env::var("ATMOSPHERIC_POST_CHAT").ok();
+    let post_snapshot = env::var("ATMOSPHERIC_POST_SNAPSHOT").is_ok();
 
     // A throwaway settings folder: the worker reads its config from here.
     let storage_dir: PathBuf = env::temp_dir().join("atmospheric-pds-check");
@@ -103,6 +105,19 @@ fn main() {
             message,
             automatic: false,
         }),
+        post_snapshot.then(|| Command::PostSnapshot {
+            summary: atmospheric::records::SnapshotSummary {
+                username: String::new(), // the worker fills it from the identifier
+                dimension: "minecraft:overworld".into(),
+                position: atmospheric::records::Position { x: 0, y: 64, z: 0 },
+                health: "20".into(),
+                food: 20,
+                xp_level: 0,
+                game_mode: "survival".into(),
+                team: None,
+                scores: None,
+            },
+        }),
     ]
     .into_iter()
     .flatten()
@@ -112,6 +127,7 @@ fn main() {
             Command::PostText { .. } => "text",
             Command::PostImage { .. } => "image",
             Command::PostChat { .. } => "chat record",
+            Command::PostSnapshot { .. } => "snapshot record",
             _ => unreachable!(),
         };
         command_tx.send(post).expect("send post");

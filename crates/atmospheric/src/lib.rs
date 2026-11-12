@@ -12,6 +12,7 @@ pub mod error;
 pub mod notifications;
 pub mod records;
 pub mod session;
+pub mod signing;
 pub mod tid;
 pub mod worker;
 
@@ -40,6 +41,10 @@ pub enum Command {
     /// worker only publishes when `post_chat_messages` is enabled; explicit
     /// ones (the `/atmospheric chat` command) always publish.
     PostChat { message: String, automatic: bool },
+    /// Publish the player's state as an `at.atpcraft.player.snapshot` record,
+    /// endorsed with the mod's own Ed25519 key (atpcraft port, M6). An empty
+    /// `summary.username` is filled from the configured identifier.
+    PostSnapshot { summary: records::SnapshotSummary },
     /// Shut the worker thread down.
     Shutdown,
 }
