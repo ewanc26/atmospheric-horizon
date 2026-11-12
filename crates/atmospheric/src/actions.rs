@@ -53,7 +53,8 @@ pub async fn post_text(agent: &Agent, did: &str, text: &str) -> Result<String> {
         .create_record(input.into())
         .await
         .map_err(AtmosphericError::protocol)?;
-    Ok(output.uri)
+    // The call returns `Object<OutputData>`; move the URI out of its data.
+    Ok(output.data.uri)
 }
 
 /// Upload an image file and post it as an embedded image.

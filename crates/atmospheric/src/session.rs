@@ -1,7 +1,7 @@
 //! App-password login and session state.
 
 use crate::Config;
-use atrium_api::agent::atp_agent::{store::MemorySessionStore, AtpAgent};
+use atrium_api::agent::atp_agent::{AtpAgent, store::MemorySessionStore};
 use atrium_xrpc_client::reqwest::ReqwestClient;
 
 /// The agent type used throughout the mod.
