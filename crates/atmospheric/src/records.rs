@@ -19,6 +19,14 @@ pub const CHAT_COLLECTION: &str = "at.atpcraft.player.chat";
 /// snapshot per player per endorsing key (the record key is the key id).
 pub const SNAPSHOT_COLLECTION: &str = "at.atpcraft.player.snapshot";
 
+/// The `at.atpcraft.player.skin` collection: one server-endorsed skin record
+/// per player per endorsing key (the record key is the key id). Written with
+/// `putRecord` (upsert), matching atpcraft (M9).
+pub const SKIN_COLLECTION: &str = "at.atpcraft.player.skin";
+
+/// The lexicon's blob cap for skins and capes (`maxSize` 1048576).
+pub const MAX_SKIN_BYTES: usize = 1_048_576;
+
 /// The lexicon's `message` cap (maxLength 1024).
 pub const MAX_CHAT_MESSAGE_LEN: usize = 1024;
 
@@ -211,6 +219,88 @@ impl SnapshotRecord {
     }
 }
 
+/// Minecraft skin model: `default` (classic) or `slim` arms, as the
+/// `at.atpcraft.player.skin` lexicon's `knownValues` spell them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SkinModel {
+    Default,
+    Slim,
+}
+
+impl SkinModel {
+    /// The wire value used in records.
+    pub fn key(self) -> &'static str {
+        match self {
+            SkinModel::Default => "default",
+            SkinModel::Slim => "slim",
+        }
+    }
+
+    /// Parse a wire value, rejecting unknown ones (atpcraft's `fromKey`).
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key.to_ascii_lowercase().as_str() {
+            "default" => Some(SkinModel::Default),
+            "slim" => Some(SkinModel::Slim),
+            _ => None,
+        }
+    }
+}
+
+/// The blob's CID as the `$link` string, for signing payloads.
+pub fn blob_cid(blob: &atrium_api::types::BlobRef) -> Option<String> {
+    serde_json::to_value(blob)
+        .ok()?
+        .get("ref")?
+        .get("$link")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// One `at.atpcraft.player.skin` record (M9): blob references to the skin and
+/// optional cape held in the player's own repo, plus server endorsements.
+/// Field names match the lexicon; blobs are absent (not null) when unset.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkinRecord {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skin: Option<atrium_api::types::BlobRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cape: Option<atrium_api::types::BlobRef>,
+    pub model: SkinModel,
+    /// When the record was written (ISO 8601).
+    pub timestamp: Datetime,
+    /// Server signatures over the canonical payload (min 1 per the lexicon).
+    pub endorsements: Vec<Endorsement>,
+}
+
+impl SkinRecord {
+    /// The record body to write to the PDS, with the `$type` put_record
+    /// requires.
+    pub fn to_unknown(&self) -> Result<Unknown> {
+        crate::actions::record_to_unknown(SKIN_COLLECTION, self)
+    }
+
+    /// The canonical bytes an endorsement signs, matching atpcraft's
+    /// `signablePayload`: canonical JSON of `{did, skinCid?, capeCid?,
+    /// model, timestamp, server}` — blob CIDs only, and the asset keys are
+    /// omitted entirely when the asset is absent.
+    pub fn signable_payload(&self, did: &str, server: &str) -> Vec<u8> {
+        let mut payload = serde_json::json!({
+            "did": did,
+            "model": self.model.key(),
+            "timestamp": self.timestamp,
+            "server": server,
+        });
+        if let Some(cid) = self.skin.as_ref().and_then(blob_cid) {
+            payload["skinCid"] = serde_json::Value::String(cid);
+        }
+        if let Some(cid) = self.cape.as_ref().and_then(blob_cid) {
+            payload["capeCid"] = serde_json::Value::String(cid);
+        }
+        canonical_json(&payload).into_bytes()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +315,76 @@ mod tests {
             canonical_json(&value),
             r#"{"alpha":{"a":[1,"x\"y\\z"],"b":true},"zeta":1}"#
         );
+    }
+
+    // Two real CIDs (CidLink parses them); skin and cape get distinct ones.
+    const SKIN_CID: &str = "bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy";
+    const CAPE_CID: &str = "bafkreibme22gw2h7y2h7tg2fhqotaqjucnbc24deqo72b6mkl2egezxhvy";
+
+    fn stub_blob(cid: &str) -> atrium_api::types::BlobRef {
+        serde_json::from_value(serde_json::json!({
+            "$type": "blob",
+            "ref": {"$link": cid},
+            "mimeType": "image/png",
+            "size": 1234,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn skin_record_signable_payload_matches_atpcraft_canonical_form() {
+        let record = SkinRecord {
+            skin: Some(stub_blob(SKIN_CID)),
+            cape: Some(stub_blob(CAPE_CID)),
+            model: SkinModel::Slim,
+            timestamp: "2026-11-12T12:00:00.000Z".parse().unwrap(),
+            endorsements: vec![],
+        };
+        // atpcraft signs canonical JSON of {did, skinCid, capeCid, model,
+        // timestamp, server} with keys sorted byte-wise.
+        let payload =
+            String::from_utf8(record.signable_payload("did:plc:stubuser", "serverkeyid0000001"))
+                .unwrap();
+        assert_eq!(
+            payload,
+            format!(
+                r#"{{"capeCid":"{CAPE_CID}","did":"did:plc:stubuser","model":"slim","server":"serverkeyid0000001","skinCid":"{SKIN_CID}","timestamp":"2026-11-12T12:00:00.000Z"}}"#
+            )
+        );
+    }
+
+    #[test]
+    fn skin_record_omits_absent_assets_from_the_signable_payload() {
+        let record = SkinRecord {
+            skin: None,
+            cape: Some(stub_blob(CAPE_CID)),
+            model: SkinModel::Default,
+            timestamp: "2026-11-12T12:00:00.000Z".parse().unwrap(),
+            endorsements: vec![],
+        };
+        let payload = String::from_utf8(record.signable_payload("did:plc:x", "k")).unwrap();
+        assert!(!payload.contains("skinCid"), "{payload}");
+        assert!(
+            payload.contains(&format!(r#""capeCid":"{CAPE_CID}""#)),
+            "{payload}"
+        );
+        assert!(payload.contains(r#""model":"default""#), "{payload}");
+
+        // The record body itself omits absent assets (not null) and carries
+        // the collection as $type; blobs keep their "blob" $type marker.
+        let value = serde_json::to_value(record.to_unknown().unwrap()).unwrap();
+        assert_eq!(value["$type"], SKIN_COLLECTION);
+        assert!(value.get("skin").is_none());
+        assert_eq!(value["cape"]["$type"], "blob");
+        assert_eq!(value["cape"]["ref"]["$link"], CAPE_CID);
+    }
+
+    #[test]
+    fn skin_model_round_trips_and_rejects_unknown_values() {
+        assert_eq!(SkinModel::from_key("default"), Some(SkinModel::Default));
+        assert_eq!(SkinModel::from_key("SLIM"), Some(SkinModel::Slim));
+        assert_eq!(SkinModel::from_key("wide"), None);
+        assert_eq!(serde_json::to_value(SkinModel::Slim).unwrap(), "slim");
     }
 
     #[test]
