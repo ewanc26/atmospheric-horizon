@@ -77,6 +77,10 @@ pub enum GameCommand {
     /// Publish the player's state as an `at.atpcraft.player.snapshot` record
     /// (M6, atpcraft port).
     PostSnapshot { summary: SnapshotSummary },
+    /// Post the player's death message (only when `post_death_messages` is on).
+    PostDeathMessage { text: String },
+    /// Log out: drop the session and delete the persisted refresh token.
+    Logout,
     /// Stop the worker thread.
     Shutdown,
 }
@@ -199,13 +203,16 @@ pub fn location_line(x: f64, y: f64, z: f64, dimension: &str) -> String {
 
 static COMMAND_TX: OnceLock<Sender<GameCommand>> = OnceLock::new();
 static EVENTS_RX: OnceLock<Mutex<Receiver<ModEvent>>> = OnceLock::new();
-static STATUS: OnceLock<Mutex<String>> = OnceLock::new();
+static STATUS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 static LAST_SHOT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
-fn status_slot() -> &'static Mutex<String> {
+/// How many status lines the HUD shows at once.
+pub const STATUS_LINES_MAX: usize = 3;
+
+fn status_slot() -> &'static Mutex<Vec<String>> {
     // Empty until the first worker event: with no worker attached (see
     // issue #2) there is nothing worth showing, so the HUD box stays hidden.
-    STATUS.get_or_init(|| Mutex::new(String::new()))
+    STATUS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 fn last_shot_slot() -> &'static Mutex<Option<String>> {
@@ -251,19 +258,32 @@ pub fn drain_events(max: usize) -> Vec<ModEvent> {
     }
     if let Ok(mut status) = status_slot().lock() {
         for event in &drained {
-            *status = status_text(event);
+            let line = status_text(event);
+            // Keep a short history instead of only the latest event, so a
+            // notification digest is not overwritten immediately (#7).
+            if status.last() != Some(&line) {
+                status.push(line);
+            }
+            while status.len() > STATUS_LINES_MAX {
+                status.remove(0);
+            }
         }
     }
     drained
 }
 
-/// The current HUD status line; empty until the first worker event, in which
-/// case the HUD draws nothing.
-pub fn status_line() -> String {
+/// The current HUD status lines, oldest first; empty until the first worker
+/// event, in which case the HUD draws nothing.
+pub fn status_lines() -> Vec<String> {
     status_slot()
         .lock()
         .map(|status| status.clone())
         .unwrap_or_default()
+}
+
+/// The newest status line (empty when there is none).
+pub fn status_line() -> String {
+    status_lines().pop().unwrap_or_default()
 }
 
 /// Send a command to the worker, if installed. Never blocks, never panics
@@ -340,6 +360,17 @@ pub fn post_snapshot(summary: SnapshotSummary) {
     send(GameCommand::PostSnapshot { summary });
 }
 
+/// Ask the worker to post a death message (published only when the settings
+/// enable `post_death_messages`).
+pub fn post_death_message(text: &str) {
+    send(GameCommand::PostDeathMessage { text: text.into() });
+}
+
+/// Ask the worker to log out (drops the session and its persisted token).
+pub fn logout() {
+    send(GameCommand::Logout);
+}
+
 /// Ask the worker to stop.
 #[allow(dead_code)]
 pub fn shutdown() {
@@ -356,7 +387,8 @@ mod tests {
     fn install_forwards_and_drains() {
         let (command_rx, event_tx) = install().expect("first install succeeds");
         assert!(install().is_none(), "second install fails");
-        // No worker event yet: the HUD line is empty, so nothing is drawn.
+        // No worker event yet: the HUD lines are empty, so nothing is drawn.
+        assert!(status_lines().is_empty());
         assert!(status_line().is_empty());
 
         // Game side -> worker: the commands the hooks send.
@@ -370,6 +402,8 @@ mod tests {
             67.0,
             -2.5,
         ));
+        post_death_message("Player was slain by Zombie");
+        logout();
         assert!(!post_screenshot("no screenshot yet"));
         remember_screenshot("/tmp/shots/2026-11-12_07.00.00.png");
         assert_eq!(
@@ -410,6 +444,16 @@ mod tests {
             other => panic!("expected PostSnapshot, got {:?}", other),
         }
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::PostDeathMessage { text }) => {
+                assert_eq!(text, "Player was slain by Zombie")
+            }
+            other => panic!("expected PostDeathMessage, got {:?}", other),
+        }
+        assert!(matches!(
+            command_rx.recv_timeout(std::time::Duration::from_secs(5)),
+            Ok(GameCommand::Logout)
+        ));
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::PostImage {
                 path,
                 alt_text,
@@ -443,6 +487,14 @@ mod tests {
             .unwrap();
         let drained = drain_events(16);
         assert_eq!(drained.len(), 2);
+        // Both events stay visible as two lines (not just the latest, #7).
+        assert_eq!(
+            status_lines(),
+            vec![
+                "atmospheric: logged in as did:plc:example".to_string(),
+                "atmospheric: posted at://did:plc:example/app.bsky.feed.post/3abc".to_string(),
+            ]
+        );
         assert_eq!(
             status_line(),
             "atmospheric: posted at://did:plc:example/app.bsky.feed.post/3abc"

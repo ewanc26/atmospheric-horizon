@@ -33,6 +33,9 @@ pub struct Config {
     pub post_chat_messages: bool,
     /// The `server` field written into chat records (atpcraft port).
     pub chat_server_id: String,
+    /// Persist the session's refresh token so restarts resume without the
+    /// app password (`session.json` in the mod's storage folder).
+    pub persist_session: bool,
 }
 
 impl Default for Config {
@@ -45,6 +48,7 @@ impl Default for Config {
             post_death_messages: false,
             post_chat_messages: false,
             chat_server_id: default_chat_server_id(),
+            persist_session: true,
         }
     }
 }
@@ -80,6 +84,7 @@ mod tests {
             post_death_messages: true,
             post_chat_messages: true,
             chat_server_id: "my-server".into(),
+            persist_session: true,
         };
         let raw = config.to_json().unwrap();
         let back = Config::from_json(&raw).unwrap();
@@ -88,6 +93,7 @@ mod tests {
         assert!(back.post_death_messages);
         assert!(back.post_chat_messages);
         assert_eq!(back.chat_server_id, "my-server");
+        assert!(back.persist_session);
     }
 
     #[test]
