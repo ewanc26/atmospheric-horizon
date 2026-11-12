@@ -13,6 +13,10 @@ description = "AT Protocol client logic for the atmospheric Horizon mod — buil
 # lexicons, so com.atproto alone does not cover posting.
 atrium-api = { version = "0.26", features = ["agent", "bluesky"] }
 atrium-xrpc-client = { version = "0.5", default-features = false, features = ["reqwest"] }
+# Named directly for the `Store` trait behind the custom OAuth session store
+# and the `http` types behind the custom DPoP XRPC client.
+atrium-common = "0.1"
+atrium-xrpc = "0.12"
 
 # TLS: the xrpc client's `reqwest` feature brings reqwest with no TLS backend
 # at all, so rustls is enabled here by feature unification. WebPKI roots keep
@@ -34,6 +38,11 @@ sha2 = "0.10"
 base64 = "0.22"
 # For the signing key's random seed (MIT OR Apache-2.0).
 rand_core = { version = "0.6", features = ["getrandom"] }
+
+# ES256 (ECDSA P-256) keys and signatures for DPoP proofs in the OAuth flow
+# (M8). RustCrypto crates are MIT OR Apache-2.0 — AGPL-compatible, pure Rust.
+# Randomness comes from p256's own re-exported rand_core 0.9 `OsRng`.
+p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
 
 # Errors.
 thiserror = "2"
