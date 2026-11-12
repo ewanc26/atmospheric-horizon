@@ -8,7 +8,7 @@ This project is the successor to [jollywhoppers-socialsync](https://github.com/e
 
 ## Status
 
-Early scaffold. The protocol library builds and tests standalone; the native injection pipeline follows the [horizon-native-mod-template](https://github.com/horizon-rust/horizon-native-mod-template). Milestones: M1 library skeleton, M2 worker wiring + login/text posts and the game-side hooks (keybind, `/atmospheric` commands, HUD status line), M3 screenshots (F2, then a keybind posts the latest one), M4 notifications (poll timer + persisted cursor + `/atmospheric notifications`), M5 atpcraft port start — chat messages as `at.atpcraft.player.chat` records (TID-keyed, off by default; `/atmospheric chat <text>` publishes one), M6 player-state snapshots as `at.atpcraft.player.snapshot` records (Ed25519-endorsed, keybind or `/atmospheric snapshot`), M7 registry submission.
+Early scaffold. The protocol library builds and tests standalone; the native injection pipeline follows the [horizon-native-mod-template](https://github.com/horizon-rust/horizon-native-mod-template). Milestones: M1 library skeleton, M2 worker wiring + login/text posts and the game-side hooks (keybind, `/atmospheric` commands, HUD status line), M3 screenshots (F2, then a keybind posts the latest one), M4 notifications (poll timer + persisted cursor + `/atmospheric notifications`), M5 atpcraft port start — chat messages as `at.atpcraft.player.chat` records (TID-keyed, off by default; `/atmospheric chat <text>` publishes one), M6 player-state snapshots as `at.atpcraft.player.snapshot` records (Ed25519-endorsed, keybind or `/atmospheric snapshot`), M7 registry submission, M8 localhost OAuth login (PAR + PKCE + DPoP, `/atmospheric login <handle>`) replacing app passwords.
 
 ### Roadmap: porting atpcraft to Horizon
 
@@ -16,7 +16,7 @@ atpcraft is a server-side Fabric mod; Horizon native mods can hook the server si
 
 | atpcraft feature | atmospheric-horizon |
 |---|---|
-| Bluesky sign-in | app-password login (`com.atproto.server.createSession`, M2); a browser OAuth flow would need a tiny local web server on the worker — later milestone |
+| Bluesky sign-in | **M8**: localhost OAuth login (`/atmospheric login <handle>` — PAR + PKCE + DPoP with a loopback redirect; app-password login remains as the fallback via bare `/atmospheric login`) |
 | Chat messages as records (`at.atpcraft.player.chat`) | **M5**: chat hook mirrors each line; the worker publishes TID-keyed records when `post_chat_messages` is on, and `/atmospheric chat <text>` always publishes one |
 | Player state snapshots (`at.atpcraft.player.snapshot`, `defs`) | **M6**: keybind or `/atmospheric snapshot` publishes a self-endorsed record (Ed25519 key generated + persisted by the worker; rkey = key id, monotonic version) |
 | Skins and capes as blobs on the PDS | blob upload proven in M3; skin upload later |
@@ -29,7 +29,7 @@ atpcraft is a server-side Fabric mod; Horizon native mods can hook the server si
 
 - Post text and in-game screenshots to Bluesky from a keybind
 - Publish chat messages as `at.atpcraft.player.chat` records (atpcraft-compatible, TID-keyed)
-- App-password login (`com.atproto.server.createSession`) via the [ATrium](https://github.com/atrium-rs/atrium) SDK
+- OAuth login in the system browser (`/atmospheric login <handle>`, M8 — DPoP-bound tokens, loopback redirect), with app-password login (`com.atproto.server.createSession`) as the fallback via the [ATrium](https://github.com/atrium-rs/atrium) SDK
 - Notification digest panel in the HUD
 - All network and disk I/O on one worker thread — the game thread never blocks
 - Reads and writes the PDS you configure, and nothing else
@@ -39,7 +39,7 @@ atpcraft is a server-side Fabric mod; Horizon native mods can hook the server si
 - Rust 1.95+ (pinned by `rust-toolchain.toml`)
 - Linux for native staging (Windows/macOS not validated by the template)
 - A Minecraft: Java Edition 26.3 install via the official launcher
-- A Bluesky app password
+- A Bluesky account (OAuth in the system browser, or an app password as the fallback)
 
 ## Install
 
@@ -54,16 +54,19 @@ The published mod installs through the Horizon launcher's Mods page once it is i
 
 ## Network use
 
-This mod talks to the network **by design**, and to exactly one place: the PDS you configure.
+This mod talks to the network **by design**: the AT Protocol services needed to reach and authenticate with your account's PDS — nothing else.
 
-- Sent to your PDS: your identifier and app password (`com.atproto.server.createSession`), a session check after login (`com.atproto.server.getSession`), notification polling (`app.bsky.notification.listNotifications` with a `seenAt` timestamp, on a timer and on `/atmospheric notifications`), session resume across restarts (`com.atproto.server.refreshSession` with the stored refresh token, once per game start), and the records you choose to make: text and screenshot posts (`com.atproto.repo.uploadBlob` for the image, then `com.atproto.repo.createRecord` with an `app.bsky.embed.images` embed), chat lines (`com.atproto.repo.createRecord` in the `at.atpcraft.player.chat` collection, TID-keyed — only when `post_chat_messages` is enabled in `config.json`, or one at a time via `/atmospheric chat <text>`), and player-state snapshots (`com.atproto.repo.createRecord` in the `at.atpcraft.player.snapshot` collection, keybind or `/atmospheric snapshot`, carrying your position/dimension and an Ed25519 endorsement signature), and death messages (an `app.bsky.feed.post` when you die, only when `post_death_messages` is enabled). `/atmospheric logout` drops the session.
-- Stored on disk: files in the mod's own storage folder `horizon-mods/.horizon-mod-data/atmospheric/` — never in world saves. `config.json` (PDS URL, identifier, app password, poll interval, post-death-messages flag, post-chat-messages flag, chat server id), `cursor.json` (the notification seen-cursor, so restarts do not re-show old notifications), `signing-key.json` (the Ed25519 seed for snapshot endorsements, generated once), `snapshot-state.json` (the snapshot version counter, so records never roll back) and `session.json` (the refresh token for resuming the session across restarts, stored unencrypted — delete it or use `/atmospheric logout` to revoke; app passwords are never stored). The image you post is read from the game's `screenshots/` folder only when you press the post-screenshot keybind; the path of the latest screenshot is otherwise kept in memory only. The login session is held in memory for the running game; the refresh token is persisted (see above) so restarts resume automatically unless `persist_session` is off.
+- Identity resolution for OAuth login (M8), using the public AT Protocol directory services: `com.atproto.identity.resolveHandle` on `https://bsky.social`, the DID document from `https://plc.directory` (did:plc) or the domain's `/.well-known/did.json` (did:web), and the PDS's own `/.well-known/oauth-protected-resource` + authorization server `/.well-known/oauth-authorization-server`.
+- OAuth login (M8): a pushed authorization request (`POST <authorization server>/oauth/par`) with PKCE and a DPoP key thumbprint, the authorize page opened in your system browser, the redirect received on `http://127.0.0.1:<port>/` (loopback only), and the code exchanged at the authorization server's token endpoint (`POST <authorization server>/oauth/token`, also used for refreshes). Every request to the authorization server and every request to the PDS while OAuth-logged-in carries `Authorization: DPoP <access token>` plus a `DPoP` proof JWT (ES256, signed by a per-install P-256 key). The client registers as the loopback client `http://localhost?scope=atproto%20transition%3Ageneric` (the spec's localhost exception); if your PDS's authorization server does not support it, set `oauth_client_id` in `config.json` to a hosted copy of `oauth-client-metadata.json` (e.g. GitHub Pages).
+- Sent to your PDS: your identifier and app password (`com.atproto.server.createSession`), a session check after login (`com.atproto.server.getSession`), notification polling (`app.bsky.notification.listNotifications` with a `seenAt` timestamp, on a timer and on `/atmospheric notifications`), session resume across restarts (`com.atproto.server.refreshSession` with the stored refresh token — app-password sessions — or the OAuth token endpoint's `refresh_token` grant with the stored DPoP-bound refresh token, once per game start), and the records you choose to make: text and screenshot posts (`com.atproto.repo.uploadBlob` for the image, then `com.atproto.repo.createRecord` with an `app.bsky.embed.images` embed), chat lines (`com.atproto.repo.createRecord` in the `at.atpcraft.player.chat` collection, TID-keyed — only when `post_chat_messages` is enabled in `config.json`, or one at a time via `/atmospheric chat <text>`), and player-state snapshots (`com.atproto.repo.createRecord` in the `at.atpcraft.player.snapshot` collection, keybind or `/atmospheric snapshot`, carrying your position/dimension and an Ed25519 endorsement signature), and death messages (an `app.bsky.feed.post` when you die, only when `post_death_messages` is enabled). `/atmospheric logout` drops the session.
+- Stored on disk: files in the mod's own storage folder `horizon-mods/.horizon-mod-data/atmospheric/` — never in world saves. `config.json` (PDS URL, identifier, app password, poll interval, post-death-messages flag, post-chat-messages flag, chat server id), `cursor.json` (the notification seen-cursor, so restarts do not re-show old notifications), `signing-key.json` (the Ed25519 seed for snapshot endorsements, generated once), `snapshot-state.json` (the snapshot version counter, so records never roll back) and `session.json` (the refresh token for resuming the session across restarts, stored unencrypted — delete it or use `/atmospheric logout` to revoke; for OAuth sessions it also holds the DPoP private key (JWK) and the token endpoint; app passwords are never stored). The image you post is read from the game's `screenshots/` folder only when you press the post-screenshot keybind; the path of the latest screenshot is otherwise kept in memory only. The login session is held in memory for the running game; the refresh token is persisted (see above) so restarts resume automatically unless `persist_session` is off.
 - Nothing else: no telemetry, no analytics, no other endpoints.
 
 ## Files
 
 - `mixins/atmospheric/` — horizon-mixins declarations: the injected `runtime.rs` module (std-only), its placeholder hook, and `horizon-mixin.toml`
-- `crates/atmospheric/` — the protocol library: `config`, `session`, `actions`, `notifications`, `records` (atpcraft lexicon types), `tid` (record keys), `signing` (Ed25519 endorsements), `worker` (all game-free and testable)
+- `crates/atmospheric/` — the protocol library: `config`, `session`, `oauth` (M8: DPoP/PKCE/PAR/loopback/token flow), `actions`, `notifications`, `records` (atpcraft lexicon types), `tid` (record keys), `signing` (Ed25519 endorsements), `worker` (all game-free and testable)
+- `oauth-client-metadata.json` — the OAuth client metadata document to host (e.g. via GitHub Pages) when an authorization server does not support the loopback client; point `oauth_client_id` at its URL
 - `compatibility.json` — the pinned Horizon and horizon-mixins revisions the bundle is built against
 - `docs/ARCHITECTURE.md` — how the layers connect, for reviewers and contributors
 
