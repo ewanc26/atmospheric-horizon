@@ -167,6 +167,37 @@ PDS — see "Manual check" below.
   command still posts; against a real PDS `ATMOSPHERIC_POST_CHAT=… pds_check`
   prints the `Posted` event for a real chat record.
 
+### M6: player-state snapshots (`at.atpcraft.player.snapshot`)
+
+- `records.rs` adds the `defs` shapes (`Position`, `Score`, `TeamSummary`,
+  `SnapshotSummary`), `Aspect`, `Endorsement`, and `SnapshotRecord`, plus
+  `canonical_json` — the deterministic JSON (recursively sorted keys, only
+  `\"`/`\\` escaped) that atpcraft signs. `SnapshotRecord::signable_payload`
+  builds the exact payload atpcraft's `signablePayload` builds:
+  `{did, version, issuedAt, server, summary, aspects[]}` (aspects name-sorted
+  as `{name, blob: cid}`).
+- `signing.rs` is the Ed25519 endorsement key (pure-Rust `ed25519-dalek`,
+  BSD-3-Clause; `sha2`/`base64`/`rand_core` MIT OR Apache-2.0 — all
+  AGPL-compatible). The key id is the first 16 base64url chars of SHA-256
+  over the SPKI encoding (prefix `302a300506032b6570032100` + 32-byte key),
+  matching atpcraft's `ServerSigningKey`; signatures are standard base64
+  without padding in `sig.$bytes`. The seed is generated once and persisted
+  to `<storage>/signing-key.json`; the monotonic version counter persists to
+  `<storage>/snapshot-state.json`. The rkey is the key id.
+- Worker: `Command::PostSnapshot { summary }` builds the record at
+  version+1, signs the canonical payload with the persisted key, and writes
+  it via `createRecord`. An empty `summary.username` is filled from the
+  configured identifier. Game side: a third keybind (default `C`) and
+  `/atmospheric snapshot` build the summary from `native_player` (position +
+  dimension; health/food/xp/game-mode default until Horizon exposes them).
+- Verified: RFC 8032 seed→public-key vector cross-checked against openssl;
+  key-id/sign/verify round-trips; canonical-JSON ordering test; snapshot
+  record wire shape ($type, camelCase, `sig.$bytes`); worker test against the
+  stub PDS asserts the createRecord body (collection, key-id rkey, version 1
+  then 2, username default) and that the signature verifies against the
+  persisted public key over the payload rebuilt from the record; against a
+  real PDS `ATMOSPHERIC_POST_SNAPSHOT=1 pds_check` posts a real snapshot.
+
 ### Manual check against a real PDS
 
 `crates/atmospheric/examples/pds_check.rs` spawns the worker exactly as the
@@ -180,6 +211,7 @@ ATMOSPHERIC_APP_PASSWORD="xxxx-xxxx-xxxx-xxxx" \
 ATMOSPHERIC_POST_TEXT="hello from atmospheric-horizon" \      # optional
 ATMOSPHERIC_POST_IMAGE="/path/to/screenshot.png" \            # optional, M3
 ATMOSPHERIC_POST_CHAT="hello from in-game chat" \              # optional, M5
+ATMOSPHERIC_POST_SNAPSHOT=1 \                                  # optional, M6
 cargo run -p atmospheric --example pds_check
 ```
 
