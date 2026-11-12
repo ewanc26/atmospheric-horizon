@@ -137,6 +137,36 @@ PDS — see "Manual check" below.
   chat feedback; against a real PDS `pds_check` prints the digest event after
   login.
 
+### M5: atpcraft port start — chat records (`at.atpcraft.player.chat`)
+
+- `records.rs` reimplements atpcraft's `at.atpcraft.player.chat` lexicon as a
+  plain `ChatRecord { sentAt, message, server }` (message truncated to the
+  lexicon's 1024 cap). atpcraft's repo carries no licence, so no code is
+  copied — only the wire format is matched, which is the point of a lexicon.
+  `tid.rs` generates the TID record keys atpcraft uses (53-bit microsecond
+  timestamp + 10-bit clock id, sortable base32, 13 chars, strictly monotonic
+  per worker), so a player's chat records accumulate as a time-sorted,
+  append-only history.
+- `actions::post_chat` writes one record per message via `createRecord` with
+  the TID as `rkey`; the worker owns the single `TidGen`. `Command::PostChat
+  { message, automatic }`: `automatic` (chat-hook origin) publishes only when
+  `post_chat_messages` is enabled in `config.json` (default off — chat is
+  public once written); `automatic: false` (the `/atmospheric chat <text>`
+  command) always publishes. The `server` field comes from
+  `config.chat_server_id` (default `horizon-client`).
+- Game side: a raw-target injection at HEAD of
+  `horizon_client::game::chat::Game::handle_chat_input` (chat.rs is pinned in
+  `compatibility.json`; the named hook list has no chat hook) mirrors every
+  non-command chat line to the worker. Old settings files without the new
+  fields still load (`#[serde(default)]`).
+- Verified: `tid` unit tests (alphabet, 13-char width, round-trip, strict
+  monotonicity, ordering); `records` tests ($type + camelCase shape,
+  truncation); worker tests against the stub PDS assert the createRecord body
+  (collection, TID rkey, `$type`, `server`, `message`) and that an automatic
+  message with the flag off never touches the network while the explicit
+  command still posts; against a real PDS `ATMOSPHERIC_POST_CHAT=… pds_check`
+  prints the `Posted` event for a real chat record.
+
 ### Manual check against a real PDS
 
 `crates/atmospheric/examples/pds_check.rs` spawns the worker exactly as the
@@ -149,6 +179,7 @@ ATMOSPHERIC_IDENTIFIER="you.example" \
 ATMOSPHERIC_APP_PASSWORD="xxxx-xxxx-xxxx-xxxx" \
 ATMOSPHERIC_POST_TEXT="hello from atmospheric-horizon" \      # optional
 ATMOSPHERIC_POST_IMAGE="/path/to/screenshot.png" \            # optional, M3
+ATMOSPHERIC_POST_CHAT="hello from in-game chat" \              # optional, M5
 cargo run -p atmospheric --example pds_check
 ```
 
