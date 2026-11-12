@@ -4,9 +4,26 @@ AT Protocol (Bluesky) integration for [Horizon](https://playhorizon.dev), the Ru
 
 Independent project; not affiliated with Mojang, Microsoft, Bluesky PBC, or the Horizon project. NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.
 
+This project is the successor to [jollywhoppers-socialsync](https://github.com/ewanc26/jollywhoppers-socialsync) — the Paper plugin that linked Minecraft players to AT Protocol identities — rebuilt as a native Horizon mod. It also aims to port the feature set of [atpcraft](https://atforge.org/products/atpcraft/) (atforge's Minecraft server mod: per-player AT Protocol identity, chat and player-state records, skins as blobs, a labeler, a server profile) to Horizon; see the roadmap below.
+
 ## Status
 
 Early scaffold. The protocol library builds and tests standalone; the native injection pipeline follows the [horizon-native-mod-template](https://github.com/horizon-rust/horizon-native-mod-template). Milestones: M1 library skeleton, M2 worker wiring + login/text posts and the game-side hooks (keybind, `/atmospheric` commands, HUD status line), M3 screenshots, M4 notifications, M5 registry submission.
+
+### Roadmap: porting atpcraft to Horizon
+
+atpcraft is a server-side Fabric mod; Horizon native mods can hook the server side too (`native_tick`/`native_world_lifecycle` run there), so the port maps onto milestones and later work:
+
+| atpcraft feature | atmospheric-horizon |
+|---|---|
+| Bluesky sign-in | app-password login (`com.atproto.server.createSession`, M2); a browser OAuth flow would need a tiny local web server on the worker — later milestone |
+| Chat messages as records (`at.atpcraft.player.chat`) | later, once the worker is linked in-game (issue #2) |
+| Player state snapshots (`at.atpcraft.player.snapshot`, `defs`) | later; position/facing already readable via `native_player` |
+| Skins and capes as blobs on the PDS | blob upload proven in M3; skin upload later |
+| Labeler publishing player activity | later (`com.atproto.label.*`) |
+| Server profile record (`at.atpcraft.server.profile`) | later, server-side |
+| Join gate reading a public Bluesky list | later, server-side |
+| Web server for login pages / lexicons | not planned for the client mod; OAuth sign-in is the alternative |
 
 ## Features
 
