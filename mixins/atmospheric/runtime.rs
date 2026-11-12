@@ -92,6 +92,9 @@ pub enum GameCommand {
     /// Publish/refresh the account's server profile record
     /// (`at.atpcraft.server.profile` at rkey `self`, M9-era atpcraft port).
     PostServerProfile,
+    /// Fetch a public Bluesky list's member DIDs (M11, join-gate read side):
+    /// an `at://…app.bsky.graph.list/<rkey>` URI or a bsky.app list URL.
+    FetchList { reference: String },
     /// Post the player's death message (only when `post_death_messages` is on).
     PostDeathMessage { text: String },
     /// Log out: drop the session and delete the persisted refresh token.
@@ -177,6 +180,8 @@ pub enum ModEvent {
     OAuthAuthorize { url: String },
     /// The latest notification digest (M4).
     Notifications { items: Vec<NotificationDigest> },
+    /// The members of a fetched Bluesky list (M11, join-gate read side).
+    ListMembers { list: String, members: Vec<String> },
 }
 
 /// The HUD line one event leaves behind.
@@ -194,6 +199,9 @@ pub fn status_text(event: &ModEvent) -> String {
         ModEvent::Posted { uri } => format!("atmospheric: posted {uri}"),
         ModEvent::Failed { message } => format!("atmospheric: {message}"),
         ModEvent::OAuthAuthorize { url } => format!("atmospheric: finish login at {url}"),
+        ModEvent::ListMembers { list, members } => {
+            format!("atmospheric: list {list} has {} members", members.len())
+        }
         ModEvent::Notifications { items } => {
             if items.is_empty() {
                 "atmospheric: no new notifications".into()
@@ -416,6 +424,13 @@ pub fn post_server_profile() {
     send(GameCommand::PostServerProfile);
 }
 
+/// Ask the worker to fetch a public Bluesky list's members (M11).
+pub fn fetch_list(reference: &str) {
+    send(GameCommand::FetchList {
+        reference: reference.into(),
+    });
+}
+
 /// Ask the worker to post a death message (published only when the settings
 /// enable `post_death_messages`).
 pub fn post_death_message(text: &str) {
@@ -618,6 +633,13 @@ mod tests {
                 url: "https://auth.example/authorize?request_uri=x".into()
             }),
             "atmospheric: finish login at https://auth.example/authorize?request_uri=x"
+        );
+        assert_eq!(
+            status_text(&ModEvent::ListMembers {
+                list: "at://did:plc:x/app.bsky.graph.list/3abc".into(),
+                members: vec!["did:plc:a".into(), "did:plc:b".into()],
+            }),
+            "atmospheric: list at://did:plc:x/app.bsky.graph.list/3abc has 2 members"
         );
     }
 
