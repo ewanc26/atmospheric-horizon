@@ -27,6 +27,13 @@ Guidance for AI coding agents working in **atmospheric-horizon**.
 - Use feature branches and pull requests.
 - Treat credentials (app passwords), session files, generated files, and release metadata as sensitive.
 
+## Git history and pull requests (hard rules)
+
+- **Atomic, scoped commits.** One logical change per commit, with a subject that says what and why (`type: what — detail`). No WIP, fixup, or "misc" commits on `main`; each commit should leave the tree buildable and tests passing where feasible. Split large work into a sequence of atomic commits on the PR branch.
+- **Rebase PRs, never merge commits into them.** Keep a PR branch linear: `git rebase` onto the target branch (resolving conflicts as they come) and push the branch with `--force-with-lease`. Do not `git merge main` into a feature branch.
+- **Merge PRs with rebase only.** `gh pr merge <n> --rebase`. Squash merges and merge commits are not allowed on `main` — they destroy the atomic commits. Branch protection on `main` enforces linear history (`required_linear_history`) plus the `check` status check; do not weaken it.
+- **History rewrites of `main` are exceptional.** They require explicit owner authorization in the PR/issue first. Because `main` forbids force-pushes, a rewrite needs a temporary, announced change to the branch protection (`allow_force_pushes: true`), a single `--force-with-lease` push of the rewritten branch, and immediate restoration of `allow_force_pushes: false`.
+
 ## Network disclosure
 
 This mod talks to the network **by design**: the PDS the user configures, and nothing else. Any change that adds an endpoint, a field sent over the wire, or a new kind of stored data must update `README.md` (Network use) and `docs/ARCHITECTURE.md` in the same pull request.
@@ -50,4 +57,4 @@ Keep validation claims and supported revisions honest.
 
 ## Recent history
 
-Initial scaffold.
+M1 scaffold; M2 worker wiring (login + posts, game-side hooks); docs (successor + atpcraft roadmap); M3 screenshot posts; M4 notification polling; M5 atpcraft chat records. History is atomic-scoped and linear (see the hard rules above).
