@@ -218,6 +218,53 @@ PDS — see "Manual check" below.
 - **#7 HUD history**: `runtime` keeps the last `STATUS_LINES_MAX` (3) status
   lines instead of only the newest; the HUD box draws them stacked. Tested.
 
+### M8: localhost OAuth login (DPoP-bound, replacing app passwords)
+
+`/atmospheric login <handle>` sends `Command::LoginOAuth`; bare
+`/atmospheric login` keeps the app-password flow as a fallback. The flow
+lives in `crates/atmospheric/src/oauth.rs` and follows the atproto OAuth
+profile (atproto.com/specs/oauth), reimplemented from the spec:
+
+1. resolve handle → DID (`com.atproto.identity.resolveHandle` on bsky.social)
+   → DID document (plc.directory / did:web) → PDS endpoint → PDS
+   `/.well-known/oauth-protected-resource` → authorization server metadata;
+2. bind a loopback listener on `http://127.0.0.1:<port>/` and push the
+   authorization request (PAR) with PKCE S256, the DPoP key thumbprint
+   (`dpop_jkt`) and `login_hint`, retrying with the server's `DPoP-Nonce`;
+3. emit `Event::OAuthAuthorize { url }` (HUD shows it) and open the system
+   browser at the authorize URL; wait for the redirect on the loopback
+   listener, checking `state`;
+4. exchange the code at the token endpoint with a DPoP proof; validate
+   `sub` == the resolved DID, `token_type` == `DPoP`, and that the granted
+   scope contains `atproto`.
+
+The `client_id` is the spec's loopback form `http://localhost?scope=…`
+(verified against the real bsky.social and eurosky.social authorization
+servers: PAR accepted, `request_uri` issued). Authorization servers without
+the loopback exception need a hosted client-metadata URL instead — ship
+`oauth-client-metadata.json` (GitHub Pages etc.) and set `oauth_client_id`
+in `config.json`.
+
+DPoP binding: a per-install P-256 key (ES256 proofs, persisted as a private
+JWK in `session.json`) signs every request. `session.rs` has a custom
+`SessionStore` whose `authorization_token` answers `AuthorizationToken::Dpop`
+while DPoP state is installed (Bearer otherwise), and a `DpopClient`
+wrapping the reqwest XRPC client that adds the `DPoP` proof header
+(htm/htu/ath, nonce retry) to every request. One agent type therefore serves
+both login flows. The worker refreshes the access token proactively at the
+token endpoint when near expiry (the agent's own ExpiredToken auto-refresh
+only knows the app-password `refreshSession` endpoint); at startup a
+persisted OAuth session resumes through the refresh grant. The browser flow
+runs on a spawned task with its result on a channel, so `Shutdown` stays
+responsive while the browser is open.
+
+Offline tests (`oauth/tests.rs` + worker tests): a stub AS/PDS verifies every
+DPoP proof signature, the nonce retry, `dpop_jkt`, PKCE, the state check, the
+full login → DPoP-signed `createRecord` path, startup resume via refresh,
+and shutdown-during-pending-login. Real-PDS wire check: `pds_check` with
+`ATMOSPHERIC_OAUTH_PAR_ONLY=1` (see below) pushed a PAR accepted by
+eurosky.social and bsky.social.
+
 ### Manual check against a real PDS
 
 `crates/atmospheric/examples/pds_check.rs` spawns the worker exactly as the
@@ -232,6 +279,23 @@ ATMOSPHERIC_POST_TEXT="hello from atmospheric-horizon" \      # optional
 ATMOSPHERIC_POST_IMAGE="/path/to/screenshot.png" \            # optional, M3
 ATMOSPHERIC_POST_CHAT="hello from in-game chat" \              # optional, M5
 ATMOSPHERIC_POST_SNAPSHOT=1 \                                  # optional, M6
+cargo run -p atmospheric --example pds_check
+```
+
+OAuth (M8) instead of the app password — finish the login in the browser that
+opens; a second run resumes the persisted session without a browser:
+
+```sh
+ATMOSPHERIC_OAUTH_HANDLE="you.example" \
+ATMOSPHERIC_POST_TEXT="hello over OAuth" \                    # optional
+cargo run -p atmospheric --example pds_check
+```
+
+Headless wire check of the OAuth flow up to the browser step (resolve →
+discover → PAR against the real services):
+
+```sh
+ATMOSPHERIC_OAUTH_HANDLE="you.example" ATMOSPHERIC_OAUTH_PAR_ONLY=1 \
 cargo run -p atmospheric --example pds_check
 ```
 
