@@ -2,7 +2,10 @@
 // localhost OAuth when a handle is given); /atmospheric post <text> posts
 // text; /atmospheric notifications polls now (the worker also polls on a
 // timer); /atmospheric chat <text> publishes one chat record (atpcraft port);
-// /atmospheric skin [path] [default|slim] publishes a skin record (M9).
+// /atmospheric skin [path] [default|slim] publishes a skin record (M9);
+// /atmospheric list <reference> reads a public list (M11); /atmospheric labels
+// <subject> reads labels off a subject's AppView view and /atmospheric labeler
+// <did> [subject] queries a labeler directly (M12).
 fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut bool) {
     use crate::game::atmospheric as m;
     if !game.native_on(m::ID) {
@@ -12,7 +15,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric list <list>, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric list <list>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -85,6 +88,37 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
         } else {
             m::fetch_list(reference);
             game.native_chat("atmospheric: fetching the list…");
+        }
+    } else if rest == "labels" || rest.starts_with("labels ") {
+        let subject = rest.strip_prefix("labels").unwrap_or("").trim();
+        *ran = true;
+        if subject.is_empty() {
+            game.native_chat(
+                "atmospheric: /atmospheric labels <at://… | did | handle | bsky.app URL>",
+            );
+        } else {
+            m::fetch_labels(subject);
+            game.native_chat("atmospheric: reading the labels…");
+        }
+    } else if rest == "labeler" || rest.starts_with("labeler ") {
+        let args: Vec<&str> = rest
+            .strip_prefix("labeler")
+            .unwrap_or("")
+            .split_whitespace()
+            .collect();
+        *ran = true;
+        match args.as_slice() {
+            [labeler] => {
+                m::fetch_labeler_labels(labeler, None);
+                game.native_chat(
+                    "atmospheric: querying the labeler for your account's labels…",
+                );
+            }
+            [labeler, subject] => {
+                m::fetch_labeler_labels(labeler, Some(subject));
+                game.native_chat("atmospheric: querying the labeler…");
+            }
+            _ => game.native_chat("atmospheric: /atmospheric labeler <labeler-did> [subject]"),
         }
     } else if rest == "chat" || rest.starts_with("chat ") {
         let text = rest.strip_prefix("chat").unwrap_or("").trim();

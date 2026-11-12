@@ -16,6 +16,9 @@
 //! ATMOSPHERIC_SKIN_MODEL="slim" \                        # optional, M9
 //! ATMOSPHERIC_POST_SERVER_PROFILE=1 \                    # optional, M10
 //! ATMOSPHERIC_FETCH_LIST="at://did:…/app.bsky.graph.list/<rkey>" \  # optional, M11
+//! ATMOSPHERIC_FETCH_LABELS="at://did:…/app.bsky.feed.post/<rkey>" \ # optional, M12
+//! ATMOSPHERIC_LABELER="did:plc:…" \                             # optional, M12
+//! ATMOSPHERIC_LABELER_SUBJECT="did:plc:…" \                     # optional, M12
 //! cargo run -p atmospheric --example pds_check
 //! ```
 //!
@@ -272,6 +275,74 @@ fn main() {
                         }
                         Event::Failed { message } => {
                             eprintln!("list fetch failed: {message}");
+                            exit(1);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(error) => {
+                    eprintln!("no event from the worker: {error}");
+                    exit(1);
+                }
+            }
+        }
+    }
+
+    // Optionally read labels on a subject (M12, labeler read side (a)): the
+    // AppView view carries them.
+    if let Some(subject) = env::var("ATMOSPHERIC_FETCH_LABELS")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        command_tx
+            .send(Command::FetchLabels { subject })
+            .expect("send FetchLabels");
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(event) => {
+                    println!("event: {event:?}");
+                    match event {
+                        Event::Labels { labels, .. } => {
+                            println!("{} label(s)", labels.len());
+                            break;
+                        }
+                        Event::Failed { message } => {
+                            eprintln!("label fetch failed: {message}");
+                            exit(1);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(error) => {
+                    eprintln!("no event from the worker: {error}");
+                    exit(1);
+                }
+            }
+        }
+    }
+
+    // Optionally query a labeler directly (M12, labeler read side (b)):
+    // resolve its #atproto_labeler endpoint and page queryLabels for the
+    // subject (default: the logged-in account's own DID).
+    if let Some(labeler) = env::var("ATMOSPHERIC_LABELER")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        let subject = env::var("ATMOSPHERIC_LABELER_SUBJECT").ok();
+        command_tx
+            .send(Command::FetchLabelerLabels { labeler, subject })
+            .expect("send FetchLabelerLabels");
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(event) => {
+                    println!("event: {event:?}");
+                    match event {
+                        Event::Labels { labels, .. } => {
+                            println!("labeler reports {} label(s)", labels.len());
+                            break;
+                        }
+                        Event::Failed { message } => {
+                            eprintln!("labeler query failed: {message}");
                             exit(1);
                         }
                         _ => {}
