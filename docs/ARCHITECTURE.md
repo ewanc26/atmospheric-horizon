@@ -212,7 +212,10 @@ PDS — see "Manual check" below.
   `com.atproto.server.refreshSession` with the stored refresh token (the
   agent cannot seed its store without a full session, so that one call goes
   through reqwest), then `resume_session` + `getSession`. The rotated refresh
-  token is persisted again. `Command::Logout` (`/atmospheric logout`) drops
+  token is persisted again. **#18**: when a persisted session cannot be
+  resumed (expired/revoked token, PDS unreachable) the worker now emits
+  `Session(Failed { .. })` instead of staying silent; the persisted file is
+  kept so a later start retries. `Command::Logout` (`/atmospheric logout`) drops
   the session and deletes the file. Stub-PDS tests cover resume-without-login,
   token rotation, and logout.
 - **#6 death messages**: a `RETURN` injection on
@@ -309,6 +312,11 @@ discover → PAR against the real services):
 ATMOSPHERIC_OAUTH_HANDLE="you.example" ATMOSPHERIC_OAUTH_PAR_ONLY=1 \
 cargo run -p atmospheric --example pds_check
 ```
+
+Known third-party quirk: eurosky.social's authorize page answers headless
+(non-browser) GETs with `400 Missing sec-fetch-site header` (bot guard) —
+real browsers pass, and the PAR step itself is accepted by both
+eurosky.social and bsky.social.
 
 Credentials come from the environment only; the example writes them to the
 temp settings file the worker reads and nothing else. Expected output: a
