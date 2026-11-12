@@ -1,4 +1,5 @@
-// /atmospheric login logs in; /atmospheric post <text> posts text.
+// /atmospheric login logs in; /atmospheric post <text> posts text;
+// /atmospheric notifications polls now (the worker also polls on a timer).
 fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut bool) {
     use crate::game::atmospheric as m;
     if !game.native_on(m::ID) {
@@ -10,13 +11,19 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     }
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
-        game.native_chat("atmospheric: try /atmospheric login or /atmospheric post <text>");
+        game.native_chat(
+            "atmospheric: try /atmospheric login, /atmospheric post <text> or /atmospheric notifications",
+        );
         return;
     };
     if rest == "login" {
         *ran = true;
         m::login();
         game.native_chat("atmospheric: logging in…");
+    } else if rest == "notifications" {
+        *ran = true;
+        m::refresh_notifications();
+        game.native_chat("atmospheric: checking notifications…");
     } else if rest == "post" || rest.starts_with("post ") {
         let text = rest.strip_prefix("post").unwrap_or("").trim();
         *ran = true;
@@ -28,6 +35,6 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
         }
     } else {
         *ran = true;
-        game.native_chat("atmospheric: unknown command; try /atmospheric login or /atmospheric post <text>");
+        game.native_chat("atmospheric: unknown command; try /atmospheric login, /atmospheric post <text> or /atmospheric notifications");
     }
 }

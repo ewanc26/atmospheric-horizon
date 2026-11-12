@@ -8,22 +8,7 @@ This project is the successor to [jollywhoppers-socialsync](https://github.com/e
 
 ## Status
 
-Early scaffold. The protocol library builds and tests standalone; the native injection pipeline follows the [horizon-native-mod-template](https://github.com/horizon-rust/horizon-native-mod-template). Milestones: M1 library skeleton, M2 worker wiring + login/text posts and the game-side hooks (keybind, `/atmospheric` commands, HUD status line), M3 screenshots (F2, then a keybind posts the latest one), M4 notifications, M5 registry submission.
-
-### Roadmap: porting atpcraft to Horizon
-
-atpcraft is a server-side Fabric mod; Horizon native mods can hook the server side too (`native_tick`/`native_world_lifecycle` run there), so the port maps onto milestones and later work:
-
-| atpcraft feature | atmospheric-horizon |
-|---|---|
-| Bluesky sign-in | app-password login (`com.atproto.server.createSession`, M2); a browser OAuth flow would need a tiny local web server on the worker — later milestone |
-| Chat messages as records (`at.atpcraft.player.chat`) | later, once the worker is linked in-game (issue #2) |
-| Player state snapshots (`at.atpcraft.player.snapshot`, `defs`) | later; position/facing already readable via `native_player` |
-| Skins and capes as blobs on the PDS | blob upload proven in M3; skin upload later |
-| Labeler publishing player activity | later (`com.atproto.label.*`) |
-| Server profile record (`at.atpcraft.server.profile`) | later, server-side |
-| Join gate reading a public Bluesky list | later, server-side |
-| Web server for login pages / lexicons | not planned for the client mod; OAuth sign-in is the alternative |
+Early scaffold. The protocol library builds and tests standalone; the native injection pipeline follows the [horizon-native-mod-template](https://github.com/horizon-rust/horizon-native-mod-template). Milestones: M1 library skeleton, M2 worker wiring + login/text posts and the game-side hooks (keybind, `/atmospheric` commands, HUD status line), M3 screenshots (F2, then a keybind posts the latest one), M4 notifications (poll timer + persisted cursor + `/atmospheric notifications`), M5 registry submission.
 
 ## Features
 
@@ -55,8 +40,8 @@ The published mod installs through the Horizon launcher's Mods page once it is i
 
 This mod talks to the network **by design**, and to exactly one place: the PDS you configure.
 
-- Sent to your PDS: your identifier and app password (`com.atproto.server.createSession`), a session check after login (`com.atproto.server.getSession`), and the posts you choose to make: text and screenshots (`com.atproto.repo.uploadBlob` for the image, then `com.atproto.repo.createRecord` with an `app.bsky.embed.images` embed). Notification polling requests arrive in M4.
-- Stored on disk: one settings file, `config.json` (PDS URL, identifier, app password, poll interval, post-death-messages flag), in the mod's own storage folder `horizon-mods/.horizon-mod-data/atmospheric/` — never in world saves. The image you post is read from the game's `screenshots/` folder only when you press the post-screenshot keybind; the path of the latest screenshot is otherwise kept in memory only. The login session is held in memory for the running game and re-created by logging in; persisting it across restarts is planned.
+- Sent to your PDS: your identifier and app password (`com.atproto.server.createSession`), a session check after login (`com.atproto.server.getSession`), notification polling (`app.bsky.notification.listNotifications` with a `seenAt` timestamp, on a timer and on `/atmospheric notifications`), and the posts you choose to make: text and screenshots (`com.atproto.repo.uploadBlob` for the image, then `com.atproto.repo.createRecord` with an `app.bsky.embed.images` embed).
+- Stored on disk: two files in the mod's own storage folder `horizon-mods/.horizon-mod-data/atmospheric/` — never in world saves. `config.json` (PDS URL, identifier, app password, poll interval, post-death-messages flag) and `cursor.json` (the notification seen-cursor, so restarts do not re-show old notifications). The image you post is read from the game's `screenshots/` folder only when you press the post-screenshot keybind; the path of the latest screenshot is otherwise kept in memory only. The login session is held in memory for the running game and re-created by logging in; persisting it across restarts is planned.
 - Nothing else: no telemetry, no analytics, no other endpoints.
 
 ## Files

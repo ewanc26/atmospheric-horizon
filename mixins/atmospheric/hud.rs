@@ -11,6 +11,9 @@ fn atmospheric_hud(
         return;
     }
     let line = m::status_line();
+    if line.is_empty() {
+        return; // nothing to show until the worker reports something
+    }
     let w = game.native_text_width(&line) + 4.0;
     let h = 12.0;
     let (x, y) = corners.place(Corner::BottomLeft, w, h);

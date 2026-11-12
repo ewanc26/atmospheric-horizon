@@ -86,6 +86,33 @@ fn main() {
         }
     }
 
+    // Poll notifications once after login (M4), printing the digest event.
+    command_tx
+        .send(Command::RefreshNotifications)
+        .expect("send RefreshNotifications");
+    loop {
+        match event_rx.recv_timeout(Duration::from_secs(60)) {
+            Ok(event) => {
+                println!("event: {event:?}");
+                match event {
+                    Event::Notifications { .. } => break,
+                    Event::Failed { message } => {
+                        eprintln!("notification poll failed: {message}");
+                        let _ = command_tx.send(Command::Shutdown);
+                        let _ = handle.join();
+                        exit(1);
+                    }
+                    _ => {}
+                }
+            }
+            Err(error) => {
+                eprintln!("no event from the worker: {error}");
+                let _ = handle.join();
+                exit(1);
+            }
+        }
+    }
+
     // One wait loop per optional post; each ends on its Posted event.
     let posts: Vec<Command> = [
         post_text.map(|text| Command::PostText { text }),
