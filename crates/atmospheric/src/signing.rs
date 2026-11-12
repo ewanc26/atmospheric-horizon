@@ -33,14 +33,27 @@ pub struct SigningKeyFile {
     pub key_id: String,
 }
 
-/// The key id of a verifying key: first 16 base64url (no padding) chars of
-/// SHA-256 over its X.509/SPKI encoding.
-pub fn key_id_of(verifying_key: &VerifyingKey) -> String {
+/// The X.509/SPKI encoding of an Ed25519 public key (RFC 8410 header + the
+/// 32-byte key).
+fn spki_bytes(verifying_key: &VerifyingKey) -> Vec<u8> {
     let mut spki = Vec::with_capacity(SPKI_ED25519_PREFIX.len() + 32);
     spki.extend_from_slice(SPKI_ED25519_PREFIX);
     spki.extend_from_slice(&verifying_key.to_bytes());
-    let digest = Sha256::digest(&spki);
+    spki
+}
+
+/// The key id of a verifying key: first 16 base64url (no padding) chars of
+/// SHA-256 over its X.509/SPKI encoding.
+pub fn key_id_of(verifying_key: &VerifyingKey) -> String {
+    let digest = Sha256::digest(spki_bytes(verifying_key));
     general_purpose::URL_SAFE_NO_PAD.encode(digest)[..16].to_string()
+}
+
+/// The public key as base64 (standard, padded) of its X.509/SPKI encoding —
+/// the `publicKey` field of `at.atpcraft.server.profile` records (atpcraft's
+/// `Base64.getEncoder().encodeToString(key.publicKey().encoded)`).
+pub fn public_key_spki_b64(verifying_key: &VerifyingKey) -> String {
+    general_purpose::STANDARD.encode(spki_bytes(verifying_key))
 }
 
 /// Generate a fresh signing key (random seed).
