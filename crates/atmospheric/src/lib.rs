@@ -9,6 +9,7 @@
 pub mod actions;
 pub mod config;
 pub mod error;
+pub mod lists;
 pub mod notifications;
 pub mod oauth;
 pub mod records;
@@ -64,6 +65,10 @@ pub enum Command {
     /// Identity fields come from the settings file; the signing key block is
     /// the mod's persisted Ed25519 key.
     PostServerProfile,
+    /// Fetch the member DIDs of a public Bluesky list — the read side of
+    /// atpcraft's join gate (M11). The reference is an
+    /// `at://…/app.bsky.graph.list/<rkey>` URI or a bsky.app list URL.
+    FetchList { reference: String },
     /// Post the player's death message to Bluesky (only when
     /// `post_death_messages` is enabled).
     PostDeathMessage { text: String },
@@ -89,4 +94,7 @@ pub enum Event {
     Notifications {
         items: Vec<notifications::NotificationDigest>,
     },
+    /// The members of a fetched Bluesky list (M11): the AT-URI and the
+    /// member DIDs, in page order.
+    ListMembers { list: String, members: Vec<String> },
 }

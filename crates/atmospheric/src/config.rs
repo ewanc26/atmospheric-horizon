@@ -61,6 +61,9 @@ pub struct Config {
     pub server_capabilities: Vec<String>,
     /// The `minecraftVersion` written into the server profile (M10).
     pub game_version: String,
+    /// The AppView used for public list reads (M11): `app.bsky.graph.getList`
+    /// against this base, unauthenticated. atpcraft uses the public AppView.
+    pub appview_url: String,
 }
 
 impl Default for Config {
@@ -85,6 +88,7 @@ impl Default for Config {
             server_contact: String::new(),
             server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
             game_version: "26.3".into(),
+            appview_url: crate::lists::DEFAULT_APPVIEW.into(),
         }
     }
 }
@@ -142,6 +146,7 @@ mod tests {
             server_contact: String::new(),
             server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
             game_version: "26.3".into(),
+            appview_url: crate::lists::DEFAULT_APPVIEW.into(),
         };
         let raw = config.to_json().unwrap();
         let back = Config::from_json(&raw).unwrap();

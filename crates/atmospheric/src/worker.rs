@@ -377,6 +377,13 @@ impl Worker {
                     Err(error) => self.fail(error.to_string()),
                 }
             }
+            Command::FetchList { reference } => {
+                // Public AppView read: works logged out, no token refresh.
+                match self.fetch_list(&reference).await {
+                    Ok((list, members)) => self.emit(Event::ListMembers { list, members }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
             Command::PostDeathMessage { text } => {
                 if !self.post_death_messages {
                     return;
@@ -733,6 +740,28 @@ impl Worker {
         .await
     }
 
+    /// Fetch a public Bluesky list's member DIDs (M11, the join-gate read
+    /// side of atpcraft's port). Works logged out: `getList` on the public
+    /// AppView needs no auth. bsky.app URLs with a handle resolve the handle
+    /// first (via the same directory service as OAuth login).
+    async fn fetch_list(&self, reference: &str) -> crate::error::Result<(String, Vec<String>)> {
+        let config = self.load_config().unwrap_or_default();
+        let appview = if config.appview_url.is_empty() {
+            crate::lists::DEFAULT_APPVIEW.to_string()
+        } else {
+            config.appview_url.clone()
+        };
+        let list = match crate::lists::parse_list_reference(reference)? {
+            crate::lists::ListRef::AtUri(uri) => uri,
+            crate::lists::ListRef::NeedsResolve { handle, rkey } => {
+                let did = crate::oauth::resolve_handle(&self.http, &self.resolver, &handle).await?;
+                format!("at://{did}/app.bsky.graph.list/{rkey}")
+            }
+        };
+        let members = crate::lists::fetch_list_members(&self.http, &appview, &list).await?;
+        Ok((list, members))
+    }
+
     /// Load the endorsement key from the storage folder, or generate and
     /// persist a fresh one (worker owns disk I/O).
     fn load_or_create_signing_key(&self) -> crate::error::Result<SigningKey> {
@@ -1084,6 +1113,7 @@ mod tests {
             server_contact: String::new(),
             server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
             game_version: "26.3".into(),
+            appview_url: "https://public.api.bsky.app".into(),
         }
     }
 
@@ -1402,6 +1432,26 @@ mod tests {
                         )
                     }
                 }
+                "/xrpc/app.bsky.graph.getList" => {
+                    // Two pages: cursor "c2" on the first, none on the second.
+                    if path.contains("cursor=c2") {
+                        (
+                            "200 OK",
+                            r#"{"items":[{"subject":{"did":"did:plc:carol","handle":"carol.test"}}]}"#
+                                .to_string(),
+                        )
+                    } else if path.contains("list=") {
+                        (
+                            "200 OK",
+                            r#"{"items":[{"subject":{"did":"did:plc:alice","handle":"alice.test"}},{"subject":{"did":"did:plc:bob","handle":"bob.test"}}],"cursor":"c2"}"#.to_string(),
+                        )
+                    } else {
+                        (
+                            "400 Bad Request",
+                            r#"{"error":"InvalidRequest","message":"missing list"}"#.to_string(),
+                        )
+                    }
+                }
                 "/xrpc/com.atproto.repo.createRecord" => {
                     if authorized {
                         (
@@ -1623,6 +1673,7 @@ mod tests {
             server_contact: String::new(),
             server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
             game_version: "26.3".into(),
+            appview_url: "https://public.api.bsky.app".into(),
         };
         command_tx
             .send(Command::SaveConfig {
@@ -2370,6 +2421,59 @@ mod tests {
             "createdAt survives re-publish"
         );
         assert!(!record["updatedAt"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn fetch_list_paginates_the_appview_and_reports_members() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("fetch-list");
+        let mut config = test_config(pds.url.clone());
+        config.appview_url = pds.url.clone(); // the stub doubles as the AppView
+        write_config(&dir, &config);
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir.clone());
+        command_tx
+            .send(Command::FetchList {
+                reference: "at://did:plc:owner/app.bsky.graph.list/3abc".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::ListMembers { .. })) {
+            Event::ListMembers { list, members } => {
+                assert_eq!(list, "at://did:plc:owner/app.bsky.graph.list/3abc");
+                assert_eq!(
+                    members,
+                    vec![
+                        "did:plc:alice".to_string(),
+                        "did:plc:bob".to_string(),
+                        "did:plc:carol".to_string()
+                    ]
+                );
+            }
+            other => panic!("expected ListMembers, got {other:?}"),
+        }
+        // A bad reference fails without any HTTP call.
+        command_tx
+            .send(Command::FetchList {
+                reference: "https://example.com/nope".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("not a list reference"), "{message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let hits = pds
+            .requests()
+            .into_iter()
+            .filter(|r| r.path.starts_with("/xrpc/app.bsky.graph.getList"))
+            .collect::<Vec<_>>();
+        assert_eq!(hits.len(), 2, "two pages fetched: {hits:?}");
+        assert!(hits[0].path.contains("limit=100"));
+        assert!(hits[1].path.contains("cursor=c2"));
     }
 
     #[test]
