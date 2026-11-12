@@ -936,35 +936,64 @@ pub async fn refresh(
     Ok(tokens)
 }
 
-/// Open the system browser at the authorize URL. Best effort: the URL is also
-/// emitted as an event, so the HUD can show it when no browser opens.
-pub fn open_browser(url: &str) {
+/// Try to open the system browser at the authorize URL. Returns `false` when
+/// no browser could be launched; the authorize URL is always emitted as an
+/// `Event::OAuthAuthorize` first, so the user can open it manually — the same
+/// fallback Sequoia's CLI uses.
+pub fn open_browser(url: &str) -> bool {
     #[cfg(target_os = "macos")]
     let (program, args): (&str, Vec<&str>) = ("open", vec![url]);
     #[cfg(all(unix, not(target_os = "macos")))]
     let (program, args): (&str, Vec<&str>) = ("xdg-open", vec![url]);
     #[cfg(windows)]
     let (program, args): (&str, Vec<&str>) = ("cmd", vec!["/C", "start", "", url]);
-    let _ = std::process::Command::new(program).args(&args).spawn();
+    std::process::Command::new(program)
+        .args(&args)
+        .spawn()
+        .is_ok()
+}
+
+/// Inputs for one browser login flow (see [`run_login`]).
+pub struct LoginFlow<'a> {
+    pub http: &'a reqwest::Client,
+    pub resolver: &'a Resolver,
+    pub handle: &'a str,
+    pub client_id: &'a str,
+    pub scope: &'a str,
+    pub redirect_timeout: Duration,
+    /// Whether to try spawning the system browser at the authorize URL.
+    pub launch_browser: bool,
+    pub events: &'a std::sync::mpsc::Sender<crate::Event>,
 }
 
 /// Run the whole browser flow: resolve + PAR, emit the authorize URL, wait for
 /// the loopback redirect, exchange the code. Called from the worker's spawned
 /// task so the command loop stays responsive while the browser is open.
-pub async fn run_login(
-    http: &reqwest::Client,
-    resolver: &Resolver,
-    handle: &str,
-    client_id: &str,
-    scope: &str,
-    redirect_timeout: Duration,
-    events: &std::sync::mpsc::Sender<crate::Event>,
-) -> Result<OAuthLogin> {
+pub async fn run_login(flow: LoginFlow<'_>) -> Result<OAuthLogin> {
+    let LoginFlow {
+        http,
+        resolver,
+        handle,
+        client_id,
+        scope,
+        redirect_timeout,
+        launch_browser,
+        events,
+    } = flow;
     let mut authorization = start_authorization(http, resolver, handle, client_id, scope).await?;
+    // The URL always goes out first, so it is visible even when no browser
+    // can be launched (headless game, missing xdg-open, …).
     let _ = events.send(crate::Event::OAuthAuthorize {
         url: authorization.authorize_url.clone(),
     });
-    open_browser(&authorization.authorize_url);
+    if launch_browser && !open_browser(&authorization.authorize_url) {
+        let _ = events.send(crate::Event::Failed {
+            message: format!(
+                "could not open a browser automatically — open this link manually: {}",
+                authorization.authorize_url
+            ),
+        });
+    }
     let code = wait_for_redirect(&mut authorization, redirect_timeout).await?;
     let tokens = exchange_code(http, &authorization, &code).await?;
     Ok(OAuthLogin {

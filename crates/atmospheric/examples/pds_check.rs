@@ -32,7 +32,9 @@
 //! the real services — a headless wire-format check that exits before the
 //! browser step. `ATMOSPHERIC_PROBE_AS=https://some.authorization.server`
 //! pushes the PAR at that specific authorization server instead of the
-//! account's own (debugging client_id handling).
+//! account's own (debugging client_id handling). `ATMOSPHERIC_NO_BROWSER=1`
+//! keeps the worker from spawning a browser (headless runs): the authorize
+//! URL is still printed via the `OAuthAuthorize` event.
 //!
 //! The example spawns the worker exactly as the game side will, sends the
 //! login command, waits for the session event, optionally sends the posts,
@@ -100,7 +102,11 @@ fn main() {
 
     let (command_tx, command_rx) = mpsc::channel::<Command>();
     let (event_tx, event_rx) = mpsc::channel::<Event>();
-    let handle = spawn(command_rx, event_tx, WorkerOptions::new(&storage_dir));
+    let mut options = WorkerOptions::new(&storage_dir);
+    if env::var_os("ATMOSPHERIC_NO_BROWSER").is_some() {
+        options = options.no_browser();
+    }
+    let handle = spawn(command_rx, event_tx, options);
 
     // In OAuth mode a persisted session may already resume at startup; give
     // it a moment before sending a fresh login.
