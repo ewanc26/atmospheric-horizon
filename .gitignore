@@ -22,3 +22,10 @@ rustc-ice-*.txt
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Runtime artifacts when a locally-built game runs with the repo as its cwd
+command_history.txt
+horizon-player.txt
+saves/
+screenshots/
+.horizon-cache/
