@@ -7,6 +7,7 @@
 //! performs network or disk I/O.
 
 pub mod actions;
+pub mod chats;
 pub mod config;
 pub mod error;
 pub mod labels;
@@ -77,6 +78,11 @@ pub enum Command {
     /// atpcraft's gate: any error is reported as a deny-with-reason.
     /// Unauthenticated AppView read — works logged out.
     CheckGate { list: String, subject: String },
+    /// Read a player's `at.atpcraft.player.chat` records (their mirrored
+    /// in-game chat history) from their own PDS (M16, the read side of the
+    /// M5 chat mirror). Chat records are unsigned by design, so there is no
+    /// endorsement to verify. Unauthenticated — works logged out.
+    FetchChat { subject: String },
     /// Read the labels on a subject (M12, labeler read side): an AT-URI, a
     /// DID, a handle, or a bsky.app profile/post/list URL. Labels come from
     /// the subject's AppView view (`labels` field). Works logged out.
@@ -136,6 +142,16 @@ pub enum Event {
         list: String,
         subject: String,
         allowed: bool,
+    },
+    /// A player's chat history (M16): the DID (`subject`), the PDS it was
+    /// read from (`via`), the total parseable record count, and the newest
+    /// few messages (oldest first). Chat records carry no endorsement, so
+    /// there is no verdict — they are plain records in the author's repo.
+    ChatHistory {
+        subject: String,
+        via: String,
+        total: usize,
+        items: Vec<chats::ChatDigest>,
     },
     /// The labels found on a subject (M12, labeler read side): the subject
     /// (AT-URI or DID), where the labels came from (`via`: the AppView URL or
