@@ -10,6 +10,7 @@ pub mod actions;
 pub mod chats;
 pub mod config;
 pub mod error;
+pub mod graph;
 pub mod labels;
 pub mod lists;
 pub mod notifications;
@@ -119,6 +120,10 @@ pub enum Command {
     /// read side of M10). The subject is a DID or a handle; the read is
     /// unauthenticated — works logged out.
     FetchServerProfile { subject: String },
+    /// Read one of an account's public social graphs (M20): `kind` is
+    /// "follows", "followers", "blocks" or "mutes", and `subject` is a DID
+    /// or a handle. Unauthenticated AppView read — works logged out.
+    FetchGraph { kind: String, subject: String },
     /// Post the player's death message to Bluesky (only when
     /// `post_death_messages` is enabled).
     PostDeathMessage { text: String },
@@ -202,6 +207,15 @@ pub enum Event {
         via: String,
         // Boxed: ServerDigest is one of the event enum's largest variants.
         profile: Box<Option<servers::ServerDigest>>,
+    },
+    /// One of an account's social graphs (M20): the relation (`kind`), the
+    /// subject's resolved DID, the AppView it was read from (`via`), and the
+    /// accounts in page order.
+    SocialGraph {
+        kind: String,
+        subject: String,
+        via: String,
+        members: Vec<graph::GraphMember>,
     },
 }
 
@@ -330,6 +344,10 @@ mod tests {
             Command::FetchServerProfile {
                 subject: "did:plc:z".into(),
             },
+            Command::FetchGraph {
+                kind: "follows".into(),
+                subject: "did:plc:z".into(),
+            },
             Command::PostDeathMessage { text: "t".into() },
             Command::Logout,
             Command::Shutdown,
@@ -424,6 +442,16 @@ mod tests {
                 subject: "s".into(),
                 via: "v".into(),
                 profile: Box::new(None),
+            },
+            Event::SocialGraph {
+                kind: "follows".into(),
+                subject: "s".into(),
+                via: "v".into(),
+                members: vec![graph::GraphMember {
+                    did: "did:plc:a".into(),
+                    handle: "a.test".into(),
+                    display_name: "A".into(),
+                }],
             },
         ];
         for event in events {
