@@ -58,6 +58,9 @@ Everything else, with zero Horizon imports so it builds and tests with plain
 - `graph` — M20 social-graph reads (`app.bsky.graph.getFollows`/
   `getFollowers`/`getBlocks`/`getMutes` pagination on the public AppView,
   reduced to DID/handle/display name)
+- `interactions` — M21 replies, likes and reposts (unauthenticated
+  `com.atproto.repo.getRecord` for the target's strong ref and thread root,
+  then `app.bsky.feed.post`/`like`/`repost` records in your own repo)
 - `chats` — M16 chat-history reads (`at.atpcraft.player.chat` listRecords on
   the subject's own PDS, ordered by `sentAt`)
 - `servers` — M19 server-profile reads (`at.atpcraft.server.profile` listRecords
@@ -638,6 +641,37 @@ test against the stub AppView (all four relations, follows paged twice,
 every read unauthenticated, an unknown kind fails before HTTP).
 Real-AppView wire check: `pds_check` with `ATMOSPHERIC_GRAPH`.
 
+### M21: interactions (`app.bsky.feed.like` / `repost` / a reply post)
+
+`/atmospheric reply <at-uri> <text>`, `/atmospheric like <at-uri>` and
+`/atmospheric repost <at-uri>` send `Command::Reply`, `Command::Like` and
+`Command::Repost`; success reuses `Event::Posted { uri }`.
+
+1. `interactions::resolve_post` accepts an `at://…/app.bsky.feed.post/<rkey>`
+   URI or a bsky.app post URL, resolves a handle owner through the directory
+   service, and rejects a non-post record before any PDS read.
+2. `interactions::fetch_ref` fetches the target with an **unauthenticated**
+   `com.atproto.repo.getRecord` from the author's PDS. The response's `cid`
+   and the requested URI become the strong ref.
+3. `interactions::reply_targets` uses the target's own `reply.root` when it
+   is itself a reply, otherwise the target is its own root — so replies join
+   the correct thread.
+4. The worker writes to your repo with `com.atproto.repo.createRecord`:
+   `app.bsky.feed.like` / `app.bsky.feed.repost` (`subject` strong ref), or an
+   `app.bsky.feed.post` with `text`, `createdAt` and `reply: {root, parent}`.
+   Keyboard-bound and command-originated writes both go through the same
+   logged-in agent (OAuth tokens are refreshed first when needed).
+
+README "Network use" documents the four endpoints and every field. No
+atpcraft code is involved; the record shapes are the public Bluesky lexicons.
+
+Verified: `interactions` unit tests (post-URI parsing, root inheritance,
+record shapes, unauthenticated `getRecord`, non-post rejection before I/O) and
+a worker test against the stub PDS (login, then like/repost/reply create the
+right records with the right strong refs; target reads are unauthenticated; a
+non-post target writes nothing). Manual check: `pds_check` with
+`ATMOSPHERIC_LIKE`, `ATMOSPHERIC_REPOST` or `ATMOSPHERIC_REPLY`.
+
 ### M17: the sidecar worker process (issue #2 option 3, #40)
 
 The bundle cannot stage the worker crate into the game workspace (see
@@ -700,6 +734,9 @@ ATMOSPHERIC_GATE_SUBJECT="did:plc:… | handle" \     # optional, M15 (default: 
 ATMOSPHERIC_FETCH_CHAT="did:plc:… | handle" \       # optional, M16 (chat history)
 ATMOSPHERIC_FETCH_SERVER="did:plc:… | handle" \     # optional, M19 (server profile)
 ATMOSPHERIC_GRAPH="follows:did:plc:…" \            # optional, M20 (follows|followers|blocks|mutes)
+ATMOSPHERIC_LIKE="at://…/app.bsky.feed.post/<rkey>" \    # optional, M21
+ATMOSPHERIC_REPOST="at://…/app.bsky.feed.post/<rkey>" \  # optional, M21
+ATMOSPHERIC_REPLY="at://…/app.bsky.feed.post/<rkey>|<text>" \ # optional, M21
 cargo run -p atmospheric --example pds_check
 ```
 
