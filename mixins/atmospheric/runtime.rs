@@ -717,18 +717,18 @@ pub fn status_text(event: &ModEvent) -> String {
         ModEvent::ColibriMessage { handle, text } => {
             format!(
                 "[Colibri] @{}: {}",
-                clean_remote(handle),
-                clean_remote(text)
+                clean_remote(handle, COLIBRI_MAX_HANDLE),
+                clean_remote(text, COLIBRI_MAX_TEXT)
             )
         }
         ModEvent::ColibriProfileMissing { url } => {
             format!(
                 "atmospheric: Colibri profile missing — open {}",
-                clean_remote(url)
+                clean_remote(url, COLIBRI_MAX_TEXT)
             )
         }
         ModEvent::ColibriMembershipPending { message } => {
-            format!("[Colibri] {}", clean_remote(message))
+            format!("[Colibri] {}", clean_remote(message, COLIBRI_MAX_TEXT))
         }
         ModEvent::SocialGraph {
             kind,
@@ -905,15 +905,21 @@ fn colibri_chat_lines(event: &ModEvent) -> Vec<String> {
     match event {
         ModEvent::ColibriMessage { handle, text } => vec![format!(
             "[Colibri] @{}: {}",
-            clean_remote(handle),
-            clean_remote(text)
+            clean_remote(handle, COLIBRI_MAX_HANDLE),
+            clean_remote(text, COLIBRI_MAX_TEXT)
         )],
         ModEvent::ColibriProfileMissing { url } => vec![
             "[Colibri] You need a Colibri profile to use the chat bridge.".into(),
-            format!("[Colibri] Open Colibri: {}", clean_remote(url)),
+            format!(
+                "[Colibri] Open Colibri: {}",
+                clean_remote(url, COLIBRI_MAX_TEXT)
+            ),
         ],
         ModEvent::ColibriMembershipPending { message } => {
-            vec![format!("[Colibri] {}", clean_remote(message))]
+            vec![format!(
+                "[Colibri] {}",
+                clean_remote(message, COLIBRI_MAX_TEXT)
+            )]
         }
         _ => Vec::new(),
     }
@@ -928,14 +934,28 @@ pub fn drain_colibri_chat() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Remote chat text is not trusted: drop control characters, the legacy
-/// colour marker, and cap the line at the Colibri limit.
-fn clean_remote(value: &str) -> String {
-    value
-        .chars()
-        .filter(|c| !c.is_control() && *c != '§')
-        .take(512)
-        .collect()
+/// atpcraft's Colibri display limits.
+const COLIBRI_MAX_HANDLE: usize = 64;
+const COLIBRI_MAX_TEXT: usize = 512;
+
+/// Remote chat text is not trusted: control characters and the legacy colour
+/// marker become spaces, whitespace collapses, the result is trimmed, and only
+/// then capped. This matches atpcraft's `ColibriChatFormatter.clean`.
+fn clean_remote(value: &str, max: usize) -> String {
+    let mut cleaned = String::with_capacity(value.len());
+    let mut pending_space = false;
+    for ch in value.chars() {
+        if ch.is_control() || ch == '§' || ch.is_whitespace() {
+            pending_space = !cleaned.is_empty();
+        } else {
+            if pending_space {
+                cleaned.push(' ');
+                pending_space = false;
+            }
+            cleaned.push(ch);
+        }
+    }
+    cleaned.chars().take(max).collect()
 }
 
 /// Send a command to the worker, if installed. Never blocks, never panics
@@ -2896,6 +2916,29 @@ mod tests {
                 })),
             }),
             "atmospheric: did:plc:y skin model default — skin bafkreibme22… 7 B, not saved, cape none — BAD SIGNATURE"
+        );
+    }
+
+    #[test]
+    fn colibri_remote_text_is_cleaned_like_atpcraft() {
+        assert_eq!(
+            clean_remote("  hello\n\tworld  ", COLIBRI_MAX_TEXT),
+            "hello world"
+        );
+        assert_eq!(clean_remote("a\0b§c", COLIBRI_MAX_TEXT), "a b c");
+        assert_eq!(clean_remote("one  two", COLIBRI_MAX_TEXT), "one two");
+        assert_eq!(
+            clean_remote(&"x".repeat(100), COLIBRI_MAX_HANDLE)
+                .chars()
+                .count(),
+            COLIBRI_MAX_HANDLE
+        );
+        assert_eq!(
+            colibri_chat_lines(&ModEvent::ColibriMessage {
+                handle: " a\nb ".into(),
+                text: " hi\t\tthere ".into(),
+            }),
+            vec!["[Colibri] @a b: hi there"]
         );
     }
 

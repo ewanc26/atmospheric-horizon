@@ -462,10 +462,9 @@ pub fn decode_event(frame: &str) -> Option<StreamEvent> {
 
 /// Run the event stream until the worker aborts the task.
 ///
-/// The token is minted once by the worker and reused across reconnects. atpcraft
-/// rotates the one-hour token every 45 minutes; proactive rotation is remaining
-/// M26+ work, so a reconnect after that window needs `/atmospheric colibri stop`
-/// followed by `start`.
+/// The worker mints the token; the stream returns `Rotate` after 45 minutes so
+/// the worker can mint a fresh token and reconnect. Network drops reconnect
+/// inside this loop with backoff.
 pub async fn run_stream(appview_url: String, token: String, tx: UnboundedSender<StreamEvent>) {
     let url = stream_url(&appview_url);
     let mut backoff = 1u64;
