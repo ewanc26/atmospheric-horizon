@@ -91,8 +91,12 @@ fn handshake_login_bad_line_then_shutdown() {
     let dir = temp_dir("basic");
     let mut worker = spawn_worker(&dir);
 
-    // Handshake: the worker reports its session state on start.
+    // Handshake: the worker reports its session state and gate arm state.
     assert_eq!(worker.event(), serde_json::json!({"Session": "LoggedOut"}));
+    assert_eq!(
+        worker.event(),
+        serde_json::json!({"JoinGateState": {"enabled": false, "list": ""}})
+    );
 
     // Login with no settings file: LoggingIn, then Failed — no network call.
     worker.send(&atmospheric::Command::Login);
@@ -151,6 +155,7 @@ fn save_config_writes_the_settings_file() {
     let dir = temp_dir("save");
     let mut worker = spawn_worker(&dir);
     let _handshake = worker.event();
+    let _gate = worker.event();
 
     worker.send(&atmospheric::Command::SaveConfig {
         config: Box::new(atmospheric::Config {
@@ -176,6 +181,11 @@ fn save_config_writes_the_settings_file() {
     assert_eq!(parsed["pds_url"], "https://pds.example");
     assert_eq!(parsed["identifier"], "alice.example");
     assert_eq!(parsed["post_chat_messages"], true);
+    // A successful save republishes the gate arm state.
+    assert_eq!(
+        worker.event(),
+        serde_json::json!({"JoinGateState": {"enabled": false, "list": ""}})
+    );
 
     worker.finish();
 }

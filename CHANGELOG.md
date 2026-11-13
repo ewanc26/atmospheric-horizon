@@ -12,8 +12,23 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Injected notice helpers (#92).** Keep `Text::component()` values alive in
+  `colibri_notice.rs` and `death.rs`, so the mixin bundle compiles against the
+  pinned Horizon revision.
+
 ### Added
 
+- **M38 — linked-account join gate (#91).** `join_gate_enabled` and
+  `join_gate_list` arm a login-phase gate. Horizon's `player_login` hook
+  waits, within a bounded budget, for the worker to resolve the joining UUID
+  through `server_api_url` and check the linked DID against the public list.
+  A linked member is admitted; unlinked players, non-members, an empty list,
+  a failed read and a timeout are refused with a disconnect reason. The
+  worker publishes the gate state at startup and after settings saves. This
+  is enforcement for already-linked accounts; the browser self-service
+  linking flow and the online whitelist sweep remain separate.
 - **M23 — social-graph writes (#60).** `/atmospheric follow`, `unfollow`,
   `block`, `unblock`, `mute` and `unmute` take a DID or handle. Follows and
   blocks are TID-keyed `app.bsky.graph.follow` / `block` records in your own
@@ -94,8 +109,9 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   claim a link without the admin credential. Links and pending codes persist
   atomically in `links.json`, and the image has a Docker end-to-end test for
   authentication, validation, pairing, deletion and restart persistence. M36
-  adds the in-game claim and M37 the join-time profile check; join enforcement,
-  label issuance, RPG discovery and aspect capture remain unimplemented.
+  adds the in-game claim, M37 the join-time profile check and M38 linked-account
+  join enforcement; browser self-service linking, label issuance, RPG discovery
+  and aspect capture remain unimplemented.
 - **M36 — in-game identity link claim (#87).** `/atmospheric link <code>`
   claims an operator-issued M35 pairing code as the logged-in player. The
   worker posts only the code, DID and optional handle to the configured
@@ -218,8 +234,9 @@ unless it writes to your own repo.
 - Registry submission (M7, #28) is blocked on launcher support for third-party
   native-mod bundles; the `horizon-ctl` `command` bypass (#8) is upstream
   horizon-rust/horizon#15691.
-- Label issuance and server-side join-gate enforcement are server concerns
-  and are documented, not implemented in the client mod (#29).
+- Label issuance remains a server concern (#29). Join-gate enforcement is
+  available for linked accounts (M38); browser-based self-service linking and
+  the online whitelist sweep remain to be implemented.
 
 [Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.2.0

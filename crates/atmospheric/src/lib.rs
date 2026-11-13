@@ -138,6 +138,13 @@ pub enum Command {
     /// atpcraft's gate: any error is reported as a deny-with-reason.
     /// Unauthenticated AppView read — works logged out.
     CheckGate { list: String, subject: String },
+    /// Decide one joining player's gate admission (M38): resolve the UUID
+    /// through the identity service and check the linked DID against the
+    /// configured list. The runtime waits for the matching decision at login.
+    JoinGateCheck {
+        request_id: u64,
+        player_uuid: String,
+    },
     /// Read a player's `at.atpcraft.player.chat` records (their mirrored
     /// in-game chat history) from their own PDS (M16, the read side of the
     /// M5 chat mirror). Chat records are unsigned by design, so there is no
@@ -243,6 +250,16 @@ pub enum Event {
         list: String,
         subject: String,
         allowed: bool,
+    },
+    /// Whether the server join gate is armed (M38), and the configured list.
+    /// The runtime caches this so a login can fail closed before placement.
+    JoinGateState { enabled: bool, list: String },
+    /// The admission decision for one `JoinGateCheck` (M38). `message` is the
+    /// refusal shown on the disconnect screen; empty when allowed.
+    JoinGateDecision {
+        request_id: u64,
+        allowed: bool,
+        message: String,
     },
     /// A player's chat history (M16): the DID (`subject`), the PDS it was
     /// read from (`via`), the total parseable record count, and the newest
@@ -487,6 +504,10 @@ mod tests {
                 list: "l".into(),
                 subject: "s".into(),
             },
+            Command::JoinGateCheck {
+                request_id: 7,
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+            },
             Command::FetchChat {
                 subject: "did:plc:z".into(),
             },
@@ -613,6 +634,15 @@ mod tests {
                 list: "l".into(),
                 subject: "s".into(),
                 allowed: true,
+            },
+            Event::JoinGateState {
+                enabled: true,
+                list: "l".into(),
+            },
+            Event::JoinGateDecision {
+                request_id: 7,
+                allowed: false,
+                message: "denied".into(),
             },
             Event::ChatHistory {
                 subject: "s".into(),

@@ -109,6 +109,8 @@ fn main() {
         game_version: "26.3".into(),
         appview_url: "https://public.api.bsky.app".into(),
         server_api_url: env::var("ATMOSPHERIC_SERVER_API_URL").unwrap_or_default(),
+        join_gate_enabled: false,
+        join_gate_list: String::new(),
         // M13: trusted endorsement keys for presence reads, as
         // "keyId=publicKeyB64" pairs separated by commas (an empty keyId is
         // derived from the public key).

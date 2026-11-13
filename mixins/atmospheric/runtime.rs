@@ -7,7 +7,10 @@
 // installed here; commands and events cross that boundary as plain data only.
 
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{
+    Mutex, OnceLock,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 /// The mod's id: its settings folder and its keys in Options > Mods.
 pub const ID: &str = "atmospheric";
@@ -134,6 +137,13 @@ pub enum GameCommand {
     /// list `list` (an AT-URI or bsky.app list URL)? Fail-closed — errors
     /// come back as `ModEvent::Failed` (the deny-with-reason).
     CheckGate { list: String, subject: String },
+    /// Decide one joining player's gate admission (M38): resolve the UUID
+    /// through the identity service and check the linked DID against the
+    /// configured list. The login hook waits for the decision.
+    JoinGateCheck {
+        request_id: u64,
+        player_uuid: String,
+    },
     /// Read a player's `at.atpcraft.player.chat` records (their mirrored
     /// in-game chat history) from their own PDS (M16, read side of the M5
     /// chat mirror). Unsigned records by design — no endorsement to verify.
@@ -424,6 +434,15 @@ pub enum ModEvent {
         subject: String,
         allowed: bool,
     },
+    /// Whether the server join gate is armed (M38), and the configured list.
+    JoinGateState { enabled: bool, list: String },
+    /// The admission decision for one `JoinGateCheck` (M38). `message` is the
+    /// refusal shown on the disconnect screen; empty when allowed.
+    JoinGateDecision {
+        request_id: u64,
+        allowed: bool,
+        message: String,
+    },
     /// A player's chat history (M16): the DID (`subject`), the PDS it was
     /// read from (`via`), the total parseable record count, and the newest
     /// few messages (oldest first). Unsigned records by design.
@@ -564,6 +583,7 @@ pub fn status_text(event: &ModEvent) -> String {
             "atmospheric: gate {list} — {subject} {}",
             if *allowed { "ALLOWED" } else { "DENIED" }
         ),
+        ModEvent::JoinGateState { .. } | ModEvent::JoinGateDecision { .. } => String::new(),
         ModEvent::ChatHistory {
             subject,
             total,
@@ -814,6 +834,13 @@ static STATUS: OnceLock<Mutex<Vec<(String, std::time::Instant)>>> = OnceLock::ne
 static LAST_SHOT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static COLIBRI_CHAT: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
+/// The worker's M38 gate state, cached so a login can decide without disk
+/// access. Unknown means the worker has not reported yet.
+static JOIN_GATE_KNOWN: AtomicBool = AtomicBool::new(false);
+static JOIN_GATE_ENABLED: AtomicBool = AtomicBool::new(false);
+static JOIN_GATE_SEQ: AtomicU64 = AtomicU64::new(0);
+static JOIN_GATE_DECISION: OnceLock<Mutex<Option<(u64, bool, String)>>> = OnceLock::new();
+
 /// How many status lines the HUD shows at once.
 pub const STATUS_LINES_MAX: usize = 3;
 
@@ -834,6 +861,30 @@ fn prune_expired(status: &mut Vec<(String, std::time::Instant)>, now: std::time:
 
 fn last_shot_slot() -> &'static Mutex<Option<String>> {
     LAST_SHOT.get_or_init(|| Mutex::new(None))
+}
+
+fn join_gate_decision_slot() -> &'static Mutex<Option<(u64, bool, String)>> {
+    JOIN_GATE_DECISION.get_or_init(|| Mutex::new(None))
+}
+
+/// Cache worker gate events. They are control messages, not HUD lines.
+fn note_join_gate(event: &ModEvent) {
+    match event {
+        ModEvent::JoinGateState { enabled, .. } => {
+            JOIN_GATE_ENABLED.store(*enabled, Ordering::Release);
+            JOIN_GATE_KNOWN.store(true, Ordering::Release);
+        }
+        ModEvent::JoinGateDecision {
+            request_id,
+            allowed,
+            message,
+        } => {
+            if let Ok(mut slot) = join_gate_decision_slot().lock() {
+                *slot = Some((*request_id, *allowed, message.clone()));
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Create the channel pair and install the game side in-process.
@@ -875,6 +926,9 @@ pub fn drain_events(max: usize) -> Vec<ModEvent> {
             }
         }
     }
+    for event in &drained {
+        note_join_gate(event);
+    }
     if let Ok(mut chat) = COLIBRI_CHAT.get_or_init(|| Mutex::new(Vec::new())).lock() {
         for event in &drained {
             chat.extend(colibri_chat_lines(event));
@@ -907,6 +961,9 @@ pub fn drain_events(max: usize) -> Vec<ModEvent> {
         prune_expired(&mut status, now);
         for event in &drained {
             let line = status_text(event);
+            if line.is_empty() {
+                continue;
+            }
             // Keep a short history instead of only the latest event, so a
             // notification digest is not overwritten immediately (#7).
             if status.last().map(|(l, _)| l) != Some(&line) {
@@ -1271,6 +1328,68 @@ pub fn check_gate(list: &str, subject: &str) {
         list: list.into(),
         subject: subject.into(),
     });
+}
+
+/// Wait for the worker's M38 admission decision for one joining player. `None`
+/// means allow; `Some(message)` is the disconnect reason. The login hook is
+/// synchronous, so this is bounded: 3 seconds for the startup gate state and
+/// 6 seconds for the link plus list read. An attached worker that never
+/// answers is fail-closed; with no worker at all the mod cannot know the gate
+/// is armed and stays out of the way.
+pub fn join_gate_refusal(player_uuid: &str) -> Option<String> {
+    if !ensure_attached() {
+        return None;
+    }
+    if !JOIN_GATE_KNOWN.load(Ordering::Acquire) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !JOIN_GATE_KNOWN.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            let _ = drain_events(32);
+            if !JOIN_GATE_KNOWN.load(Ordering::Acquire) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        if !JOIN_GATE_KNOWN.load(Ordering::Acquire) {
+            return Some(
+                "Could not verify Bluesky whitelist membership. Try again shortly.".into(),
+            );
+        }
+    }
+    if !JOIN_GATE_ENABLED.load(Ordering::Acquire) {
+        return None;
+    }
+
+    let request_id = JOIN_GATE_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    send(GameCommand::JoinGateCheck {
+        request_id,
+        player_uuid: player_uuid.into(),
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    loop {
+        let _ = drain_events(32);
+        let decision = join_gate_decision_slot()
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if let Some((got, allowed, message)) = decision
+            && got == request_id
+        {
+            if allowed {
+                return None;
+            }
+            let message = message.trim();
+            return Some(if message.is_empty() {
+                "This server's Bluesky join gate refused the login.".into()
+            } else {
+                clean_remote(message, 512)
+            });
+        }
+        if std::time::Instant::now() >= deadline {
+            return Some(
+                "Could not verify Bluesky whitelist membership. Try again shortly.".into(),
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 /// Ask the worker to read a player's chat history (M16). `subject` is a DID
@@ -1988,6 +2107,16 @@ fn encode_command(command: &GameCommand) -> String {
             "CheckGate",
             jobj(vec![("list", jstr(list)), ("subject", jstr(subject))]),
         )]),
+        GameCommand::JoinGateCheck {
+            request_id,
+            player_uuid,
+        } => jobj(vec![(
+            "JoinGateCheck",
+            jobj(vec![
+                ("request_id", juint(*request_id)),
+                ("player_uuid", jstr(player_uuid)),
+            ]),
+        )]),
         GameCommand::FetchChat { subject } => {
             jobj(vec![("FetchChat", jobj(vec![("subject", jstr(subject))]))])
         }
@@ -2295,6 +2424,21 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 list: req_str(obj, "list")?,
                 subject: req_str(obj, "subject")?,
                 allowed: jget(obj, "allowed").and_then(as_bool)?,
+            })
+        }
+        "JoinGateState" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::JoinGateState {
+                enabled: jget(obj, "enabled").and_then(as_bool)?,
+                list: req_str(obj, "list")?,
+            })
+        }
+        "JoinGateDecision" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::JoinGateDecision {
+                request_id: req_int(obj, "request_id")? as u64,
+                allowed: jget(obj, "allowed").and_then(as_bool)?,
+                message: req_str(obj, "message")?,
             })
         }
         "ChatHistory" => {
@@ -2775,6 +2919,53 @@ mod tests {
         );
         assert!(drain_colibri_prompts().is_empty());
 
+        // M38: the login hook asks the worker and waits for its decision.
+        event_tx
+            .send(ModEvent::JoinGateState {
+                enabled: true,
+                list: "at://did:plc:owner/app.bsky.graph.list/3gate".into(),
+            })
+            .unwrap();
+        let gate_uuid = "00000000-0000-4000-8000-000000000001".to_string();
+        let waiter_uuid = gate_uuid.clone();
+        let waiter = std::thread::spawn(move || join_gate_refusal(&waiter_uuid));
+        let request_id = match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::JoinGateCheck {
+                request_id,
+                player_uuid,
+            }) => {
+                assert_eq!(player_uuid, gate_uuid);
+                request_id
+            }
+            other => panic!("expected JoinGateCheck, got {other:?}"),
+        };
+        event_tx
+            .send(ModEvent::JoinGateDecision {
+                request_id,
+                allowed: false,
+                message: "You are not on this server's Bluesky whitelist.".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            waiter.join().unwrap(),
+            Some("You are not on this server's Bluesky whitelist.".into())
+        );
+
+        let waiter_uuid = gate_uuid.clone();
+        let waiter = std::thread::spawn(move || join_gate_refusal(&waiter_uuid));
+        let request_id = match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::JoinGateCheck { request_id, .. }) => request_id,
+            other => panic!("expected JoinGateCheck, got {other:?}"),
+        };
+        event_tx
+            .send(ModEvent::JoinGateDecision {
+                request_id,
+                allowed: true,
+                message: String::new(),
+            })
+            .unwrap();
+        assert_eq!(waiter.join().unwrap(), None);
+
         // The worker side stays usable after the game side drops it.
         drop(event_tx);
         post_text("still works");
@@ -2908,6 +3099,21 @@ mod tests {
                 allowed: false,
             }),
             "atmospheric: gate at://did:plc:x/app.bsky.graph.list/3abc — did:plc:z DENIED"
+        );
+        assert_eq!(
+            status_text(&ModEvent::JoinGateState {
+                enabled: true,
+                list: "l".into()
+            }),
+            ""
+        );
+        assert_eq!(
+            status_text(&ModEvent::JoinGateDecision {
+                request_id: 7,
+                allowed: false,
+                message: "no".into()
+            }),
+            ""
         );
         assert_eq!(
             status_text(&ModEvent::ChatHistory {
@@ -3386,6 +3592,13 @@ mod tests {
             r#"{"CheckGate":{"list":"l","subject":"s"}}"#
         );
         assert_eq!(
+            encode_command(&GameCommand::JoinGateCheck {
+                request_id: 7,
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+            }),
+            r#"{"JoinGateCheck":{"request_id":7,"player_uuid":"00000000-0000-4000-8000-000000000001"}}"#
+        );
+        assert_eq!(
             encode_command(&GameCommand::FetchChat {
                 subject: "did:plc:z".into()
             }),
@@ -3630,6 +3843,21 @@ mod tests {
                 list: "l".into(),
                 subject: "s".into(),
                 allowed: true
+            })
+        );
+        assert_eq!(
+            decode_event(r#"{"JoinGateState":{"enabled":true,"list":"l"}}"#),
+            Some(ModEvent::JoinGateState {
+                enabled: true,
+                list: "l".into()
+            })
+        );
+        assert_eq!(
+            decode_event(r#"{"JoinGateDecision":{"request_id":7,"allowed":false,"message":"no"}}"#),
+            Some(ModEvent::JoinGateDecision {
+                request_id: 7,
+                allowed: false,
+                message: "no".into()
             })
         );
         assert_eq!(
