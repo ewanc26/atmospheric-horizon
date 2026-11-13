@@ -88,6 +88,20 @@ async fn create_record(
     Ok(output.data.uri)
 }
 
+/// Write one already-shaped JSON record (with its `$type`) and return its
+/// `at://` URI. Used by the M21 interaction records, whose small lexicon
+/// shapes are built directly as JSON.
+pub async fn create_record_json(
+    agent: &Agent,
+    did: &str,
+    collection: &str,
+    rkey: Option<&str>,
+    record: serde_json::Value,
+) -> Result<String> {
+    let unknown: Unknown = serde_json::from_value(record)?;
+    create_record(agent, did, collection, rkey, unknown).await
+}
+
 /// Upload raw bytes as a blob (`com.atproto.repo.uploadBlob`) and return the
 /// typed blob reference (`$type: "blob"`, as the atpcraft skin lexicon and the
 /// PDS both expect).
