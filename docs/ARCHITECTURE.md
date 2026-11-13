@@ -503,6 +503,32 @@ any HTTP call, an empty repo reports `None`, and both the `listRecords` and
 `getBlob` requests are asserted unauthenticated. Real-PDS wire check:
 `pds_check` with `ATMOSPHERIC_FETCH_SKIN`.
 
+### M15: the join-gate decision (`gate`)
+
+`/atmospheric gate <list> <did|handle>` sends `Command::CheckGate` —
+atpcraft's `BlueskyJoinGate` membership decision as a client-side read
+(enforcement itself stays server-side). `lists::check_gate` resolves the
+list reference (a bsky.app URL's handle owner via the directory service —
+`resolve_list_reference`, which the M11 `fetch_list` now shares) and the
+subject (the M12 subject parser/resolver; record URIs are rejected), pages
+`app.bsky.graph.getList` unauthenticated on the configured AppView, and
+compares DIDs into a `GateOutcome { list, subject, allowed }`. Fail-closed
+like atpcraft: any resolution or list error propagates, and the worker emits
+`Event::Failed` with the reason — the deny-with-reason, never a silent
+allow. Works logged out.
+
+The worker emits `Event::GateDecision { list, subject, allowed }`; the game
+side mirrors it and the HUD shows "atmospheric: gate <list> — <did>
+ALLOWED|DENIED". Wire semantics from the lexicons only — no code copied from
+atpcraft (its repo carries no licence).
+
+Verified: `lists` unit tests (both-sides resolution through a stub handle
+service + AppView, member/non-member, record-URI and bad-reference errors)
+and worker tests against the stub PDS (allowed via a DID member, denied via
+a handle subject, the URL owner resolved, getList asserted unauthenticated,
+both failure paths). Real-AppView wire check: `pds_check` with
+`ATMOSPHERIC_GATE` / `ATMOSPHERIC_GATE_SUBJECT`.
+
 ### Manual check against a real PDS
 
 `crates/atmospheric/examples/pds_check.rs` spawns the worker exactly as the
@@ -528,6 +554,8 @@ ATMOSPHERIC_LABELER_SUBJECT="did:plc:…" \          # optional, M12 (default: o
 ATMOSPHERIC_FETCH_PLAYER="did:plc:… | handle" \     # optional, M13 (presence read)
 ATMOSPHERIC_TRUSTED_SERVER_KEYS="keyId=publicKeyB64,…" \ # optional, M13
 ATMOSPHERIC_FETCH_SKIN="did:plc:… | handle" \       # optional, M14 (skin read)
+ATMOSPHERIC_GATE="at://…/app.bsky.graph.list/<rkey> | URL" \ # optional, M15
+ATMOSPHERIC_GATE_SUBJECT="did:plc:… | handle" \     # optional, M15 (default: own DID)
 cargo run -p atmospheric --example pds_check
 ```
 
