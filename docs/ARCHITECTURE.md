@@ -771,6 +771,39 @@ live reconnect against a loopback WebSocket that asserts a fresh
 request. Runtime tests pin the new command's wire shape and forwarding. No
 live Colibri AppView was contacted.
 
+### M32: local Colibri player membership
+
+atpcraft writes `social.colibri.membership` in each authorized player's own
+repo so the AppView can index that player's messages. The server account's
+record is what lets the bridge receive community events; the player's record
+is a separate membership in the player's repo. M27 handled only the first, so
+M32 adds the local player's own record without needing the server-wide
+player-to-ATProto map.
+
+`check_colibri_player_membership` runs after the bridge is armed and after a
+player login while it is active. It refreshes the player token if needed, calls
+the existing `colibri::ensure_membership` with the player's agent and DID, and
+marks the guard only after the list/create succeeds. A failed list or write
+stays silent and leaves the guard unset, so a later login or token rotation can
+retry; the bridge itself never fails because of the player-side write. Existing
+records are reused and no duplicate is created.
+
+When `ensure_membership` returns created, the worker reads the community's
+`requiresApprovalToJoin` through the same unauthenticated
+`colibri::requires_approval` path as M29. A true value emits
+`Event::ColibriMembershipPending { message }`; the runtime adds atpcraft's
+`[Colibri] Your join is pending. A moderator must approve it.` line to native
+chat and the HUD. An existing membership, a false/missing flag, or a failed
+read emits nothing. The guard resets on explicit bridge stop and on player
+logout/login, but not on the 45-minute token rotation or a manual reconnect.
+
+Verified: a worker test starts with an active bridge, logs the player in against
+the stub PDS, seeds an approval-gated community, and asserts one membership
+`createRecord`, the pending event, and no duplicate on a forced second check.
+Runtime tests pin the event wire shape, HUD text, and native-chat line. The
+injected game hooks themselves are not compiled by `cargo test`; no live
+Colibri AppView was contacted.
+
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
 `/atmospheric skin-of <did|handle>` sends `Command::FetchPlayerSkin` — the
