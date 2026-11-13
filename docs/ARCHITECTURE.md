@@ -738,6 +738,39 @@ channel, and calls the check with no profile (asserting the
 `self` record and asserts silence. Runtime tests pin the event wire shape, HUD
 line, and both chat lines. No live Colibri AppView was contacted.
 
+### M31: Colibri reconnect and send throttle
+
+atpcraft exposes an operator `/atpcraft colibri reconnect` and caps each
+player's Colibri writes at 20 per rolling minute. Both are client-observable
+for the local player, so M31 ports them without the server-wide identity map.
+
+`Command::ColibriReconnect` requires an active bridge and a logged-in server
+account. It re-reads the appview URL and audience from `config.json`, refreshes
+the server account's OAuth token if needed, and mints a fresh service-auth
+token with `com.atproto.server.getServiceAuth`. `spawn_colibri_stream` aborts
+the old socket task and installs a new one. Unlike `start_colibri`, reconnect
+does not list or create membership, does not re-check the local actor profile,
+and preserves `colibri_sent`, `colibri_started_at`, the presence timestamps
+and `colibri_profile_checked`; a fallback already in flight therefore remains
+valid. `/atmospheric colibri reconnect` follows atpcraft's rule that the bridge
+must be on; the runtime shows the worker's failure when it is not.
+
+The send limit is a `VecDeque<Instant>` of accepted player writes. Each call
+first drops timestamps at least 60 seconds old, then refuses the write when
+20 remain, matching atpcraft's inclusive 60-second boundary. The queue is tied
+to the local DID and cleared when the account changes. The check runs before
+token refresh or the PDS write, so a throttled message costs no network call.
+Server notices call `send_colibri_notice` directly and are exempt; automatic
+chat-hook messages stay silent at the limit, while the explicit
+`/atmospheric colibri send` reports it.
+
+Verified: unit tests cover the 20th/21st boundary, the exact 60-second expiry,
+and the explicit failure; worker tests cover reconnect without a bridge and a
+live reconnect against a loopback WebSocket that asserts a fresh
+`getServiceAuth` token, the subprotocol value, `Connected`, and no membership
+request. Runtime tests pin the new command's wire shape and forwarding. No
+live Colibri AppView was contacted.
+
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
 `/atmospheric skin-of <did|handle>` sends `Command::FetchPlayerSkin` — the
