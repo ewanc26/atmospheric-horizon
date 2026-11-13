@@ -24,6 +24,7 @@
 //! ATMOSPHERIC_FETCH_SKIN="did:plc:… | handle" \                 # optional, M14
 //! ATMOSPHERIC_GATE="at://…/app.bsky.graph.list/<rkey> | URL" \  # optional, M15
 //! ATMOSPHERIC_GATE_SUBJECT="did:plc:… | handle" \               # optional, M15 (default: own DID)
+//! ATMOSPHERIC_FETCH_CHAT="did:plc:… | handle" \                 # optional, M16
 //! cargo run -p atmospheric --example pds_check
 //! ```
 //!
@@ -488,6 +489,40 @@ fn main() {
                         }
                         Event::Failed { message } => {
                             eprintln!("gate check failed (deny-with-reason): {message}");
+                            exit(1);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(error) => {
+                    eprintln!("no event from the worker: {error}");
+                    exit(1);
+                }
+            }
+        }
+    }
+
+    // Optionally read a player's chat history (M16, read side of the M5 chat
+    // mirror): unauthenticated listRecords on their own PDS, ordered by
+    // sentAt. Chat records are unsigned by design — no verdict.
+    if let Some(subject) = env::var("ATMOSPHERIC_FETCH_CHAT")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        command_tx
+            .send(Command::FetchChat { subject })
+            .expect("send FetchChat");
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(event) => {
+                    println!("event: {event:?}");
+                    match event {
+                        Event::ChatHistory { total, items, .. } => {
+                            println!("chat history: {total} record(s), newest: {items:?}");
+                            break;
+                        }
+                        Event::Failed { message } => {
+                            eprintln!("chat fetch failed: {message}");
                             exit(1);
                         }
                         _ => {}

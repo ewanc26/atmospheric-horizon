@@ -99,6 +99,11 @@ pub enum GameCommand {
     /// list `list` (an AT-URI or bsky.app list URL)? Fail-closed — errors
     /// come back as `ModEvent::Failed` (the deny-with-reason).
     CheckGate { list: String, subject: String },
+    /// Read a player's `at.atpcraft.player.chat` records (their mirrored
+    /// in-game chat history) from their own PDS (M16, read side of the M5
+    /// chat mirror). Unsigned records by design — no endorsement to verify.
+    /// Works logged out.
+    FetchChat { subject: String },
     /// Read the labels on a subject (M12, labeler read side): an AT-URI, a
     /// DID, a handle, or a bsky.app profile/post/list URL.
     FetchLabels { subject: String },
@@ -124,6 +129,18 @@ pub enum GameCommand {
     Logout,
     /// Stop the worker thread.
     Shutdown,
+}
+
+/// One chat record, reduced to what the HUD shows (M16). Plain data: the
+/// worker side has the same struct in the `atmospheric` crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatDigest {
+    pub rkey: String,
+    pub at_uri: String,
+    pub sent_at: String,
+    pub server: String,
+    /// The message, truncated for the HUD line.
+    pub message: String,
 }
 
 /// The player-state summary a snapshot record carries. Plain data; the
@@ -286,6 +303,15 @@ pub enum ModEvent {
         subject: String,
         allowed: bool,
     },
+    /// A player's chat history (M16): the DID (`subject`), the PDS it was
+    /// read from (`via`), the total parseable record count, and the newest
+    /// few messages (oldest first). Unsigned records by design.
+    ChatHistory {
+        subject: String,
+        via: String,
+        total: usize,
+        items: Vec<ChatDigest>,
+    },
     /// The labels found on a subject (M12, labeler read side): the subject
     /// (AT-URI or DID), where the labels came from (`via`: the AppView URL or
     /// the labeler's endpoint), and the labels themselves.
@@ -351,6 +377,22 @@ pub fn status_text(event: &ModEvent) -> String {
             "atmospheric: gate {list} — {subject} {}",
             if *allowed { "ALLOWED" } else { "DENIED" }
         ),
+        ModEvent::ChatHistory {
+            subject,
+            total,
+            items,
+            ..
+        } => {
+            if *total == 0 {
+                format!("atmospheric: no chat records for {subject}")
+            } else {
+                let latest = items
+                    .last()
+                    .map(|i| format!(" — latest from {}: \"{}\"", i.server, i.message))
+                    .unwrap_or_default();
+                format!("atmospheric: {total} chat record(s) for {subject} (unsigned){latest}")
+            }
+        }
         ModEvent::Labels {
             subject,
             via,
@@ -653,6 +695,14 @@ pub fn check_gate(list: &str, subject: &str) {
     });
 }
 
+/// Ask the worker to read a player's chat history (M16). `subject` is a DID
+/// or a handle.
+pub fn fetch_chat(subject: &str) {
+    send(GameCommand::FetchChat {
+        subject: subject.into(),
+    });
+}
+
 /// Ask the worker to read the labels on a subject via its AppView view (M12).
 pub fn fetch_labels(subject: &str) {
     send(GameCommand::FetchLabels {
@@ -739,6 +789,7 @@ mod tests {
             "at://did:plc:example/app.bsky.graph.list/3abc",
             "did:plc:example",
         );
+        fetch_chat("someone.example");
         logout();
         assert!(!post_screenshot("no screenshot yet"));
         remember_screenshot("/tmp/shots/2026-11-12_07.00.00.png");
@@ -820,6 +871,10 @@ mod tests {
                 assert_eq!(subject, "did:plc:example");
             }
             other => panic!("expected CheckGate, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::FetchChat { subject }) => assert_eq!(subject, "someone.example"),
+            other => panic!("expected FetchChat, got {:?}", other),
         }
         assert!(matches!(
             command_rx.recv_timeout(std::time::Duration::from_secs(5)),
@@ -952,6 +1007,30 @@ mod tests {
                 allowed: false,
             }),
             "atmospheric: gate at://did:plc:x/app.bsky.graph.list/3abc — did:plc:z DENIED"
+        );
+        assert_eq!(
+            status_text(&ModEvent::ChatHistory {
+                subject: "did:plc:x".into(),
+                via: "https://pds.example".into(),
+                total: 12,
+                items: vec![ChatDigest {
+                    rkey: "3jub4stub0002".into(),
+                    at_uri: "at://did:plc:x/at.atpcraft.player.chat/3jub4stub0002".into(),
+                    sent_at: "2026-11-12T12:00:00.000Z".into(),
+                    server: "srv".into(),
+                    message: "hello there".into(),
+                }],
+            }),
+            "atmospheric: 12 chat record(s) for did:plc:x (unsigned) — latest from srv: \"hello there\""
+        );
+        assert_eq!(
+            status_text(&ModEvent::ChatHistory {
+                subject: "did:plc:empty".into(),
+                via: "https://pds.example".into(),
+                total: 0,
+                items: vec![],
+            }),
+            "atmospheric: no chat records for did:plc:empty"
         );
         assert_eq!(
             status_text(&ModEvent::Labels {
