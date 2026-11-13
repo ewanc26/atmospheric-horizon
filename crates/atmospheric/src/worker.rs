@@ -7,7 +7,7 @@
 //! the crate testable without a game.
 
 use crate::{
-    Command, Config, Event, actions,
+    Command, Config, Event, actions, chats,
     error::AtmosphericError,
     notifications::{self, SeenCursor},
     oauth::{self, DpopState, SharedDpop},
@@ -398,6 +398,19 @@ impl Worker {
                         list: outcome.list,
                         subject: outcome.subject,
                         allowed: outcome.allowed,
+                    }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::FetchChat { subject } => {
+                // A public read against the subject's own PDS: works logged
+                // out, no token refresh.
+                match self.fetch_chat(&subject).await {
+                    Ok((subject, via, total, items)) => self.emit(Event::ChatHistory {
+                        subject,
+                        via,
+                        total,
+                        items,
                     }),
                     Err(error) => self.fail(error.to_string()),
                 }
@@ -915,6 +928,21 @@ impl Worker {
             .map(|(rkey, value)| presence::digest(&did, &rkey, &value, &keys))
             .transpose()?;
         Ok((did, pds, snapshot))
+    }
+
+    /// Read a player's `at.atpcraft.player.chat` records from their own PDS
+    /// (M16, the read side of the M5 chat mirror): unauthenticated
+    /// listRecords, ordered by `sentAt`, reduced to the total plus the newest
+    /// few. Chat records are unsigned by design — no endorsement to verify.
+    async fn fetch_chat(
+        &self,
+        subject: &str,
+    ) -> crate::error::Result<(String, String, usize, Vec<chats::ChatDigest>)> {
+        let (did, pds) = presence::resolve_player(&self.http, &self.resolver, subject).await?;
+        let records =
+            presence::list_records(&self.http, &pds, &did, records::CHAT_COLLECTION).await?;
+        let (total, items) = chats::history(&did, &records, chats::HISTORY_LIMIT);
+        Ok((did, pds, total, items))
     }
 
     /// Read a player's latest `at.atpcraft.player.skin` record from their own
@@ -3006,6 +3034,127 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn fetch_chat_reads_the_chat_history_unauthenticated() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("fetch-chat");
+        write_config(&dir, &test_config(pds.url.clone()));
+        // A chat record seeded directly, as if a previous session posted it.
+        pds.seed_record(
+            records::CHAT_COLLECTION,
+            "3jub4stub0001",
+            serde_json::json!({
+                "$type": records::CHAT_COLLECTION,
+                "sentAt": "2026-11-12T10:00:00.000Z",
+                "message": "seeded earlier",
+                "server": "test-server",
+            }),
+        );
+        let (command_tx, event_rx, handle) =
+            spawn_worker_with_resolver(dir.clone(), stub_resolver(&pds.url));
+
+        // Logged out: the read is unauthenticated and finds the seeded record.
+        command_tx
+            .send(Command::FetchChat {
+                subject: "did:plc:stubuser".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::ChatHistory { .. })) {
+            Event::ChatHistory {
+                subject,
+                via,
+                total,
+                items,
+            } => {
+                assert_eq!(subject, "did:plc:stubuser");
+                assert_eq!(via, pds.url);
+                assert_eq!(total, 1);
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].message, "seeded earlier");
+                assert_eq!(items[0].server, "test-server");
+                assert_eq!(
+                    items[0].at_uri,
+                    "at://did:plc:stubuser/at.atpcraft.player.chat/3jub4stub0001"
+                );
+            }
+            other => panic!("expected ChatHistory, got {other:?}"),
+        }
+        assert!(
+            pds.requests()
+                .iter()
+                .filter(|r| r.path.starts_with("/xrpc/com.atproto.repo.listRecords"))
+                .all(|r| !r.authorized),
+            "the chat read is unauthenticated"
+        );
+
+        // Log in and post two chat records, then read the history back.
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        for message in ["hello", "world"] {
+            command_tx
+                .send(Command::PostChat {
+                    message: message.into(),
+                    automatic: false,
+                })
+                .unwrap();
+            let _ = wait_for(&event_rx, |e| matches!(e, Event::Posted { .. }));
+        }
+        command_tx
+            .send(Command::FetchChat {
+                subject: "stub.test".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::ChatHistory { .. })) {
+            Event::ChatHistory { total, items, .. } => {
+                assert_eq!(total, 3);
+                assert_eq!(items.len(), 3, "under the HUD limit all are shown");
+                assert_eq!(items[0].message, "seeded earlier");
+                assert_eq!(items[1].message, "hello");
+                assert_eq!(items[2].message, "world", "ordered by sentAt");
+                // TID rkeys order the same way as sentAt.
+                assert!(items[0].rkey < items[1].rkey && items[1].rkey < items[2].rkey);
+            }
+            other => panic!("expected ChatHistory, got {other:?}"),
+        }
+
+        // A repo with no chat records reports zero; a record URI fails before
+        // any network call.
+        command_tx
+            .send(Command::FetchChat {
+                subject: "did:plc:empty".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::ChatHistory { .. })) {
+            Event::ChatHistory { total, items, .. } => {
+                assert_eq!(total, 0);
+                assert!(items.is_empty());
+            }
+            other => panic!("expected ChatHistory, got {other:?}"),
+        }
+        let before = pds.requests().len();
+        command_tx
+            .send(Command::FetchChat {
+                subject: "at://did:plc:stubuser/app.bsky.feed.post/3abc".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("want a player account"), "{message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            pds.requests().len(),
+            before,
+            "no HTTP call for a record URI"
+        );
 
         command_tx.send(Command::Shutdown).unwrap();
         handle.join().unwrap();
