@@ -307,6 +307,9 @@ pub enum Event {
     },
     /// One Colibri message for the game chat (M26).
     ColibriMessage { handle: String, text: String },
+    /// The local player has no `social.colibri.actor.profile` record (M30);
+    /// the runtime shows atpcraft's setup prompt with this URL in chat.
+    ColibriProfileMissing { url: String },
 }
 
 #[cfg(test)]
@@ -486,6 +489,13 @@ mod tests {
             r#"{"Status":"pending approval"}"#
         );
         assert_eq!(
+            serde_json::to_string(&Event::ColibriProfileMissing {
+                url: "https://colibri.social".into()
+            })
+            .unwrap(),
+            r#"{"ColibriProfileMissing":{"url":"https://colibri.social"}}"#
+        );
+        assert_eq!(
             serde_json::to_string(&Event::Session(session::SessionState::LoggedOut)).unwrap(),
             r#"{"Session":"LoggedOut"}"#
         );
@@ -579,6 +589,9 @@ mod tests {
             Event::GraphChanged {
                 action: "follow".into(),
                 subject: "did:plc:a".into(),
+            },
+            Event::ColibriProfileMissing {
+                url: "https://colibri.social".into(),
             },
         ];
         for event in events {

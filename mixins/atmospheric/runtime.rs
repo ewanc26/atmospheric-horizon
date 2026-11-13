@@ -488,6 +488,9 @@ pub enum ModEvent {
     },
     /// One incoming Colibri message (M26).
     ColibriMessage { handle: String, text: String },
+    /// The local player has no Colibri actor profile (M30); `url` is the
+    /// setup page shown in chat.
+    ColibriProfileMissing { url: String },
 }
 
 /// The HUD wording for an endorsement verdict (M13/M14).
@@ -714,6 +717,12 @@ pub fn status_text(event: &ModEvent) -> String {
                 clean_remote(text)
             )
         }
+        ModEvent::ColibriProfileMissing { url } => {
+            format!(
+                "atmospheric: Colibri profile missing — open {}",
+                clean_remote(url)
+            )
+        }
         ModEvent::SocialGraph {
             kind,
             subject,
@@ -840,15 +849,9 @@ pub fn drain_events(max: usize) -> Vec<ModEvent> {
     }
     if let Ok(mut chat) = COLIBRI_CHAT.get_or_init(|| Mutex::new(Vec::new())).lock() {
         for event in &drained {
-            if let ModEvent::ColibriMessage { handle, text } = event {
-                chat.push(format!(
-                    "[Colibri] @{}: {}",
-                    clean_remote(handle),
-                    clean_remote(text)
-                ));
-                while chat.len() > 8 {
-                    chat.remove(0);
-                }
+            chat.extend(colibri_chat_lines(event));
+            while chat.len() > 8 {
+                chat.remove(0);
             }
         }
     }
@@ -886,6 +889,24 @@ pub fn status_lines() -> Vec<String> {
 /// The newest status line (empty when there is none).
 pub fn status_line() -> String {
     status_lines().pop().unwrap_or_default()
+}
+
+/// The native-chat lines one Colibri event contributes. Incoming messages and
+/// the M30 profile prompt share the same queue, so the prompt appears in chat
+/// exactly where atpcraft sends it.
+fn colibri_chat_lines(event: &ModEvent) -> Vec<String> {
+    match event {
+        ModEvent::ColibriMessage { handle, text } => vec![format!(
+            "[Colibri] @{}: {}",
+            clean_remote(handle),
+            clean_remote(text)
+        )],
+        ModEvent::ColibriProfileMissing { url } => vec![
+            "[Colibri] You need a Colibri profile to use the chat bridge.".into(),
+            format!("[Colibri] Open Colibri: {}", clean_remote(url)),
+        ],
+        _ => Vec::new(),
+    }
 }
 
 /// Take the incoming Colibri lines queued for native chat.
@@ -2227,6 +2248,12 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 text: req_str(obj, "text")?,
             })
         }
+        "ColibriProfileMissing" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::ColibriProfileMissing {
+                url: req_str(obj, "url")?,
+            })
+        }
         _ => None,
     }
 }
@@ -2925,6 +2952,21 @@ mod tests {
             }),
             "atmospheric: Colibri connected to at://c"
         );
+        assert_eq!(
+            status_text(&ModEvent::ColibriProfileMissing {
+                url: "https://colibri.social".into(),
+            }),
+            "atmospheric: Colibri profile missing — open https://colibri.social"
+        );
+        assert_eq!(
+            colibri_chat_lines(&ModEvent::ColibriProfileMissing {
+                url: "https://colibri.social".into(),
+            }),
+            vec![
+                "[Colibri] You need a Colibri profile to use the chat bridge.".to_string(),
+                "[Colibri] Open Colibri: https://colibri.social".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -3230,6 +3272,12 @@ mod tests {
             Some(ModEvent::ColibriMessage {
                 handle: "a.test".into(),
                 text: "hi".into(),
+            })
+        );
+        assert_eq!(
+            decode_event(r#"{"ColibriProfileMissing":{"url":"https://colibri.social"}}"#),
+            Some(ModEvent::ColibriProfileMissing {
+                url: "https://colibri.social".into(),
             })
         );
         assert_eq!(
