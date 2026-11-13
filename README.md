@@ -19,9 +19,9 @@ This is the successor to [jollywhoppers-socialsync](https://github.com/ewanc26/j
 
 Shipped in v0.2.0: OAuth and app-password login, text and screenshot posts, notifications, atpcraft-compatible chat, signed snapshots and skins, a server profile, read sides for lists, labels, presence, skins, chat history and server profiles, social-graph reads, and reply/like/repost.
 
-On `main` for the next release: social-graph writes — follow/unfollow, block/unblock and mute/unmute (`M23`) — and Bluesky profile reads with atpcraft's pronoun precedence (`M24`).
+On `main` for the next release: social-graph writes — follow/unfollow, block/unblock and mute/unmute (`M23`) — Bluesky profile reads with atpcraft's pronoun precedence (`M24`), and a separate, persisted server account with its own OAuth session and server-profile publishing (`M25`).
 
-Not yet: launcher registry distribution, which waits on third-party native-mod support upstream ([#28](https://github.com/ewanc26/atmospheric-horizon/issues/28)); label issuance and join-gate enforcement, which stay server-side; and atpcraft's newer server-side surfaces — Colibri bridging, RPG item discovery, full player-data aspect capture/restore and the server account.
+Not yet: launcher registry distribution, which waits on third-party native-mod support upstream ([#28](https://github.com/ewanc26/atmospheric-horizon/issues/28)); label issuance, join-gate enforcement, Colibri bridging, RPG item discovery and full player-data aspect capture/restore. The server account those surfaces need is now in place.
 
 ## Features
 
@@ -32,6 +32,7 @@ Not yet: launcher registry distribution, which waits on third-party native-mod s
 - **Read the public side.** List membership (with a fail-closed gate decision), labels and labeler queries, player presence, skins, chat history, server profiles, profiles with display names and pronouns, and follows/followers/blocks/mutes.
 - **Shape your social graph.** Follow, unfollow, block, unblock, mute or unmute an account from its DID or handle.
 - **Sign in properly.** OAuth in the system browser (PAR + PKCE + DPoP, loopback redirect), with app passwords as the fallback.
+- **Run a server account.** `/atmospheric server-account login <handle>` gives the server its own persisted OAuth identity, separate from the player, and can publish the server descriptor from that account.
 - **Never block the game.** All network and disk I/O lives on one worker thread; the game thread only exchanges JSON lines with it.
 - **No surprises.** Writes go to your own PDS, public reads go to the configured AppView or the subject's PDS, and nothing is sent anywhere else.
 
@@ -91,7 +92,8 @@ All commands are under `/atmospheric`:
 | `chat <text>` | Publish one `at.atpcraft.player.chat` record |
 | `snapshot` | Publish a signed player-state snapshot |
 | `skin [path] [default\|slim]` | Publish a skin/cape record and its blobs |
-| `server` | Publish or refresh the server profile |
+| `server` | Publish or refresh the server profile from the player account |
+| `server-account login <handle>\|status\|logout\|publish` | Manage the separate server account and publish the server profile from it |
 | `server-of <did\|handle>` | Read and verify a server profile |
 | `profile <did\|handle>` | Read a Bluesky profile and its pronouns |
 | `list <at-uri\|bsky.app URL>` | List the members of a Bluesky list |
@@ -136,7 +138,7 @@ The app password is the only secret in `config.json`; OAuth sessions never store
 
 ## Roadmap
 
-M1–M21 are shipped, through v0.1.0 and v0.2.0, and M23 (social-graph writes) and M24 (profile reads) are on `main` for the next release; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, the server-side halves a client mod cannot host, and the next read/write surfaces.
+M1–M21 are shipped, through v0.1.0 and v0.2.0, and M23 (social-graph writes), M24 (profile reads) and M25 (server account) are on `main` for the next release; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, the server-side surfaces that build on the server account, and the next read/write surfaces.
 
 ### Porting atpcraft
 
@@ -153,11 +155,12 @@ atpcraft is a server-side Fabric mod, while Horizon native mods can hook the ser
 | Labeler publishing player activity | **M12** (read side only): labels on a subject via the AppView's `labels` fields (`/atmospheric labels <subject>`), and `com.atproto.label.queryLabels` at a labeler's `#atproto_labeler` DID-document endpoint (`/atmospheric labeler <did> [subject]`). Label *issuance* stays server-side — a client mod cannot host the HTTP endpoint |
 | Server profile record (`at.atpcraft.server.profile`) | **M10**: published at rkey `self` via `putRecord` with `/atmospheric server` (identity fields from `config.json`, `signingKey` block = the mod's Ed25519 key, `createdAt` preserved across re-publishes). **M19** (read side): `/atmospheric server-of <did\|handle>` lists the collection and reports the server name, MC version, capabilities, and whether its published signing key is trusted, unknown or mismatched |
 | Join gate reading a public Bluesky list | **M11** (read side): `/atmospheric list <at-uri \| bsky.app URL>` fetches member DIDs via paginated `app.bsky.graph.getList`. **M15** (the decision): `/atmospheric gate <list> <did\|handle>` reports whether the DID is on the list, fail-closed (enforcement itself stays server-side) |
-| Colibri chat bridge | not planned for the client mod: the bridge joins a channel and relays every server chat line, which needs the server thread and the server account's service-auth token |
-| RPG item discovery (`equipment.rpg.*`) | not planned for the client mod: discovery scans the server-side inventory and writes provider attestations from the server account |
-| Full player-data aspect sync | **M13** reads and verifies snapshots, including their aspect list, but does not capture or restore inventory/advancements/stats. Capture and restore are server-side; the aspect payloads are opaque NBT/JSON blobs |
-| Server account and labeler issuance | server-side: registering the PDS account, publishing the labeler service record, serving label routes and enforcing the join gate all need a long-running HTTP server |
-| Web server for login pages / lexicons | not planned for the client mod; OAuth sign-in is the alternative |
+| Colibri chat bridge | not implemented yet: the bridge joins a channel and relays chat, which needs the server thread, service-auth tokens and a WebSocket stream. **M25** now supplies the server account those tokens belong to |
+| RPG item discovery (`equipment.rpg.*`) | not implemented yet: discovery scans the server-side inventory and writes provider attestations from the server account, which **M25** now supplies |
+| Full player-data aspect sync | **M13** reads and verifies snapshots, including their aspect list, but does not capture or restore inventory/advancements/stats. Capture and restore are server-side and remain to be implemented; the aspect payloads are opaque NBT/JSON blobs |
+| Server account | **M25**: `/atmospheric server-account login <handle>` runs a separate localhost OAuth flow and keeps the result in `server-session.json`; `status`, `logout` and `publish` manage it. The server profile can then be published as that account (`/atmospheric server-account publish`), as atpcraft's server does. It is the identity foundation for the remaining server-side work |
+| Labeler issuance | **M12** covers reads only; issuance still needs the labeler service record, signed labels, an HTTP endpoint and a PLC identity update, so it is not implemented yet |
+| Web server for login pages / lexicons | not implemented yet; OAuth sign-in remains the alternative for players |
 
 ## Network use
 
@@ -168,6 +171,7 @@ This mod talks to the network **by design**: the AT Protocol services needed to 
 - Handle resolution uses `com.atproto.identity.resolveHandle` on `https://bsky.social`, and DID documents come from `https://plc.directory` (did:plc) or the domain's `/.well-known/did.json` (did:web). The DID document supplies the PDS's `#atproto_pds` service endpoint and a labeler's `#atproto_labeler` endpoint.
 - OAuth (M8) discovers the PDS's `/.well-known/oauth-protected-resource` and the authorization server's `/.well-known/oauth-authorization-server`, then sends a pushed authorization request (`POST <authorization server>/oauth/par`) with PKCE and a DPoP key thumbprint. The authorize page opens in your system browser (the URL is always shown first; if no browser can launch, the worker tells you to open it manually), and the redirect is received on `http://127.0.0.1:<port>/` (loopback only). The code is exchanged at the authorization server's token endpoint (`POST <authorization server>/oauth/token`), which is also used for refreshes.
 - Every request to the authorization server, and every PDS request while OAuth-logged-in, carries `Authorization: DPoP <access token>` plus a `DPoP` proof JWT (ES256, signed by a per-install P-256 key). The client registers as the loopback client `http://localhost?scope=atproto%20transition%3Ageneric`; if your PDS's authorization server does not support that, set `oauth_client_id` to a hosted copy of `oauth-client-metadata.json`. This repo serves one at `https://ewanc26.github.io/atmospheric-horizon/oauth-client-metadata.json` ([#21](https://github.com/ewanc26/atmospheric-horizon/issues/21)).
+- `/atmospheric server-account login <handle>` runs the same OAuth flow for a second account and persists it separately; `/atmospheric server-account publish` writes the server profile as that account.
 - App-password login uses `com.atproto.server.createSession`, checks the session with `com.atproto.server.getSession`, and resumes restarts with `com.atproto.server.refreshSession` (or the OAuth token endpoint's `refresh_token` grant). `/atmospheric logout` drops the session.
 
 ### Public reads
@@ -192,7 +196,7 @@ All of these are unauthenticated, and the query carries only the subject's DID o
 - Chat lines use `com.atproto.repo.createRecord` in the `at.atpcraft.player.chat` collection, TID-keyed — only when `post_chat_messages` is enabled, or one at a time via `/atmospheric chat <text>`.
 - Snapshots use `com.atproto.repo.createRecord` in `at.atpcraft.player.snapshot`, carrying your position/dimension and an Ed25519 endorsement signature.
 - Skins use `com.atproto.repo.uploadBlob` for each PNG, `com.atproto.repo.getRecord` to keep other servers' endorsements, then `com.atproto.repo.putRecord` in `at.atpcraft.player.skin` at the endorsing key id.
-- The server profile uses `com.atproto.repo.getRecord` to preserve `createdAt`, then `com.atproto.repo.putRecord` in `at.atpcraft.server.profile` at rkey `self`.
+- The server profile uses `com.atproto.repo.getRecord` to preserve `createdAt`, then `com.atproto.repo.putRecord` in `at.atpcraft.server.profile` at rkey `self`. `/atmospheric server` writes it as the player account; `/atmospheric server-account publish` writes it as the separate server account (M25).
 - Interactions use `com.atproto.repo.createRecord`: `app.bsky.feed.like` or `app.bsky.feed.repost` with a `subject` strong ref `{uri, cid}`, or an `app.bsky.feed.post` with `text`, `createdAt` and `reply: {root, parent}` strong refs.
 - Social-graph writes (M23) resolve the subject to a DID, then:
   - `/atmospheric follow` and `/atmospheric block` write `app.bsky.graph.follow` / `app.bsky.graph.block` with `subject` and `createdAt`, keyed by a fresh TID.
@@ -205,7 +209,8 @@ Everything lives in the worker's own data folder — never in a world save. In s
 
 - `config.json` holds the settings above, including the PDS URL, identifier, app password, poll interval, post flags, chat server id, skin/cape paths and model, server-profile fields, game version, AppView URL and trusted endorsement keys.
 - `signing-key.json` holds the Ed25519 seed for snapshot and skin endorsements, generated once.
-- `session.json` holds the refresh token used to resume across restarts. For OAuth sessions it also holds the DPoP private key (JWK) and token endpoint; app passwords are never stored in it. Delete it or use `/atmospheric logout` to revoke a session.
+- `session.json` holds the player's refresh token used to resume across restarts. For OAuth sessions it also holds the DPoP private key (JWK) and token endpoint; app passwords are never stored in it. Delete it or use `/atmospheric logout` to revoke a session.
+- `server-session.json` holds the same OAuth material for the separate server account (M25), written owner-only. It is independent of the player session and is deleted by `/atmospheric server-account logout`.
 - `cursor.json` (the notification seen-cursor, so restarts do not re-show old notifications) and `snapshot-state.json` (the snapshot version counter, so records never roll back) are not secret.
 - `skins/` holds skin/cape PNGs downloaded by `/atmospheric skin-of`, content-addressed by blob CID. They are written only for records whose endorsement verified.
 
