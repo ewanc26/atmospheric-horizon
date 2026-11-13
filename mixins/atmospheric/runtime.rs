@@ -109,6 +109,11 @@ pub enum GameCommand {
     /// own PDS and verify its endorsement (M13, atpcraft presence read side):
     /// the subject is a DID or a handle. Works logged out.
     FetchPlayer { subject: String },
+    /// Read a player's latest `at.atpcraft.player.skin` record from their own
+    /// PDS, verify its endorsement, and — only when verified — download the
+    /// skin/cape blobs into the mod's storage folder (M14, atpcraft skin-sync
+    /// read side). Works logged out.
+    FetchPlayerSkin { subject: String },
     /// Post the player's death message (only when `post_death_messages` is on).
     PostDeathMessage { text: String },
     /// Log out: drop the session and delete the persisted refresh token.
@@ -189,10 +194,10 @@ pub struct LabelDigest {
     pub exp: Option<String>,
 }
 
-/// The verdict of verifying a snapshot record's endorsements (M13). Plain
-/// data: the worker side has the same enum in the `atmospheric` crate.
+/// The verdict of verifying a record's endorsements (M13/M14). Plain data:
+/// the worker side has the same enum in the `atmospheric` crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SnapshotVerdict {
+pub enum EndorsementVerdict {
     /// At least one endorsement from a known key verified.
     Verified { endorser: String },
     /// No endorsement came from a known key.
@@ -222,7 +227,34 @@ pub struct PlayerDigest {
     pub food: i64,
     pub xp_level: i64,
     pub game_mode: String,
-    pub verdict: SnapshotVerdict,
+    pub verdict: EndorsementVerdict,
+}
+
+/// One referenced or downloaded skin/cape blob, reduced to what the HUD
+/// shows (M14). Plain data: the worker side has the same struct in the
+/// `atmospheric` crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobDigest {
+    pub cid: String,
+    pub mime_type: String,
+    pub size: u64,
+    /// Where the worker saved the bytes; `None` until downloaded (the worker
+    /// only downloads verified records).
+    pub path: Option<String>,
+}
+
+/// A player's latest skin record, reduced to what the HUD shows (M14). Plain
+/// data: the worker side has the same struct in the `atmospheric` crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkinDigest {
+    pub did: String,
+    pub rkey: String,
+    pub at_uri: String,
+    pub model: String,
+    pub timestamp: String,
+    pub verdict: EndorsementVerdict,
+    pub skin: Option<BlobDigest>,
+    pub cape: Option<BlobDigest>,
 }
 
 /// Events the worker thread reports back to the game side.
@@ -260,6 +292,26 @@ pub enum ModEvent {
         // Boxed: PlayerDigest is the enum's largest variant.
         snapshot: Box<Option<PlayerDigest>>,
     },
+    /// The latest skin record of a player (M14, skin-sync read side): the DID
+    /// (`subject`), the PDS it was read from (`via`), and the digest with its
+    /// endorsement verdict and any downloaded blobs (`None` when the repo has
+    /// no skin records).
+    PlayerSkin {
+        subject: String,
+        via: String,
+        // Boxed: SkinDigest is one of the event enum's largest variants.
+        skin: Box<Option<SkinDigest>>,
+    },
+}
+
+/// The HUD wording for an endorsement verdict (M13/M14).
+fn verdict_text(verdict: &EndorsementVerdict) -> String {
+    match verdict {
+        EndorsementVerdict::Verified { endorser } => format!("verified by {endorser}"),
+        EndorsementVerdict::UnknownEndorser => "unknown endorser".into(),
+        EndorsementVerdict::BadSignature => "BAD SIGNATURE".into(),
+        EndorsementVerdict::Malformed => "malformed record".into(),
+    }
 }
 
 /// The HUD line one event leaves behind.
@@ -316,15 +368,32 @@ pub fn status_text(event: &ModEvent) -> String {
         } => match &**snapshot {
             None => format!("atmospheric: no snapshot records for {subject}"),
             Some(d) => {
-                let verdict = match &d.verdict {
-                    SnapshotVerdict::Verified { endorser } => format!("verified by {endorser}"),
-                    SnapshotVerdict::UnknownEndorser => "unknown endorser".into(),
-                    SnapshotVerdict::BadSignature => "BAD SIGNATURE".into(),
-                    SnapshotVerdict::Malformed => "malformed record".into(),
-                };
+                let verdict = verdict_text(&d.verdict);
                 format!(
                     "atmospheric: {} v{} in {} at {}, {}, {} — {verdict}",
                     d.username, d.version, d.dimension, d.x, d.y, d.z
+                )
+            }
+        },
+        ModEvent::PlayerSkin { subject, skin, .. } => match &**skin {
+            None => format!("atmospheric: no skin records for {subject}"),
+            Some(d) => {
+                let verdict = verdict_text(&d.verdict);
+                let blob = |b: &Option<BlobDigest>| match b {
+                    None => "none".to_string(),
+                    Some(b) => {
+                        let short = &b.cid[..b.cid.len().min(12)];
+                        match &b.path {
+                            Some(path) => format!("{short}… saved to {path}"),
+                            None => format!("{short}… {} B, not saved", b.size),
+                        }
+                    }
+                };
+                format!(
+                    "atmospheric: {subject} skin model {} — skin {}, cape {} — {verdict}",
+                    d.model,
+                    blob(&d.skin),
+                    blob(&d.cape)
                 )
             }
         },
@@ -581,6 +650,15 @@ pub fn fetch_player(subject: &str) {
     });
 }
 
+/// Ask the worker to read a player's latest skin record, verify its
+/// endorsement, and download the blobs when verified (M14). `subject` is a
+/// DID or a handle.
+pub fn fetch_player_skin(subject: &str) {
+    send(GameCommand::FetchPlayerSkin {
+        subject: subject.into(),
+    });
+}
+
 /// Ask the worker to post a death message (published only when the settings
 /// enable `post_death_messages`).
 pub fn post_death_message(text: &str) {
@@ -629,6 +707,7 @@ mod tests {
         fetch_labeler_labels("did:plc:labeler", Some("did:plc:example"));
         fetch_labeler_labels("did:plc:labeler", None);
         fetch_player("someone.example");
+        fetch_player_skin("someone.example");
         logout();
         assert!(!post_screenshot("no screenshot yet"));
         remember_screenshot("/tmp/shots/2026-11-12_07.00.00.png");
@@ -699,6 +778,10 @@ mod tests {
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::FetchPlayer { subject }) => assert_eq!(subject, "someone.example"),
             other => panic!("expected FetchPlayer, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::FetchPlayerSkin { subject }) => assert_eq!(subject, "someone.example"),
+            other => panic!("expected FetchPlayerSkin, got {:?}", other),
         }
         assert!(matches!(
             command_rx.recv_timeout(std::time::Duration::from_secs(5)),
@@ -866,7 +949,7 @@ mod tests {
                     food: 20,
                     xp_level: 3,
                     game_mode: "survival".into(),
-                    verdict: SnapshotVerdict::Verified {
+                    verdict: EndorsementVerdict::Verified {
                         endorser: "keyid0000000001".into()
                     },
                 })),
@@ -892,7 +975,7 @@ mod tests {
                     food: 20,
                     xp_level: 0,
                     game_mode: "survival".into(),
-                    verdict: SnapshotVerdict::BadSignature,
+                    verdict: EndorsementVerdict::BadSignature,
                 })),
             }),
             "atmospheric: Mallory v2 in minecraft:the_end at 0, 0, 0 — BAD SIGNATURE"
@@ -904,6 +987,60 @@ mod tests {
                 snapshot: Box::new(None),
             }),
             "atmospheric: no snapshot records for did:plc:empty"
+        );
+        assert_eq!(
+            status_text(&ModEvent::PlayerSkin {
+                subject: "did:plc:x".into(),
+                via: "https://pds.example".into(),
+                skin: Box::new(Some(SkinDigest {
+                    did: "did:plc:x".into(),
+                    rkey: "keyid0000000001".into(),
+                    at_uri: "at://did:plc:x/at.atpcraft.player.skin/keyid0000000001".into(),
+                    model: "slim".into(),
+                    timestamp: "2026-11-12T12:00:00.000Z".into(),
+                    verdict: EndorsementVerdict::Verified {
+                        endorser: "keyid0000000001".into()
+                    },
+                    skin: Some(BlobDigest {
+                        cid: "bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy".into(),
+                        mime_type: "image/png".into(),
+                        size: 42,
+                        path: Some("/data/atmospheric/skins/bafkreigh2.png".into()),
+                    }),
+                    cape: None,
+                })),
+            }),
+            "atmospheric: did:plc:x skin model slim — skin bafkreigh2ak… saved to /data/atmospheric/skins/bafkreigh2.png, cape none — verified by keyid0000000001"
+        );
+        assert_eq!(
+            status_text(&ModEvent::PlayerSkin {
+                subject: "did:plc:empty".into(),
+                via: "https://pds.example".into(),
+                skin: Box::new(None),
+            }),
+            "atmospheric: no skin records for did:plc:empty"
+        );
+        assert_eq!(
+            status_text(&ModEvent::PlayerSkin {
+                subject: "did:plc:y".into(),
+                via: "https://pds.example".into(),
+                skin: Box::new(Some(SkinDigest {
+                    did: "did:plc:y".into(),
+                    rkey: "k".into(),
+                    at_uri: "at://did:plc:y/at.atpcraft.player.skin/k".into(),
+                    model: "default".into(),
+                    timestamp: String::new(),
+                    verdict: EndorsementVerdict::BadSignature,
+                    skin: Some(BlobDigest {
+                        cid: "bafkreibme22gw2h7y2h7tg2fhqotaqjucnbc24deqo72b6mkl2egezxhvy".into(),
+                        mime_type: "image/png".into(),
+                        size: 7,
+                        path: None,
+                    }),
+                    cape: None,
+                })),
+            }),
+            "atmospheric: did:plc:y skin model default — skin bafkreibme22… 7 B, not saved, cape none — BAD SIGNATURE"
         );
     }
 

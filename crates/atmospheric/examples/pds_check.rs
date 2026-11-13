@@ -21,6 +21,7 @@
 //! ATMOSPHERIC_LABELER_SUBJECT="did:plc:…" \                     # optional, M12
 //! ATMOSPHERIC_FETCH_PLAYER="did:plc:… | handle" \               # optional, M13
 //! ATMOSPHERIC_TRUSTED_SERVER_KEYS="keyId=publicKeyB64,…" \      # optional, M13
+//! ATMOSPHERIC_FETCH_SKIN="did:plc:… | handle" \                 # optional, M14
 //! cargo run -p atmospheric --example pds_check
 //! ```
 //!
@@ -403,6 +404,48 @@ fn main() {
                         }
                         Event::Failed { message } => {
                             eprintln!("player fetch failed: {message}");
+                            exit(1);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(error) => {
+                    eprintln!("no event from the worker: {error}");
+                    exit(1);
+                }
+            }
+        }
+    }
+
+    // Optionally read a player's latest skin record (M14, skin-sync read
+    // side): listed unauthenticated from their own PDS, endorsement-verified,
+    // and (when verified) the blobs are downloaded into <storage>/skins/.
+    if let Some(subject) = env::var("ATMOSPHERIC_FETCH_SKIN")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        command_tx
+            .send(Command::FetchPlayerSkin { subject })
+            .expect("send FetchPlayerSkin");
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(event) => {
+                    println!("event: {event:?}");
+                    match event {
+                        Event::PlayerSkin { skin, .. } => {
+                            match &*skin {
+                                Some(d) => println!(
+                                    "skin record: model {}, verdict {:?}, skin {:?}",
+                                    d.model,
+                                    d.verdict,
+                                    d.skin.as_ref().map(|b| b.path.clone())
+                                ),
+                                None => println!("no skin records"),
+                            }
+                            break;
+                        }
+                        Event::Failed { message } => {
+                            eprintln!("skin fetch failed: {message}");
                             exit(1);
                         }
                         _ => {}
