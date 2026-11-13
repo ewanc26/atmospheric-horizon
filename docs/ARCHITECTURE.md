@@ -49,7 +49,10 @@ Everything else, with zero Horizon imports so it builds and tests with plain
   dimensions are pure helpers here
 - `notifications` — polling with a persisted seen-cursor (dedup across
   restarts, the pattern bsky-bot-sdk uses)
-- `lists` — M11 public list reads (`app.bsky.graph.getList` pagination)
+- `lists` — M11 public list reads (`app.bsky.graph.getList` pagination) and
+  the M15 join-gate decision (`check_gate`)
+- `chats` — M16 chat-history reads (`at.atpcraft.player.chat` listRecords on
+  the subject's own PDS, ordered by `sentAt`)
 - `labels` — M12 labeler read side (AppView view `labels`, labeler
   `#atproto_labeler` endpoint resolution, `com.atproto.label.queryLabels`)
 - `presence` — M13 verified reads of other players' `at.atpcraft.player.snapshot`
@@ -529,6 +532,38 @@ a handle subject, the URL owner resolved, getList asserted unauthenticated,
 both failure paths). Real-AppView wire check: `pds_check` with
 `ATMOSPHERIC_GATE` / `ATMOSPHERIC_GATE_SUBJECT`.
 
+### M16: chat-history reads (`at.atpcraft.player.chat`)
+
+`/atmospheric chat-of <did|handle>` sends `Command::FetchChat` — the read
+side of the M5 chat mirror: atpcraft mirrors each in-game chat line to the
+player's own repo as a TID-keyed `at.atpcraft.player.chat` record, and this
+command reads that history back.
+
+1. resolve the account and its PDS exactly as the M13 presence read, then
+   page `listRecords` for the chat collection unauthenticated against that
+   PDS (`presence::list_records`, shared with M13/M14);
+2. `chats::history` parses each record as `records::ChatRecord`
+   (`sentAt`/`message`/`server`; `$type` ignored), skips malformed ones,
+   orders by `sentAt` (the TID rkeys order the same way), and returns the
+   total count plus the newest `HISTORY_LIMIT` (5) digests, each with the
+   message truncated to 80 chars for the HUD;
+3. chat records are **unsigned by design** — the lexicon has no endorsement
+   fields — so there is no signature to verify; the event and HUD line say
+   so explicitly.
+
+The worker emits `Event::ChatHistory { subject, via, total, items }`; the
+game side mirrors it as plain data and the HUD shows "atmospheric: 12 chat
+record(s) for did:plc:… (unsigned) — latest from srv: \"hello\"". Wire
+shapes come from the lexicons only — no code is copied from atpcraft (its
+repo carries no licence).
+
+Verified: `chats` unit tests (ordering, newest-N selection, garbage
+skipping, message truncation) and worker tests against the stub PDS (a
+seeded record reads back logged out with listRecords asserted
+unauthenticated; two posted chats then appear ordered after it; an empty
+repo reports zero; a record-URI subject fails before any HTTP call).
+Real-PDS wire check: `pds_check` with `ATMOSPHERIC_FETCH_CHAT`.
+
 ### Manual check against a real PDS
 
 `crates/atmospheric/examples/pds_check.rs` spawns the worker exactly as the
@@ -556,6 +591,7 @@ ATMOSPHERIC_TRUSTED_SERVER_KEYS="keyId=publicKeyB64,…" \ # optional, M13
 ATMOSPHERIC_FETCH_SKIN="did:plc:… | handle" \       # optional, M14 (skin read)
 ATMOSPHERIC_GATE="at://…/app.bsky.graph.list/<rkey> | URL" \ # optional, M15
 ATMOSPHERIC_GATE_SUBJECT="did:plc:… | handle" \     # optional, M15 (default: own DID)
+ATMOSPHERIC_FETCH_CHAT="did:plc:… | handle" \       # optional, M16 (chat history)
 cargo run -p atmospheric --example pds_check
 ```
 
