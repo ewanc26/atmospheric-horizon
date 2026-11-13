@@ -420,7 +420,7 @@ impl Worker {
                     Ok((subject, via, snapshot)) => self.emit(Event::PlayerSnapshot {
                         subject,
                         via,
-                        snapshot,
+                        snapshot: Box::new(snapshot),
                     }),
                     Err(error) => self.fail(error.to_string()),
                 }

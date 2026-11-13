@@ -133,6 +133,7 @@ pub enum Event {
     PlayerSnapshot {
         subject: String,
         via: String,
-        snapshot: Option<presence::PlayerDigest>,
+        // Boxed: PlayerDigest is the enum's largest variant.
+        snapshot: Box<Option<presence::PlayerDigest>>,
     },
 }

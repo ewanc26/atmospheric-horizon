@@ -5,7 +5,8 @@
 // /atmospheric skin [path] [default|slim] publishes a skin record (M9);
 // /atmospheric list <reference> reads a public list (M11); /atmospheric labels
 // <subject> reads labels off a subject's AppView view and /atmospheric labeler
-// <did> [subject] queries a labeler directly (M12).
+// <did> [subject] queries a labeler directly (M12); /atmospheric player
+// <did|handle> reads a player's latest verified snapshot record (M13).
 fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut bool) {
     use crate::game::atmospheric as m;
     if !game.native_on(m::ID) {
@@ -15,7 +16,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric list <list>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric list <list>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -119,6 +120,15 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
                 game.native_chat("atmospheric: querying the labeler…");
             }
             _ => game.native_chat("atmospheric: /atmospheric labeler <labeler-did> [subject]"),
+        }
+    } else if rest == "player" || rest.starts_with("player ") {
+        let subject = rest.strip_prefix("player").unwrap_or("").trim();
+        *ran = true;
+        if subject.is_empty() {
+            game.native_chat("atmospheric: /atmospheric player <did | handle>");
+        } else {
+            m::fetch_player(subject);
+            game.native_chat("atmospheric: reading the player's snapshot record…");
         }
     } else if rest == "chat" || rest.starts_with("chat ") {
         let text = rest.strip_prefix("chat").unwrap_or("").trim();
