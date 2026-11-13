@@ -57,4 +57,4 @@ Keep validation claims and supported revisions honest.
 
 ## Recent history
 
-M1 scaffold; M2 worker wiring (login + posts, game-side hooks); docs (successor + atpcraft roadmap); M3 screenshot posts; M4 notification polling; M5 atpcraft chat records; M6 snapshots; M8 OAuth; M9 skins; M10 server profile; M11 list reads; M12 label reads (#29 read side); M13 presence reads (#31); M14 skin reads (#33); M15 join-gate decision (#36); M16 chat-history reads (#38). History is atomic-scoped and linear (see the hard rules above).
+M1 scaffold; M2 worker wiring (login + posts, game-side hooks); docs (successor + atpcraft roadmap); M3 screenshot posts; M4 notification polling; M5 atpcraft chat records; M6 snapshots; M8 OAuth; M9 skins; M10 server profile; M11 list reads; M12 label reads (#29 read side); M13 presence reads (#31); M14 skin reads (#33); M15 join-gate decision (#36); M16 chat-history reads (#38); M17 sidecar worker process — the game spawns `atmospheric-worker` next to the executable and bridges the channel over stdio JSON-lines (#40, issue #2 option 3). History is atomic-scoped and linear (see the hard rules above).
