@@ -93,6 +93,8 @@ pub enum GameCommand {
     /// Publish a Colibri message as the player (M26). `automatic` is the
     /// chat-hook mirror, which stays silent when the bridge is off.
     ColibriSend { text: String, automatic: bool },
+    /// Relay a server broadcast line as the server account (M28).
+    ColibriNotice { text: String },
     /// Publish the player's state as an `at.atpcraft.player.snapshot` record
     /// (M6, atpcraft port).
     PostSnapshot { summary: SnapshotSummary },
@@ -1007,6 +1009,25 @@ pub fn colibri_send(text: &str) {
     });
 }
 
+/// Relay one server broadcast line as the server account (M28).
+pub fn post_colibri_notice(text: &str) {
+    send(GameCommand::ColibriNotice { text: text.into() });
+}
+
+/// The server broadcast translation keys atpcraft relays. Ordinary chat,
+/// command output and unknown server lines are deliberately excluded.
+pub fn is_colibri_notice(key: &str) -> bool {
+    matches!(
+        key,
+        "multiplayer.player.joined"
+            | "multiplayer.player.joined.renamed"
+            | "multiplayer.player.left"
+            | "chat.type.advancement.task"
+            | "chat.type.advancement.goal"
+            | "chat.type.advancement.challenge"
+    ) || key.starts_with("death.")
+}
+
 /// Ask the worker to publish a player-state snapshot record (M6).
 pub fn post_snapshot(summary: SnapshotSummary) {
     send(GameCommand::PostSnapshot { summary });
@@ -1710,6 +1731,9 @@ fn encode_command(command: &GameCommand) -> String {
             "ColibriSend",
             jobj(vec![("text", jstr(text)), ("automatic", jbool(*automatic))]),
         )]),
+        GameCommand::ColibriNotice { text } => {
+            jobj(vec![("ColibriNotice", jobj(vec![("text", jstr(text))]))])
+        }
         GameCommand::PostSnapshot { summary } => jobj(vec![(
             "PostSnapshot",
             jobj(vec![(
@@ -2206,6 +2230,7 @@ mod tests {
         colibri_status();
         colibri_stop();
         colibri_send("hello colibri");
+        post_colibri_notice("Alex joined the game");
         post_snapshot(snapshot_from_player(
             "",
             "minecraft:overworld",
@@ -2298,6 +2323,12 @@ mod tests {
                 assert!(!automatic);
             }
             other => panic!("expected explicit ColibriSend, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::ColibriNotice { text }) => {
+                assert_eq!(text, "Alex joined the game")
+            }
+            other => panic!("expected ColibriNotice, got {:?}", other),
         }
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::PostSnapshot { summary }) => {
@@ -2764,6 +2795,25 @@ mod tests {
     }
 
     #[test]
+    fn colibri_notice_keys_match_atpcraft() {
+        for key in [
+            "multiplayer.player.joined",
+            "multiplayer.player.joined.renamed",
+            "multiplayer.player.left",
+            "death.attack.player",
+            "death.fell.accident.generic",
+            "chat.type.advancement.task",
+            "chat.type.advancement.goal",
+            "chat.type.advancement.challenge",
+        ] {
+            assert!(is_colibri_notice(key), "{key}");
+        }
+        for key in ["chat.type.text", "", "chat.type.advancement"] {
+            assert!(!is_colibri_notice(key), "{key}");
+        }
+    }
+
+    #[test]
     fn location_line_reads_like_where() {
         assert_eq!(
             location_line(12.5, 64.0, -3.25, "minecraft:the_nether"),
@@ -2899,6 +2949,12 @@ mod tests {
                 automatic: false,
             }),
             r#"{"ColibriSend":{"text":"hi","automatic":false}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::ColibriNotice {
+                text: "Alex joined the game".into()
+            }),
+            r#"{"ColibriNotice":{"text":"Alex joined the game"}}"#
         );
         // The flat game-side x/y/z map onto the nested `position` object.
         assert_eq!(
