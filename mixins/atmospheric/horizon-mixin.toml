@@ -115,6 +115,22 @@ bindings = [
   { name = "name", ty = "&str", value = "name" },
 ]
 
+# The join gate (M38): before a server accepts the player into a level, ask the
+# worker whether their linked DID is on the configured Bluesky list. The hook
+# sets cancel and a disconnect reason when it is not.
+[[injection]]
+id = "gate-login"
+hook = "player_login"
+hook_version = 1
+kind = "HEAD"
+helper = "gate_login.rs"
+bindings = [
+  { name = "player", ty = "u128", value = "player" },
+  { name = "name", ty = "&str", value = "name" },
+  { name = "cancel", ty = "&mut bool", value = "&mut *cancel" },
+  { name = "reason", ty = "&mut Option<horizon_client::text::Text>", value = "&mut *reason" },
+]
+
 [[injection]]
 id = "colibri-leave"
 hook = "player_logged_out"

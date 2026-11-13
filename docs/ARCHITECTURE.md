@@ -31,17 +31,20 @@ crates, no game imports. Its only job is channel plumbing:
   `atmospheric-worker` sidecar binary found next to the game executable (or
   via `ATMOSPHERIC_WORKER_BIN`) and bridges the channel pair to the child's
   stdio — the shipped in-game attach path, see "M17" below.
-- Hook helpers push `GameCommand`s through the sender — never blocking,
-  never panicking if the worker is gone. M2 hooks Horizon's named native
-  hook points (`native-hooks.json` at the pinned revision): `mods` (the
-  Options > Mods row and its keybind), `key` (the keybind posts the
-  player's location), `command` (`/atmospheric login`,
-  `/atmospheric post <text>`), `tick` (attaches the sidecar once, then drains
-  events once per tick on the game or server) and `hud` (draws the status
+- Hook helpers push `GameCommand`s through the sender and never panic if
+  the worker is gone. The M38 login hook is the one bounded exception: it
+  waits for the worker's gate decision, because `player_login` is
+  synchronous. M2 hooks Horizon's named native hook points
+  (`native-hooks.json` at the pinned revision): `mods` (the Options > Mods
+  row and its keybind), `key` (the keybind posts the player's location),
+  `command` (`/atmospheric login`, `/atmospheric post <text>`), `tick`
+  (attaches the sidecar once, then drains events once per tick on the game
+  or server), `player_login` (M38's gate veto) and `hud` (draws the status
   line in the bottom-left corner).
 - `drain_events()` is called once per tick to collect worker events, folding
   each into the HUD status line (`status_line()`), bounded so the game
-  thread never stalls. Colibri message events are also queued for
+  thread never stalls. It also caches the worker's M38 gate state and
+  decisions. Colibri message events are also queued for
   `drain_colibri_chat()`, which the tick hook prints to native chat when a
   window exists. M37's remote profile prompts use a separate queue and the
   tick hook sends them with `native_tell`, so a server tick can prompt a
@@ -69,7 +72,7 @@ Everything else, with zero Horizon imports so it builds and tests with plain
   `getFollowers`/`getBlocks`/`getMutes` pagination on the public AppView,
   reduced to DID/handle/display name) and M23 writes (`follow`/`block`
   records, their removal, and the expected record shapes)
-- `identity` — M36/M37 client for the optional M35 service: claim URL and
+- `identity` — M36–M38 client for the optional M35 service: claim URL and
   request/response shapes, public UUID link lookup, DID ownership check and
   service-error propagation
 - `interactions` — M21 replies, likes and reposts (unauthenticated
@@ -528,8 +531,8 @@ atpcraft's remaining server-side surfaces (RPG item discovery, full aspect
 capture/restore and labeler issuance) are not implemented yet; the README port
 table records each one. M25 supplies the separate server account, M26/M27 run
 the operational Colibri bridge, M35 supplies the shared player-to-DID map,
-M36 claims links from the game and M37 checks linked players on join;
-enforcement, issuance and capture remain separate milestones.
+M36 claims links from the game, M37 checks linked players on join and M38
+enforces the configured list; issuance and capture remain separate milestones.
 
 Verified: `profiles` unit tests (whitespace normalisation, direct-record
 precedence, clearing on a successful record without pronouns, AppView
@@ -563,8 +566,9 @@ and the mod's persisted Ed25519 endorsement key; `createdAt` is preserved.
 The session file contains a DPoP private key and a refresh token, so it is a
 secret exactly like `session.json`; the README's Network use section records
 it. The account is the foundation, not the whole server-side feature: labeler
-routes, join enforcement and aspect sync still need their own milestones. M26
-builds the first Colibri surface on this account.
+routes and aspect sync still need their own milestones; M38 supplies
+linked-account join enforcement. M26 builds the first Colibri surface on this
+account.
 
 Verified: a worker test runs the full stub OAuth flow for the server account,
 asserts the `ServerAccount` LoggingIn/LoggedIn/LoggedOut events, the handle
@@ -876,10 +880,11 @@ write therefore leaves both copies unchanged. UUIDs, DIDs, handles, player names
 validated before they reach the store. The service is designed for one process
 per data directory, not for multiple replicas sharing a volume.
 
-M36 wires the explicit `/atmospheric link <code>` claim and M37 wires the
-public join-time link lookup. The service is still the foundation for
-join-gate enforcement, labeler issuance and RPG/player-data work; those
-consumers remain separate and must not be described as delivered.
+M36 wires the explicit `/atmospheric link <code>` claim, M37 wires the
+public join-time link lookup and M38 consumes the same map for login-gate
+enforcement. The service is still the foundation for labeler issuance and
+RPG/player-data work; those consumers remain separate and must not be
+described as delivered.
 
 Verified: `model` unit tests cover UUID, name, DID, handle, code and TTL
 validation; store tests cover reopen persistence, `linked_at` preservation,
@@ -950,6 +955,47 @@ quiet. Runtime tests pin the join command, event decoder, HUD line, prompt
 lines and UUID round-trip; the injected hook itself is not compiled by
 `cargo test`. No live identity service, PDS or Colibri AppView was contacted.
 
+### M38: linked-account join gate
+
+M15 could decide list membership and M35/M36 could link a UUID to a DID, but
+nothing refused a join. M38 uses Horizon's pinned `player_login` hook, which
+runs after the server accepts the connection but before the player is placed.
+The hook binds `player: u128`, `cancel: &mut bool` and
+`reason: &mut Option<Text>`; `gate_login.rs` asks the runtime for a refusal
+and, when it gets one, cancels with that text on the disconnect screen.
+
+`Worker::emit_join_gate_state` publishes `{enabled, list}` at startup and
+after a settings save. The runtime caches it; an unknown state waits up to
+3 seconds. With the gate off, login proceeds without a request. With it on,
+the runtime sends `JoinGateCheck { request_id, player_uuid }` and waits up to
+6 seconds for the matching `JoinGateDecision`. The worker bounds the whole
+identity-plus-list read at 5 seconds.
+
+The worker reads `server_api_url`, resolves the UUID through
+`GET /v1/links/{uuid}`, and checks the returned DID with the existing
+`lists::check_gate` read against `join_gate_list`. A linked member is
+allowed. An unlinked UUID, a non-member, an empty list, a missing service
+URL, any service/AppView error, and a timeout are refused; this is atpcraft's
+fail-closed rule. With no sidecar attached the runtime cannot know the gate
+is armed and stays out of the way. The gate runs on the server thread only;
+the worker keeps all network and disk I/O.
+
+This does not yet implement atpcraft's browser `/mc` OAuth flow, IP-bound
+gate sessions, or the periodic sweep that kicks online players removed from
+the list. Those need the identity service to become an OAuth client and are
+separate milestones. Operationally, players must be linked before the gate
+is enabled.
+
+Verified: a worker test links one UUID to a member, one to a non-member and
+one to nothing, then asserts allow, refusal and fail-closed empty-list
+behaviour. Runtime tests pin the gate-state/decision wire shapes and the
+synchronous refusal and allow paths. The injected `player_login` helper was
+compiled in the staged pinned Horizon tree, where all 13
+`game::atmospheric` tests pass; `cargo test` alone does not compile it. The
+staged Horizon-wide run still reports its own `hook_points_stay_hookable`
+source-scan test because other injected helpers contain macros; the M38 hook
+has none. No live identity service or AppView was contacted.
+
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
 `/atmospheric skin-of <did|handle>` sends `Command::FetchPlayerSkin` — the
@@ -998,8 +1044,9 @@ any HTTP call, an empty repo reports `None`, and both the `listRecords` and
 ### M15: the join-gate decision (`gate`)
 
 `/atmospheric gate <list> <did|handle>` sends `Command::CheckGate` —
-atpcraft's `BlueskyJoinGate` membership decision as a client-side read
-(enforcement itself stays server-side). `lists::check_gate` resolves the
+atpcraft's `BlueskyJoinGate` membership decision as a client-side read;
+M38 adds the server-side enforcement at `player_login`. `lists::check_gate`
+resolves the
 list reference (a bsky.app URL's handle owner via the directory service —
 `resolve_list_reference`, which the M11 `fetch_list` now shares) and the
 subject (the M12 subject parser/resolver; record URIs are rejected), pages

@@ -79,6 +79,14 @@ pub struct Config {
     /// Base URL of the optional M35 identity service (M36). Empty disables
     /// `/atmospheric link`; no request is made unless that command is used.
     pub server_api_url: String,
+    /// Enforce the join gate at the server login phase (M38). A joining
+    /// player's UUID must resolve through `server_api_url` to a linked DID on
+    /// `join_gate_list`. Off by default. When on, an empty list or an
+    /// unavailable identity/AppView read refuses the join (fail-closed).
+    pub join_gate_enabled: bool,
+    /// The public Bluesky list used by the join gate (M38): an
+    /// `at://…/app.bsky.graph.list/<rkey>` URI or a bsky.app list URL.
+    pub join_gate_list: String,
     /// Trusted atpcraft server endorsement keys (M13 presence reads): when
     /// reading a player's `at.atpcraft.player.snapshot` record, endorsements
     /// from these key ids are accepted alongside the mod's own signing key.
@@ -125,6 +133,8 @@ impl Default for Config {
             game_version: "26.3".into(),
             appview_url: crate::lists::DEFAULT_APPVIEW.into(),
             server_api_url: String::new(),
+            join_gate_enabled: false,
+            join_gate_list: String::new(),
             trusted_server_keys: Vec::new(),
             colibri_bridge_enabled: false,
             colibri_channel_uri: String::new(),
@@ -191,6 +201,8 @@ mod tests {
             game_version: "26.3".into(),
             appview_url: crate::lists::DEFAULT_APPVIEW.into(),
             server_api_url: "https://identity.example".into(),
+            join_gate_enabled: true,
+            join_gate_list: "at://did:plc:owner/app.bsky.graph.list/3gate".into(),
             trusted_server_keys: vec![TrustedServerKey {
                 key_id: String::new(),
                 public_key: "MCowBQYDK2VwAyEA...".into(),
@@ -215,6 +227,11 @@ mod tests {
         assert_eq!(back.colibri_channel_uri, config.colibri_channel_uri);
         assert_eq!(back.colibri_appview_url, "https://appview.example");
         assert_eq!(back.server_api_url, "https://identity.example");
+        assert!(back.join_gate_enabled);
+        assert_eq!(
+            back.join_gate_list,
+            "at://did:plc:owner/app.bsky.graph.list/3gate"
+        );
         assert!(!back.colibri_server_events_enabled);
         assert!(!back.colibri_server_events_fallback_enabled);
     }
@@ -238,6 +255,8 @@ mod tests {
         assert!(config.trusted_server_keys.is_empty());
         assert!(!config.colibri_bridge_enabled);
         assert!(config.colibri_channel_uri.is_empty());
+        assert!(!config.join_gate_enabled);
+        assert!(config.join_gate_list.is_empty());
         assert_eq!(config.colibri_appview_url, "https://api.colibri.social");
         assert!(config.server_api_url.is_empty());
         assert!(config.colibri_server_events_fallback_enabled);

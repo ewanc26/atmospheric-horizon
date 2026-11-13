@@ -58,6 +58,15 @@ const COLIBRI_SEND_WINDOW: Duration = Duration::from_secs(60);
 /// (M29), matching atpcraft's 5-second window.
 const COLIBRI_PRESENCE_WINDOW: Duration = Duration::from_secs(5);
 
+/// How long the M38 login gate waits for the identity map and list read.
+const JOIN_GATE_TIMEOUT: Duration = Duration::from_secs(5);
+const JOIN_GATE_NO_LIST: &str = "This server's Bluesky join gate has no whitelist list configured.";
+const JOIN_GATE_UNLINKED: &str =
+    "This server requires a linked Bluesky account. Contact the server operator.";
+const JOIN_GATE_NOT_MEMBER: &str = "You are not on this server's Bluesky whitelist.";
+const JOIN_GATE_UNAVAILABLE: &str =
+    "Could not verify Bluesky whitelist membership. Try again shortly.";
+
 /// Write a file that holds secrets (app password in `config.json`, the
 /// session/refresh token and DPoP private key in `session.json`, the Ed25519
 /// seed in `signing-key.json`) with owner-only permissions: 0600 on unix.
@@ -157,6 +166,7 @@ pub fn spawn(
 
                 let mut worker = Worker::new(options, events, oauth_tx, colibri_tx);
                 worker.emit(Event::Session(SessionState::LoggedOut));
+                worker.emit_join_gate_state();
                 // Resume persisted player and server sessions (refresh
                 // tokens) if there are any.
                 worker.try_resume().await;
@@ -465,6 +475,8 @@ impl Worker {
             Command::SaveConfig { config } => {
                 if let Err(error) = self.save_config(&config) {
                     self.fail(format!("could not save the settings file: {error}"));
+                } else {
+                    self.emit_join_gate_state();
                 }
             }
             Command::Login => self.login().await,
@@ -567,6 +579,12 @@ impl Worker {
                     }),
                     Err(error) => self.fail(error.to_string()),
                 }
+            }
+            Command::JoinGateCheck {
+                request_id,
+                player_uuid,
+            } => {
+                self.check_join_gate(request_id, &player_uuid).await;
             }
             Command::FetchChat { subject } => {
                 // A public read against the subject's own PDS: works logged
@@ -1118,6 +1136,77 @@ impl Worker {
             config.appview_url.clone()
         };
         crate::lists::check_gate(&self.http, &self.resolver, &appview, list, subject).await
+    }
+
+    /// Publish the current arm state to the runtime (M38). Called at startup
+    /// and after a settings save, so a later login knows whether to ask.
+    fn emit_join_gate_state(&self) {
+        let config = self.load_config().unwrap_or_default();
+        self.emit(Event::JoinGateState {
+            enabled: config.join_gate_enabled,
+            list: config.join_gate_list,
+        });
+    }
+
+    /// Enforce the gate for one joining player (M38). The runtime blocks the
+    /// login for a bounded time; every failure is a refusal. A linked DID on
+    /// the configured list is the only allow.
+    async fn check_join_gate(&self, request_id: u64, player_uuid: &str) {
+        let config = self.load_config().unwrap_or_default();
+        if !config.join_gate_enabled {
+            self.emit(Event::JoinGateDecision {
+                request_id,
+                allowed: true,
+                message: String::new(),
+            });
+            return;
+        }
+        if config.join_gate_list.trim().is_empty() {
+            self.emit(Event::JoinGateDecision {
+                request_id,
+                allowed: false,
+                message: JOIN_GATE_NO_LIST.into(),
+            });
+            return;
+        }
+        let verdict = tokio::time::timeout(
+            JOIN_GATE_TIMEOUT,
+            self.join_gate_verdict(&config, player_uuid),
+        )
+        .await;
+        let (allowed, message) = match verdict {
+            Ok(Ok(Some(true))) => (true, String::new()),
+            Ok(Ok(Some(false))) => (false, JOIN_GATE_NOT_MEMBER.into()),
+            Ok(Ok(None)) => (false, JOIN_GATE_UNLINKED.into()),
+            Ok(Err(_)) | Err(_) => (false, JOIN_GATE_UNAVAILABLE.into()),
+        };
+        self.emit(Event::JoinGateDecision {
+            request_id,
+            allowed,
+            message,
+        });
+    }
+
+    /// `Some(true)` when the linked DID is on the list, `Some(false)` when it
+    /// is not, `None` when the UUID has no link. Any service or AppView error
+    /// propagates so the caller refuses the join.
+    async fn join_gate_verdict(
+        &self,
+        config: &Config,
+        player_uuid: &str,
+    ) -> crate::error::Result<Option<bool>> {
+        if config.server_api_url.trim().is_empty() {
+            return Err(AtmosphericError::Message(
+                "server_api_url is not configured".into(),
+            ));
+        }
+        let Some(link) =
+            identity::fetch_link(&self.http, &config.server_api_url, player_uuid).await?
+        else {
+            return Ok(None);
+        };
+        let outcome = self.check_gate(&config.join_gate_list, &link.did).await?;
+        Ok(Some(outcome.allowed))
     }
 
     /// Read the labels the AppView attaches to a subject's view (M12, the
@@ -2596,6 +2685,8 @@ mod tests {
             game_version: "26.3".into(),
             appview_url: "https://public.api.bsky.app".into(),
             server_api_url: String::new(),
+            join_gate_enabled: false,
+            join_gate_list: String::new(),
             trusted_server_keys: Vec::new(),
             colibri_bridge_enabled: false,
             colibri_channel_uri: String::new(),
@@ -2841,6 +2932,11 @@ mod tests {
             (
                 "404 Not Found",
                 r#"{"error":"no link for player"}"#.to_string(),
+            )
+        } else if path == "/v1/links/00000000-0000-4000-8000-0000000000a3" {
+            (
+                "200 OK",
+                r#"{"player_uuid":"00000000-0000-4000-8000-0000000000a3","player_name":"Alice","did":"did:plc:alice","handle":"alice.test","linked_at":1760000000}"#.to_string(),
             )
         } else {
             match path.split('?').next().unwrap_or(&path) {
@@ -3333,10 +3429,11 @@ mod tests {
         // Command::Shutdown stops the thread.
         let dir = temp_dir("shutdown");
         let (command_tx, event_rx, handle) = spawn_worker(dir.clone());
-        // Drain the startup event, then shut down.
+        // Drain the startup events, then shut down.
         let _ = wait_for(&event_rx, |e| {
             matches!(e, Event::Session(SessionState::LoggedOut))
         });
+        let _ = wait_for(&event_rx, |e| matches!(e, Event::JoinGateState { .. }));
         command_tx.send(Command::Shutdown).unwrap();
         handle.join().unwrap();
         // The thread is gone: no more events arrive.
@@ -3624,6 +3721,87 @@ mod tests {
     }
 
     #[test]
+    fn join_gate_allows_only_a_linked_member_and_fails_closed() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("join-gate");
+        let mut config = test_config(pds.url.clone());
+        config.appview_url = pds.url.clone();
+        config.server_api_url = pds.url.clone();
+        config.join_gate_enabled = true;
+        config.join_gate_list = "at://did:plc:owner/app.bsky.graph.list/3abc".into();
+        write_config(&dir, &config);
+        let (events, event_rx) = std::sync::mpsc::channel();
+        let (oauth_tx, _oauth_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (colibri_tx, _colibri_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut worker = Worker::new(
+            WorkerOptions::new(dir.clone()),
+            events,
+            oauth_tx,
+            colibri_tx,
+        );
+        worker.resolver = stub_resolver(&pds.url);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        runtime.block_on(worker.check_join_gate(1, "00000000-0000-4000-8000-0000000000a3"));
+        match event_rx.try_recv() {
+            Ok(Event::JoinGateDecision {
+                request_id,
+                allowed,
+                message,
+            }) => {
+                assert_eq!(request_id, 1);
+                assert!(allowed, "alice is linked and on the list");
+                assert!(message.is_empty());
+            }
+            other => panic!("expected an allowed JoinGateDecision, got {other:?}"),
+        }
+
+        runtime.block_on(worker.check_join_gate(2, "00000000-0000-4000-8000-0000000000a2"));
+        match event_rx.try_recv() {
+            Ok(Event::JoinGateDecision {
+                request_id,
+                allowed,
+                message,
+            }) => {
+                assert_eq!(request_id, 2);
+                assert!(!allowed);
+                assert!(message.contains("linked Bluesky account"), "{message}");
+            }
+            other => panic!("expected an unlinked refusal, got {other:?}"),
+        }
+
+        runtime.block_on(worker.check_join_gate(3, "00000000-0000-4000-8000-0000000000a1"));
+        match event_rx.try_recv() {
+            Ok(Event::JoinGateDecision {
+                request_id,
+                allowed,
+                message,
+            }) => {
+                assert_eq!(request_id, 3);
+                assert!(!allowed);
+                assert!(message.contains("not on this server"), "{message}");
+            }
+            other => panic!("expected a non-member refusal, got {other:?}"),
+        }
+
+        config.join_gate_list.clear();
+        write_config(&dir, &config);
+        runtime.block_on(worker.check_join_gate(4, "00000000-0000-4000-8000-0000000000a3"));
+        match event_rx.try_recv() {
+            Ok(Event::JoinGateDecision {
+                request_id,
+                allowed,
+                message,
+            }) => {
+                assert_eq!(request_id, 4);
+                assert!(!allowed);
+                assert!(message.contains("no whitelist list"), "{message}");
+            }
+            other => panic!("expected a no-list refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn colibri_remote_profile_prompt_targets_the_linked_player() {
         let pds = StubPds::start(false);
         let dir = temp_dir("colibri-remote-profile");
@@ -3899,6 +4077,8 @@ mod tests {
             game_version: "26.3".into(),
             appview_url: "https://public.api.bsky.app".into(),
             server_api_url: String::new(),
+            join_gate_enabled: false,
+            join_gate_list: String::new(),
             trusted_server_keys: Vec::new(),
             colibri_bridge_enabled: false,
             colibri_channel_uri: String::new(),
