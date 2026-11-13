@@ -55,6 +55,9 @@ Everything else, with zero Horizon imports so it builds and tests with plain
   restarts, the pattern bsky-bot-sdk uses)
 - `lists` — M11 public list reads (`app.bsky.graph.getList` pagination) and
   the M15 join-gate decision (`check_gate`)
+- `graph` — M20 social-graph reads (`app.bsky.graph.getFollows`/
+  `getFollowers`/`getBlocks`/`getMutes` pagination on the public AppView,
+  reduced to DID/handle/display name)
 - `chats` — M16 chat-history reads (`at.atpcraft.player.chat` listRecords on
   the subject's own PDS, ordered by `sentAt`)
 - `servers` — M19 server-profile reads (`at.atpcraft.server.profile` listRecords
@@ -607,6 +610,34 @@ the stub PDS (empty repo reports none, seeded record reads back logged out with
 unauthenticated `listRecords`, trusted key verifies, unknown and mismatched
 keys report proper verdicts, record-URI subject fails before HTTP).
 
+### M20: social-graph reads (`app.bsky.graph.get*`)
+
+`/atmospheric follows|followers|blocks|mutes <did|handle>` sends
+`Command::FetchGraph { kind, subject }`. This is a pure public read, so it
+works logged out:
+
+1. `graph::GraphKind::from_key` rejects an unknown relation before any HTTP
+   call (the worker reports a `Failed` event);
+2. `graph::resolve_subject` accepts a DID or handle (not a record URI) and
+   resolves handles through the same directory service as OAuth login;
+3. `graph::fetch_graph` pages `app.bsky.graph.getFollows`, `getFollowers`,
+   `getBlocks` or `getMutes` on the configured AppView (`appview_url`,
+   default `https://public.api.bsky.app`) with `limit=100`, following the
+   cursor up to a defensive 200-page cap. Each profile view contributes its
+   DID, handle and display name; views without a DID are skipped.
+
+The worker emits `Event::SocialGraph { kind, subject, via, members }`; the
+game side mirrors it as plain data and the HUD shows "atmospheric: follows of
+did:plc:… via <appview>: N account(s) — a.test, b.test +N more" (or
+"atmospheric: no mutes for did:plc:…"). No credentials are sent and nothing
+about the reader goes out beyond the subject DID being looked up.
+
+Verified: `graph` unit tests (kind round-trip and endpoint routing, two-page
+pagination with a DID-less view skipped, HTTP error reporting) and a worker
+test against the stub AppView (all four relations, follows paged twice,
+every read unauthenticated, an unknown kind fails before HTTP).
+Real-AppView wire check: `pds_check` with `ATMOSPHERIC_GRAPH`.
+
 ### M17: the sidecar worker process (issue #2 option 3, #40)
 
 The bundle cannot stage the worker crate into the game workspace (see
@@ -668,6 +699,7 @@ ATMOSPHERIC_GATE="at://…/app.bsky.graph.list/<rkey> | URL" \ # optional, M15
 ATMOSPHERIC_GATE_SUBJECT="did:plc:… | handle" \     # optional, M15 (default: own DID)
 ATMOSPHERIC_FETCH_CHAT="did:plc:… | handle" \       # optional, M16 (chat history)
 ATMOSPHERIC_FETCH_SERVER="did:plc:… | handle" \     # optional, M19 (server profile)
+ATMOSPHERIC_GRAPH="follows:did:plc:…" \            # optional, M20 (follows|followers|blocks|mutes)
 cargo run -p atmospheric --example pds_check
 ```
 
