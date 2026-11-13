@@ -118,6 +118,11 @@ pub enum GameCommand {
     /// own PDS and verify its endorsement (M13, atpcraft presence read side):
     /// the subject is a DID or a handle. Works logged out.
     FetchPlayer { subject: String },
+    /// Read an account's Bluesky profile (M24): `app.bsky.actor.getProfile`
+    /// from the AppView plus the direct `app.bsky.actor.profile` record from
+    /// the account's own PDS, with atpcraft's pronoun precedence. Works
+    /// logged out.
+    FetchProfile { subject: String },
     /// Read a player's latest `at.atpcraft.player.skin` record from their own
     /// PDS, verify its endorsement, and — only when verified — download the
     /// skin/cape blobs into the mod's storage folder (M14, atpcraft skin-sync
@@ -278,6 +283,18 @@ pub struct PlayerDigest {
     pub verdict: EndorsementVerdict,
 }
 
+/// An account's Bluesky profile, reduced to what the HUD shows (M24). Plain
+/// data: the worker side has the same struct in the `atmospheric` crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileDigest {
+    pub did: String,
+    pub handle: String,
+    pub display_name: String,
+    pub description: String,
+    pub pronouns: Option<String>,
+    pub avatar: String,
+}
+
 /// One referenced or downloaded skin/cape blob, reduced to what the HUD
 /// shows (M14). Plain data: the worker side has the same struct in the
 /// `atmospheric` crate.
@@ -390,6 +407,14 @@ pub enum ModEvent {
         via: String,
         // Boxed: PlayerDigest is the enum's largest variant.
         snapshot: Box<Option<PlayerDigest>>,
+    },
+    /// An account's profile (M24): the resolved DID (`subject`), the PDS the
+    /// direct record was read from (`via`), and the combined digest with
+    /// atpcraft's pronoun precedence already applied.
+    Profile {
+        subject: String,
+        via: String,
+        profile: Box<ProfileDigest>,
     },
     /// The latest skin record of a player (M14, skin-sync read side): the DID
     /// (`subject`), the PDS it was read from (`via`), and the digest with its
@@ -519,6 +544,34 @@ pub fn status_text(event: &ModEvent) -> String {
                 )
             }
         },
+        ModEvent::Profile {
+            subject, profile, ..
+        } => {
+            let name = if profile.display_name.is_empty() {
+                if profile.handle.is_empty() {
+                    subject.clone()
+                } else {
+                    profile.handle.clone()
+                }
+            } else {
+                profile.display_name.clone()
+            };
+            let mut line = format!("atmospheric: {name}");
+            if !profile.handle.is_empty() && profile.handle != name {
+                line.push_str(&format!(" (@{})", profile.handle));
+            }
+            if let Some(pronouns) = &profile.pronouns {
+                line.push_str(&format!(" ({pronouns})"));
+            }
+            if !profile.description.is_empty() {
+                let mut description: String = profile.description.chars().take(80).collect();
+                if profile.description.chars().count() > 80 {
+                    description.push('…');
+                }
+                line.push_str(&format!(" — {description}"));
+            }
+            line
+        }
         ModEvent::PlayerSkin { subject, skin, .. } => match &**skin {
             None => format!("atmospheric: no skin records for {subject}"),
             Some(d) => {
@@ -882,6 +935,14 @@ pub fn fetch_labeler_labels(labeler: &str, subject: Option<&str>) {
 /// endorsement (M13). `subject` is a DID or a handle.
 pub fn fetch_player(subject: &str) {
     send(GameCommand::FetchPlayer {
+        subject: subject.into(),
+    });
+}
+
+/// Ask the worker to read an account's Bluesky profile (M24). `subject` is a
+/// DID or a handle.
+pub fn fetch_profile(subject: &str) {
+    send(GameCommand::FetchProfile {
         subject: subject.into(),
     });
 }
@@ -1540,6 +1601,10 @@ fn encode_command(command: &GameCommand) -> String {
             "FetchPlayer",
             jobj(vec![("subject", jstr(subject))]),
         )]),
+        GameCommand::FetchProfile { subject } => jobj(vec![(
+            "FetchProfile",
+            jobj(vec![("subject", jstr(subject))]),
+        )]),
         GameCommand::FetchPlayerSkin { subject } => jobj(vec![(
             "FetchPlayerSkin",
             jobj(vec![("subject", jstr(subject))]),
@@ -1677,6 +1742,18 @@ fn decode_player_digest(value: &Json) -> Option<PlayerDigest> {
         xp_level: req_int(obj, "xp_level")? as i64,
         game_mode: req_str(obj, "game_mode")?,
         verdict: decode_verdict(jget(obj, "verdict")?)?,
+    })
+}
+
+fn decode_profile_digest(value: &Json) -> Option<ProfileDigest> {
+    let obj = as_obj(value)?;
+    Some(ProfileDigest {
+        did: req_str(obj, "did")?,
+        handle: req_str(obj, "handle")?,
+        display_name: req_str(obj, "display_name")?,
+        description: req_str(obj, "description")?,
+        pronouns: jget(obj, "pronouns").and_then(as_opt_str).flatten(),
+        avatar: req_str(obj, "avatar")?,
     })
 }
 
@@ -1843,6 +1920,14 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 snapshot: Box::new(snapshot),
             })
         }
+        "Profile" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::Profile {
+                subject: req_str(obj, "subject")?,
+                via: req_str(obj, "via")?,
+                profile: Box::new(decode_profile_digest(jget(obj, "profile")?)?),
+            })
+        }
         "PlayerSkin" => {
             let obj = payload_obj()?;
             let skin = match jget(obj, "skin")? {
@@ -1934,6 +2019,7 @@ mod tests {
         fetch_labeler_labels("did:plc:labeler", Some("did:plc:example"));
         fetch_labeler_labels("did:plc:labeler", None);
         fetch_player("someone.example");
+        fetch_profile("someone.example");
         fetch_player_skin("someone.example");
         fetch_server_profile("someone.example");
         fetch_graph("follows", "someone.example");
@@ -2021,6 +2107,10 @@ mod tests {
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::FetchPlayer { subject }) => assert_eq!(subject, "someone.example"),
             other => panic!("expected FetchPlayer, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::FetchProfile { subject }) => assert_eq!(subject, "someone.example"),
+            other => panic!("expected FetchProfile, got {:?}", other),
         }
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::FetchPlayerSkin { subject }) => assert_eq!(subject, "someone.example"),
@@ -2164,6 +2254,36 @@ mod tests {
 
     #[test]
     fn status_text_covers_every_event() {
+        assert_eq!(
+            status_text(&ModEvent::Profile {
+                subject: "did:plc:alice".into(),
+                via: "https://pds.example".into(),
+                profile: Box::new(ProfileDigest {
+                    did: "did:plc:alice".into(),
+                    handle: "alice.test".into(),
+                    display_name: "Alice".into(),
+                    description: "AppView bio".into(),
+                    pronouns: Some("they/them".into()),
+                    avatar: "https://cdn.example/alice.png".into(),
+                }),
+            }),
+            "atmospheric: Alice (@alice.test) (they/them) — AppView bio"
+        );
+        assert_eq!(
+            status_text(&ModEvent::Profile {
+                subject: "did:plc:bob".into(),
+                via: "https://pds.example".into(),
+                profile: Box::new(ProfileDigest {
+                    did: "did:plc:bob".into(),
+                    handle: String::new(),
+                    display_name: String::new(),
+                    description: String::new(),
+                    pronouns: None,
+                    avatar: String::new(),
+                }),
+            }),
+            "atmospheric: did:plc:bob"
+        );
         assert_eq!(
             status_text(&ModEvent::GraphChanged {
                 action: "follow".into(),
@@ -2540,6 +2660,12 @@ mod tests {
             r#"{"FetchPlayer":{"subject":"did:plc:z"}}"#
         );
         assert_eq!(
+            encode_command(&GameCommand::FetchProfile {
+                subject: "did:plc:z".into()
+            }),
+            r#"{"FetchProfile":{"subject":"did:plc:z"}}"#
+        );
+        assert_eq!(
             encode_command(&GameCommand::FetchPlayerSkin {
                 subject: "did:plc:z".into()
             }),
@@ -2766,6 +2892,23 @@ mod tests {
                         endorser: "k".into()
                     },
                 })),
+            })
+        );
+        assert_eq!(
+            decode_event(
+                r#"{"Profile":{"subject":"d","via":"v","profile":{"did":"d","handle":"alice.test","display_name":"Alice","description":"bio","pronouns":"they/them","avatar":"a"}}}"#
+            ),
+            Some(ModEvent::Profile {
+                subject: "d".into(),
+                via: "v".into(),
+                profile: Box::new(ProfileDigest {
+                    did: "d".into(),
+                    handle: "alice.test".into(),
+                    display_name: "Alice".into(),
+                    description: "bio".into(),
+                    pronouns: Some("they/them".into()),
+                    avatar: "a".into(),
+                }),
             })
         );
         assert_eq!(
