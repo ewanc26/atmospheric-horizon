@@ -29,6 +29,25 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// app-password level (repo writes, blob uploads, PDS API calls) and is what
 /// third-party PDS authorization servers reliably support today.
 pub const DEFAULT_SCOPE: &str = "atproto transition:generic";
+
+/// Add the Colibri grants to the OAuth scope when the bridge is enabled.
+///
+/// The PDS only mints a service-auth token when the session carries the
+/// matching `rpc:` grant, and Colibri message/membership records need their
+/// repo grants. Without the bridge the scope is unchanged, so ordinary logins
+/// request no more than before.
+pub fn scope_for_colibri(bridge_enabled: bool, appview_did: &str) -> String {
+    if !bridge_enabled {
+        return DEFAULT_SCOPE.into();
+    }
+    let aud = crate::colibri::appview_service_ref(appview_did);
+    format!(
+        "{DEFAULT_SCOPE} \
+         repo:social.colibri.message?action=create&action=delete \
+         repo:social.colibri.membership?action=create&action=delete \
+         rpc:social.colibri.sync.subscribeEvents?aud={aud}"
+    )
+}
 /// The loopback redirect host (IP literal, as the spec requires for native
 /// clients; `localhost` is reserved for the `client_id` origin).
 pub const LOOPBACK_HOST: &str = "127.0.0.1";

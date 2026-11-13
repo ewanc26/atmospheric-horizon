@@ -834,6 +834,20 @@ async fn redirect_with_a_wrong_state_is_rejected() {
     );
 }
 
+#[test]
+fn colibri_scope_adds_the_stream_grant_only_when_enabled() {
+    let enabled = scope_for_colibri(true, "did:web:api.colibri.social");
+    assert!(enabled.contains("repo:social.colibri.message?action=create&action=delete"));
+    assert!(enabled.contains("repo:social.colibri.membership?action=create&action=delete"));
+    assert!(enabled.contains(
+        "rpc:social.colibri.sync.subscribeEvents?aud=did:web:api.colibri.social#colibri_appview"
+    ));
+    assert_eq!(
+        scope_for_colibri(false, "did:web:api.colibri.social"),
+        DEFAULT_SCOPE
+    );
+}
+
 #[tokio::test]
 async fn redirect_wait_times_out_without_a_browser() {
     let stub = StubAuthServer::start(false);

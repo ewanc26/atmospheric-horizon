@@ -8,6 +8,7 @@
 
 pub mod actions;
 pub mod chats;
+pub mod colibri;
 pub mod config;
 pub mod error;
 pub mod graph;
@@ -53,7 +54,7 @@ pub enum Command {
     /// (M25).
     LogoutServerAccount,
     /// Replace the settings file with these settings.
-    SaveConfig { config: Config },
+    SaveConfig { config: Box<Config> },
     /// Post plain text to Bluesky.
     PostText { text: String },
     /// Upload an image file and post it as an embedded image.
@@ -69,6 +70,16 @@ pub enum Command {
     /// worker only publishes when `post_chat_messages` is enabled; explicit
     /// ones (the `/atmospheric chat` command) always publish.
     PostChat { message: String, automatic: bool },
+    /// Start the Colibri bridge (M26) as the server account.
+    ColibriStart,
+    /// Stop the Colibri bridge and drop its stream.
+    ColibriStop,
+    /// Report whether the bridge is active and connected.
+    ColibriStatus,
+    /// Publish one message into the bridged channel as the player (M26).
+    /// `automatic` marks the chat-hook mirror; a missing bridge is silent for
+    /// those, while the explicit command reports the failure.
+    ColibriSend { text: String, automatic: bool },
     /// Publish the player's state as an `at.atpcraft.player.snapshot` record,
     /// endorsed with the mod's own Ed25519 key (atpcraft port, M6). An empty
     /// `summary.username` is filled from the configured identifier.
@@ -272,6 +283,16 @@ pub enum Event {
     /// A relationship was written (M23): the action (`follow`, `unfollow`,
     /// `block`, `unblock`, `mute` or `unmute`) and the subject's resolved DID.
     GraphChanged { action: String, subject: String },
+    /// Colibri bridge state (M26). `error` is set when the stream dropped; the
+    /// worker reconnects, so it is a status line rather than a terminal error.
+    Colibri {
+        active: bool,
+        connected: bool,
+        channel: String,
+        error: Option<String>,
+    },
+    /// One Colibri message for the game chat (M26).
+    ColibriMessage { handle: String, text: String },
 }
 
 #[cfg(test)]
@@ -321,12 +342,12 @@ mod tests {
         // SaveConfig carries the full Config; the game side sends the Settings
         // subset and container-level serde(default) fills the rest.
         let json = serde_json::to_string(&Command::SaveConfig {
-            config: Config {
+            config: Box::new(Config {
                 pds_url: "https://pds.example".into(),
                 identifier: "alice.test".into(),
                 app_password: "aaaa-bbbb-cccc-dddd".into(),
                 ..Config::default()
-            },
+            }),
         })
         .unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -341,7 +362,7 @@ mod tests {
                 handle: "a.test".into(),
             },
             Command::SaveConfig {
-                config: Config::default(),
+                config: Box::new(Config::default()),
             },
             Command::PostText { text: "t".into() },
             Command::PostImage {

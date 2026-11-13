@@ -84,6 +84,15 @@ pub enum GameCommand {
     /// atpcraft port). `automatic` marks chat-hook messages, which the worker
     /// only publishes when `post_chat_messages` is enabled.
     PostChat { message: String, automatic: bool },
+    /// Start the Colibri bridge as the server account (M26).
+    ColibriStart,
+    /// Stop the Colibri bridge (M26).
+    ColibriStop,
+    /// Report the Colibri bridge state (M26).
+    ColibriStatus,
+    /// Publish a Colibri message as the player (M26). `automatic` is the
+    /// chat-hook mirror, which stays silent when the bridge is off.
+    ColibriSend { text: String, automatic: bool },
     /// Publish the player's state as an `at.atpcraft.player.snapshot` record
     /// (M6, atpcraft port).
     PostSnapshot { summary: SnapshotSummary },
@@ -463,6 +472,15 @@ pub enum ModEvent {
     },
     /// A relationship was written (M23): the action and the resolved DID.
     GraphChanged { action: String, subject: String },
+    /// Colibri bridge state (M26).
+    Colibri {
+        active: bool,
+        connected: bool,
+        channel: String,
+        error: Option<String>,
+    },
+    /// One incoming Colibri message (M26).
+    ColibriMessage { handle: String, text: String },
 }
 
 /// The HUD wording for an endorsement verdict (M13/M14).
@@ -666,6 +684,29 @@ pub fn status_text(event: &ModEvent) -> String {
             };
             format!("atmospheric: {past} {subject}")
         }
+        ModEvent::Colibri {
+            active,
+            connected,
+            channel,
+            error,
+        } => {
+            if !active {
+                "atmospheric: Colibri bridge off".into()
+            } else if let Some(error) = error {
+                format!("atmospheric: Colibri disconnected: {error}")
+            } else if *connected {
+                format!("atmospheric: Colibri connected to {channel}")
+            } else {
+                format!("atmospheric: Colibri connecting to {channel}")
+            }
+        }
+        ModEvent::ColibriMessage { handle, text } => {
+            format!(
+                "[Colibri] @{}: {}",
+                clean_remote(handle),
+                clean_remote(text)
+            )
+        }
         ModEvent::SocialGraph {
             kind,
             subject,
@@ -727,6 +768,7 @@ static COMMAND_TX: OnceLock<Sender<GameCommand>> = OnceLock::new();
 static EVENTS_RX: OnceLock<Mutex<Receiver<ModEvent>>> = OnceLock::new();
 static STATUS: OnceLock<Mutex<Vec<(String, std::time::Instant)>>> = OnceLock::new();
 static LAST_SHOT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static COLIBRI_CHAT: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
 /// How many status lines the HUD shows at once.
 pub const STATUS_LINES_MAX: usize = 3;
@@ -789,6 +831,20 @@ pub fn drain_events(max: usize) -> Vec<ModEvent> {
             }
         }
     }
+    if let Ok(mut chat) = COLIBRI_CHAT.get_or_init(|| Mutex::new(Vec::new())).lock() {
+        for event in &drained {
+            if let ModEvent::ColibriMessage { handle, text } = event {
+                chat.push(format!(
+                    "[Colibri] @{}: {}",
+                    clean_remote(handle),
+                    clean_remote(text)
+                ));
+                while chat.len() > 8 {
+                    chat.remove(0);
+                }
+            }
+        }
+    }
     if let Ok(mut status) = status_slot().lock() {
         let now = std::time::Instant::now();
         prune_expired(&mut status, now);
@@ -823,6 +879,25 @@ pub fn status_lines() -> Vec<String> {
 /// The newest status line (empty when there is none).
 pub fn status_line() -> String {
     status_lines().pop().unwrap_or_default()
+}
+
+/// Take the incoming Colibri lines queued for native chat.
+pub fn drain_colibri_chat() -> Vec<String> {
+    COLIBRI_CHAT
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .map(|mut lines| std::mem::take(&mut *lines))
+        .unwrap_or_default()
+}
+
+/// Remote chat text is not trusted: drop control characters, the legacy
+/// colour marker, and cap the line at the Colibri limit.
+fn clean_remote(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !c.is_control() && *c != '§')
+        .take(512)
+        .collect()
 }
 
 /// Send a command to the worker, if installed. Never blocks, never panics
@@ -900,6 +975,35 @@ pub fn post_chat(message: &str, automatic: bool) {
     send(GameCommand::PostChat {
         message: message.into(),
         automatic,
+    });
+    // atpcraft mirrors game chat into the bridged Colibri channel. The worker
+    // ignores this silently while the bridge is off.
+    send(GameCommand::ColibriSend {
+        text: message.into(),
+        automatic: true,
+    });
+}
+
+/// Arm the Colibri bridge (M26).
+pub fn colibri_start() {
+    send(GameCommand::ColibriStart);
+}
+
+/// Disarm the Colibri bridge (M26).
+pub fn colibri_stop() {
+    send(GameCommand::ColibriStop);
+}
+
+/// Ask for the bridge's current state (M26).
+pub fn colibri_status() {
+    send(GameCommand::ColibriStatus);
+}
+
+/// Publish one explicit message into the bridged channel (M26).
+pub fn colibri_send(text: &str) {
+    send(GameCommand::ColibriSend {
+        text: text.into(),
+        automatic: false,
     });
 }
 
@@ -1599,6 +1703,13 @@ fn encode_command(command: &GameCommand) -> String {
                 ("automatic", jbool(*automatic)),
             ]),
         )]),
+        GameCommand::ColibriStart => jstr("ColibriStart"),
+        GameCommand::ColibriStop => jstr("ColibriStop"),
+        GameCommand::ColibriStatus => jstr("ColibriStatus"),
+        GameCommand::ColibriSend { text, automatic } => jobj(vec![(
+            "ColibriSend",
+            jobj(vec![("text", jstr(text)), ("automatic", jbool(*automatic))]),
+        )]),
         GameCommand::PostSnapshot { summary } => jobj(vec![(
             "PostSnapshot",
             jobj(vec![(
@@ -2040,6 +2151,22 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 subject: req_str(obj, "subject")?,
             })
         }
+        "Colibri" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::Colibri {
+                active: jget(obj, "active").and_then(as_bool)?,
+                connected: jget(obj, "connected").and_then(as_bool)?,
+                channel: req_str(obj, "channel")?,
+                error: jget(obj, "error").and_then(as_opt_str).flatten(),
+            })
+        }
+        "ColibriMessage" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::ColibriMessage {
+                handle: req_str(obj, "handle")?,
+                text: req_str(obj, "text")?,
+            })
+        }
         _ => None,
     }
 }
@@ -2075,6 +2202,10 @@ mod tests {
         login_oauth("someone.example");
         post_text("hello from the game");
         post_chat("a chat line", true);
+        colibri_start();
+        colibri_status();
+        colibri_stop();
+        colibri_send("hello colibri");
         post_snapshot(snapshot_from_player(
             "",
             "minecraft:overworld",
@@ -2141,6 +2272,32 @@ mod tests {
                 assert!(automatic);
             }
             other => panic!("expected PostChat, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::ColibriSend { text, automatic }) => {
+                assert_eq!(text, "a chat line");
+                assert!(automatic);
+            }
+            other => panic!("expected automatic ColibriSend, got {:?}", other),
+        }
+        assert!(matches!(
+            command_rx.recv_timeout(std::time::Duration::from_secs(5)),
+            Ok(GameCommand::ColibriStart)
+        ));
+        assert!(matches!(
+            command_rx.recv_timeout(std::time::Duration::from_secs(5)),
+            Ok(GameCommand::ColibriStatus)
+        ));
+        assert!(matches!(
+            command_rx.recv_timeout(std::time::Duration::from_secs(5)),
+            Ok(GameCommand::ColibriStop)
+        ));
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::ColibriSend { text, automatic }) => {
+                assert_eq!(text, "hello colibri");
+                assert!(!automatic);
+            }
+            other => panic!("expected explicit ColibriSend, got {:?}", other),
         }
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::PostSnapshot { summary }) => {
@@ -2649,6 +2806,24 @@ mod tests {
             }),
             "atmospheric: server account @server.test logged in"
         );
+        assert_eq!(
+            status_text(&ModEvent::Colibri {
+                active: false,
+                connected: false,
+                channel: String::new(),
+                error: None,
+            }),
+            "atmospheric: Colibri bridge off"
+        );
+        assert_eq!(
+            status_text(&ModEvent::Colibri {
+                active: true,
+                connected: true,
+                channel: "at://c".into(),
+                error: None,
+            }),
+            "atmospheric: Colibri connected to at://c"
+        );
     }
 
     #[test]
@@ -2705,6 +2880,25 @@ mod tests {
                 automatic: true,
             }),
             r#"{"PostChat":{"message":"m","automatic":true}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::ColibriStart),
+            r#""ColibriStart""#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::ColibriStop),
+            r#""ColibriStop""#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::ColibriStatus),
+            r#""ColibriStatus""#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::ColibriSend {
+                text: "hi".into(),
+                automatic: false,
+            }),
+            r#"{"ColibriSend":{"text":"hi","automatic":false}}"#
         );
         // The flat game-side x/y/z map onto the nested `position` object.
         assert_eq!(
@@ -2894,6 +3088,24 @@ mod tests {
             decode_event(r#"{"Posted":{"uri":"at://u"}}"#),
             Some(ModEvent::Posted {
                 uri: "at://u".into()
+            })
+        );
+        assert_eq!(
+            decode_event(
+                r#"{"Colibri":{"active":true,"connected":false,"channel":"at://c","error":null}}"#
+            ),
+            Some(ModEvent::Colibri {
+                active: true,
+                connected: false,
+                channel: "at://c".into(),
+                error: None,
+            })
+        );
+        assert_eq!(
+            decode_event(r#"{"ColibriMessage":{"handle":"a.test","text":"hi"}}"#),
+            Some(ModEvent::ColibriMessage {
+                handle: "a.test".into(),
+                text: "hi".into(),
             })
         );
         assert_eq!(

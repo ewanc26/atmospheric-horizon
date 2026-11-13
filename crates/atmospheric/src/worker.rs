@@ -8,6 +8,7 @@
 
 use crate::{
     Command, Config, Event, actions, chats,
+    colibri::{self, ChannelRef, StreamEvent},
     error::AtmosphericError,
     graph, interactions,
     notifications::{self, SeenCursor},
@@ -23,7 +24,7 @@ use crate::{
 };
 use ed25519_dalek::VerifyingKey;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::mpsc::{Receiver, Sender},
     time::Duration,
@@ -123,6 +124,8 @@ pub fn spawn(
                     OAuthTarget,
                     crate::error::Result<oauth::OAuthLogin>,
                 )>();
+                let (colibri_tx, mut colibri_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
                 let bridge = std::thread::Builder::new()
                     .name("atmospheric-commands".into())
                     .spawn(move || {
@@ -139,7 +142,7 @@ pub fn spawn(
                     return;
                 }
 
-                let mut worker = Worker::new(options, events, oauth_tx);
+                let mut worker = Worker::new(options, events, oauth_tx, colibri_tx);
                 worker.emit(Event::Session(SessionState::LoggedOut));
                 // Resume persisted player and server sessions (refresh
                 // tokens) if there are any.
@@ -195,6 +198,11 @@ pub fn spawn(
                                     ),
                                 },
                                 None => {}
+                            }
+                        }
+                        update = colibri_rx.recv() => {
+                            if let Some(update) = update {
+                                worker.handle_colibri_update(update);
                             }
                         }
                         _ = poll.tick() => {
@@ -266,6 +274,13 @@ struct Worker {
     oauth_tx:
         tokio::sync::mpsc::UnboundedSender<(OAuthTarget, crate::error::Result<oauth::OAuthLogin>)>,
     events: Sender<Event>,
+    /// The socket loop reports connection and message events here.
+    colibri_tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+    colibri_channel: Option<ChannelRef>,
+    colibri_connected: bool,
+    colibri_task: Option<tokio::task::JoinHandle<()>>,
+    /// AT-URIs this worker wrote, so the stream echo does not repeat them.
+    colibri_sent: VecDeque<String>,
 }
 
 impl Worker {
@@ -276,6 +291,7 @@ impl Worker {
             OAuthTarget,
             crate::error::Result<oauth::OAuthLogin>,
         )>,
+        colibri_tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
     ) -> Self {
         // The seen-cursor persists across restarts, so old notifications are
         // not re-shown; a missing file just means "everything is new".
@@ -325,6 +341,11 @@ impl Worker {
             launch_browser: options.launch_browser,
             oauth_tx,
             events,
+            colibri_tx,
+            colibri_channel: None,
+            colibri_connected: false,
+            colibri_task: None,
+            colibri_sent: VecDeque::new(),
         }
     }
 
@@ -373,6 +394,10 @@ impl Worker {
             Command::LoginServerOAuth { handle } => self.start_server_login_oauth(handle),
             Command::ServerAccountStatus => self.emit_server_account_status(),
             Command::LogoutServerAccount => self.logout_server_account(),
+            Command::ColibriStart => self.start_colibri().await,
+            Command::ColibriStop => self.stop_colibri(true),
+            Command::ColibriStatus => self.emit_colibri(None),
+            Command::ColibriSend { text, automatic } => self.send_colibri(&text, automatic).await,
             Command::PostText { text } => {
                 self.ensure_oauth_fresh().await;
                 let result = match (&self.agent, &self.did) {
@@ -1482,11 +1507,20 @@ impl Worker {
             }
         }
         // The client_id comes from the settings file when set (hosted client
-        // metadata URL); otherwise the loopback default.
-        let client_id = self
-            .load_config()
-            .map(|config| config.oauth_client_id(oauth::DEFAULT_SCOPE))
-            .unwrap_or_else(|_| oauth::client_id(oauth::DEFAULT_SCOPE));
+        // metadata URL); otherwise the loopback default. The scope includes
+        // the Colibri grants when the bridge is enabled, because otherwise the
+        // PDS refuses to mint the AppView service-auth token.
+        let config = self.load_config().ok();
+        let scope = config
+            .as_ref()
+            .map(|config| {
+                oauth::scope_for_colibri(config.colibri_bridge_enabled, &config.colibri_appview_did)
+            })
+            .unwrap_or_else(|| oauth::DEFAULT_SCOPE.into());
+        let client_id = config
+            .as_ref()
+            .map(|config| config.oauth_client_id(&scope))
+            .unwrap_or_else(|| oauth::client_id(&scope));
         let http = self.http.clone();
         let events = self.events.clone();
         let oauth_tx = self.oauth_tx.clone();
@@ -1498,7 +1532,7 @@ impl Worker {
                 resolver: &resolver,
                 handle: &handle,
                 client_id: &client_id,
-                scope: oauth::DEFAULT_SCOPE,
+                scope: &scope,
                 redirect_timeout: oauth::REDIRECT_WAIT,
                 launch_browser,
                 events: &events,
@@ -1613,6 +1647,7 @@ impl Worker {
                     ));
                 }
                 self.emit_server_account(SessionState::LoggedIn { did });
+                self.maybe_start_colibri().await;
             }
             Err(error) => self.emit_server_account(SessionState::Failed {
                 message: error.to_string(),
@@ -1640,6 +1675,7 @@ impl Worker {
 
     /// Drop the server-account session and delete its persisted refresh token.
     fn logout_server_account(&mut self) {
+        self.stop_colibri(true);
         self.server_agent = None;
         self.server_did = None;
         self.server_handle = None;
@@ -1852,6 +1888,7 @@ impl Worker {
                     ));
                 }
                 self.emit_server_account(SessionState::LoggedIn { did });
+                self.maybe_start_colibri().await;
             }
             Err(error) => {
                 self.server_stored_session = None;
@@ -1861,6 +1898,172 @@ impl Worker {
                     ),
                 });
             }
+        }
+    }
+
+    /// Start the bridge when the settings file asks for it and the server
+    /// account is available. Called after a login or a resumed session.
+    async fn maybe_start_colibri(&mut self) {
+        if self.colibri_channel.is_some() {
+            return;
+        }
+        let Ok(config) = self.load_config() else {
+            return;
+        };
+        if !config.colibri_bridge_enabled || config.colibri_channel_uri.trim().is_empty() {
+            return;
+        }
+        self.start_colibri().await;
+    }
+
+    /// Arm the event stream. The server account mints the service-auth token;
+    /// player messages are written separately by [`Self::send_colibri`].
+    async fn start_colibri(&mut self) {
+        let config = match self.load_config() {
+            Ok(config) => config,
+            Err(error) => {
+                self.fail(format!("could not read the settings file: {error}"));
+                return;
+            }
+        };
+        let Some(channel) = ChannelRef::parse(&config.colibri_channel_uri) else {
+            self.fail(format!(
+                "Colibri channel is neither an AT-URI nor a Colibri link: '{}'",
+                config.colibri_channel_uri
+            ));
+            return;
+        };
+        if self.server_did.is_none() {
+            self.fail(
+                "log in the server account first: /atmospheric server-account login <handle>",
+            );
+            return;
+        }
+        self.ensure_server_oauth_fresh().await;
+        let Some(agent) = self.server_agent.as_ref() else {
+            self.fail("the server account is not logged in");
+            return;
+        };
+        let aud = colibri::appview_service_ref(&config.colibri_appview_did);
+        let token = match colibri::service_auth(agent, &aud, colibri::SUBSCRIBE_EVENTS_LXM).await {
+            Ok(token) => token,
+            Err(error) => {
+                self.fail(format!("could not mint the Colibri stream token: {error}"));
+                return;
+            }
+        };
+        self.stop_colibri(false);
+        self.colibri_channel = Some(channel);
+        self.colibri_connected = false;
+        self.colibri_sent.clear();
+        let tx = self.colibri_tx.clone();
+        let appview = config.colibri_appview_url.clone();
+        self.colibri_task = Some(tokio::spawn(async move {
+            colibri::run_stream(appview, token, tx).await;
+        }));
+        self.emit_colibri(None);
+    }
+
+    /// Disarm the bridge and, unless called from a replace, report it.
+    fn stop_colibri(&mut self, announce: bool) {
+        if let Some(task) = self.colibri_task.take() {
+            task.abort();
+        }
+        self.colibri_channel = None;
+        self.colibri_connected = false;
+        self.colibri_sent.clear();
+        if announce {
+            self.emit_colibri(None);
+        }
+    }
+
+    fn emit_colibri(&self, error: Option<String>) {
+        self.emit(Event::Colibri {
+            active: self.colibri_channel.is_some(),
+            connected: self.colibri_connected,
+            channel: self
+                .colibri_channel
+                .as_ref()
+                .map(|channel| channel.channel_uri.clone())
+                .unwrap_or_default(),
+            error,
+        });
+    }
+
+    /// Handle one update from the socket loop. Only messages in the bridged
+    /// channel are surfaced, and the worker's own writes are filtered out.
+    fn handle_colibri_update(&mut self, update: StreamEvent) {
+        match update {
+            StreamEvent::Connected => {
+                self.colibri_connected = true;
+                self.emit_colibri(None);
+            }
+            StreamEvent::Disconnected(error) => {
+                self.colibri_connected = false;
+                self.emit_colibri(Some(error));
+            }
+            StreamEvent::Message(message) => {
+                let Some(channel) = &self.colibri_channel else {
+                    return;
+                };
+                if message.channel != channel.channel_uri
+                    || self.colibri_sent.iter().any(|uri| uri == &message.uri)
+                {
+                    return;
+                }
+                self.emit(Event::ColibriMessage {
+                    handle: message.author_handle,
+                    text: message.text,
+                });
+            }
+        }
+    }
+
+    /// Publish one chat line as the player account. The explicit command
+    /// reports failures; the chat hook mirror stays quiet when the bridge is
+    /// off so ordinary chat never produces an error.
+    async fn send_colibri(&mut self, text: &str, automatic: bool) {
+        let Some(channel) = self.colibri_channel.clone() else {
+            if !automatic {
+                self.fail("the Colibri bridge is not running");
+            }
+            return;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            if !automatic {
+                self.fail("the Colibri message is empty");
+            }
+            return;
+        }
+        self.ensure_oauth_fresh().await;
+        let rkey = self.tid.next_tid();
+        let record = colibri::message_record(text, &channel.channel_uri, &colibri::now());
+        let result = match (&self.agent, &self.did) {
+            (Some(agent), Some(did)) => {
+                actions::create_record_json(
+                    agent,
+                    did,
+                    colibri::MESSAGE_COLLECTION,
+                    Some(&rkey),
+                    record,
+                )
+                .await
+            }
+            _ => Err(AtmosphericError::NotLoggedIn),
+        };
+        match result {
+            Ok(uri) => {
+                self.colibri_sent.push_back(uri.clone());
+                while self.colibri_sent.len() > 256 {
+                    self.colibri_sent.pop_front();
+                }
+                if !automatic {
+                    self.emit(Event::Posted { uri });
+                }
+            }
+            Err(error) if !automatic => self.fail(error.to_string()),
+            Err(_) => {}
         }
     }
 
@@ -1937,6 +2140,10 @@ mod tests {
             game_version: "26.3".into(),
             appview_url: "https://public.api.bsky.app".into(),
             trusted_server_keys: Vec::new(),
+            colibri_bridge_enabled: false,
+            colibri_channel_uri: String::new(),
+            colibri_appview_url: "https://api.colibri.social".into(),
+            colibri_appview_did: "did:web:api.colibri.social".into(),
         }
     }
 
@@ -2757,6 +2964,40 @@ mod tests {
     }
 
     #[test]
+    fn colibri_start_requires_the_server_account() {
+        let dir = temp_dir("colibri-no-server");
+        let mut config = test_config("https://pds.example".into());
+        config.colibri_channel_uri = "at://did:plc:abc/social.colibri.channel/3jtest".into();
+        write_config(&dir, &config);
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::ColibriStart).unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => assert!(message.contains("server account")),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn colibri_explicit_send_without_a_bridge_fails_cleanly() {
+        let dir = temp_dir("colibri-not-running");
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx
+            .send(Command::ColibriSend {
+                text: "hello".into(),
+                automatic: false,
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => assert!(message.contains("not running")),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
     fn save_config_persists_the_settings_file() {
         let dir = temp_dir("save-config");
         let (command_tx, _event_rx, handle) = spawn_worker(dir.clone());
@@ -2783,10 +3024,14 @@ mod tests {
             game_version: "26.3".into(),
             appview_url: "https://public.api.bsky.app".into(),
             trusted_server_keys: Vec::new(),
+            colibri_bridge_enabled: false,
+            colibri_channel_uri: String::new(),
+            colibri_appview_url: "https://api.colibri.social".into(),
+            colibri_appview_did: "did:web:api.colibri.social".into(),
         };
         command_tx
             .send(Command::SaveConfig {
-                config: config.clone(),
+                config: Box::new(config.clone()),
             })
             .unwrap();
         command_tx.send(Command::Shutdown).unwrap();

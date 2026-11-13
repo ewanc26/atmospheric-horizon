@@ -140,13 +140,13 @@ fn save_config_writes_the_settings_file() {
     let _handshake = worker.event();
 
     worker.send(&atmospheric::Command::SaveConfig {
-        config: atmospheric::Config {
+        config: Box::new(atmospheric::Config {
             pds_url: "https://pds.example".into(),
             identifier: "alice.example".into(),
             app_password: "aaaa-bbbb-cccc-dddd".into(),
             post_chat_messages: true,
             ..atmospheric::Config::default()
-        },
+        }),
     });
     // SaveConfig is silent on success; poll for the file.
     let config_path = dir.join("config.json");

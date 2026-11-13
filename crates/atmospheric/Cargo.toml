@@ -26,6 +26,12 @@ reqwest = { version = "0.12", default-features = false, features = ["gzip", "rus
 # Async runtime: only the worker thread ever builds one.
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 
+# Colibri event stream (M26): a client WebSocket with rustls, matching the
+# reqwest TLS stack. `futures-util` supplies the Sink/Stream combinators the
+# tungstenite socket is driven with.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
 # Settings and session-file serialisation.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
