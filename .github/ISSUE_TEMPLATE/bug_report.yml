@@ -1,0 +1,46 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened? What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error output
+      description: The HUD status line, the worker's stderr, or the game log.
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: The release tag, or the commit you built from.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Commands / HUD
+        - Worker / sidecar bridge
+        - OAuth / login
+        - Posts and interactions
+        - atpcraft records (chat, snapshot, skin, server profile)
+        - Public reads (lists, labels, presence, social graph)
+        - Build / release
+        - Documentation
+        - Other
+    validations:
+      required: true
