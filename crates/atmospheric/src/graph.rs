@@ -1,14 +1,124 @@
-//! Reading public Bluesky social graphs (`app.bsky.graph.getFollows`,
-//! `getFollowers`, `getBlocks`, `getMutes`) — the client-side counterpart to
-//! the join-gate list reads, all against the public AppView.
+//! Reading and writing public Bluesky social graphs (`app.bsky.graph.*`) —
+//! the client-side counterpart to the join-gate list reads.
 //!
-//! Every read is unauthenticated and works logged out. A subject is a DID or
-//! a handle; handles resolve through the same directory service OAuth login
-//! uses. Each relation pages with `limit=100` until the cursor is
+//! Reads go against the public AppView and work logged out. A subject is a
+//! DID or a handle; handles resolve through the same directory service OAuth
+//! login uses. Each relation pages with `limit=100` until the cursor is
 //! absent/blank, capped at [`MAX_PAGES`] pages. Profile views are reduced to
 //! the DID, handle and display name the HUD needs.
+//!
+//! Writes (M23) need a session: follows and blocks are records in your own
+//! repo, while mutes are private AppView state. Undoing a follow or block
+//! first finds the matching record in your public repo, then deletes it by
+//! rkey.
 
 use crate::error::{AtmosphericError, Result};
+
+/// Follow records in your repo (`app.bsky.graph.follow`).
+pub const FOLLOW_COLLECTION: &str = "app.bsky.graph.follow";
+/// Block records in your repo (`app.bsky.graph.block`).
+pub const BLOCK_COLLECTION: &str = "app.bsky.graph.block";
+
+/// A write action on the social graph (M23).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphAction {
+    Follow,
+    Unfollow,
+    Block,
+    Unblock,
+    Mute,
+    Unmute,
+}
+
+impl GraphAction {
+    /// Parse the command word.
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "follow" => Some(Self::Follow),
+            "unfollow" => Some(Self::Unfollow),
+            "block" => Some(Self::Block),
+            "unblock" => Some(Self::Unblock),
+            "mute" => Some(Self::Mute),
+            "unmute" => Some(Self::Unmute),
+            _ => None,
+        }
+    }
+
+    /// The command word, also used in events.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Follow => "follow",
+            Self::Unfollow => "unfollow",
+            Self::Block => "block",
+            Self::Unblock => "unblock",
+            Self::Mute => "mute",
+            Self::Unmute => "unmute",
+        }
+    }
+
+    /// The past tense for HUD status lines.
+    pub fn past_tense(self) -> &'static str {
+        match self {
+            Self::Follow => "followed",
+            Self::Unfollow => "unfollowed",
+            Self::Block => "blocked",
+            Self::Unblock => "unblocked",
+            Self::Mute => "muted",
+            Self::Unmute => "unmuted",
+        }
+    }
+
+    /// The repo collection this action writes, if it is record-based (mutes
+    /// are AppView state and have no collection).
+    pub fn collection(self) -> Option<&'static str> {
+        match self {
+            Self::Follow | Self::Unfollow => Some(FOLLOW_COLLECTION),
+            Self::Block | Self::Unblock => Some(BLOCK_COLLECTION),
+            Self::Mute | Self::Unmute => None,
+        }
+    }
+
+    /// Whether this action removes an existing repo record.
+    pub fn is_removal(self) -> bool {
+        matches!(self, Self::Unfollow | Self::Unblock)
+    }
+}
+
+/// Build the `app.bsky.graph.follow` record body for `subject` (a DID).
+pub fn follow_record(subject: &str) -> serde_json::Value {
+    serde_json::json!({
+        "$type": FOLLOW_COLLECTION,
+        "subject": subject,
+        "createdAt": record_datetime(),
+    })
+}
+
+/// Build the `app.bsky.graph.block` record body for `subject` (a DID).
+pub fn block_record(subject: &str) -> serde_json::Value {
+    serde_json::json!({
+        "$type": BLOCK_COLLECTION,
+        "subject": subject,
+        "createdAt": record_datetime(),
+    })
+}
+
+/// The record timestamp in the API's RFC 3339 form.
+fn record_datetime() -> String {
+    serde_json::to_value(atrium_api::types::string::Datetime::now())
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+/// The rkeys of the records in `records` whose `subject` is exactly `subject`.
+/// Used to undo a follow or block: list your own repo, match, delete.
+pub fn rkeys_for_subject(records: &[(String, serde_json::Value)], subject: &str) -> Vec<String> {
+    records
+        .iter()
+        .filter(|(_, value)| value["subject"].as_str() == Some(subject))
+        .map(|(rkey, _)| rkey.clone())
+        .collect()
+}
 
 /// `app.bsky.graph.get*` page size (the lexicon caps at 100).
 pub const PAGE_LIMIT: u32 = 100;
@@ -158,6 +268,72 @@ pub async fn fetch_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_actions_round_trip() {
+        for (key, past, collection, removal) in [
+            ("follow", "followed", Some(FOLLOW_COLLECTION), false),
+            ("unfollow", "unfollowed", Some(FOLLOW_COLLECTION), true),
+            ("block", "blocked", Some(BLOCK_COLLECTION), false),
+            ("unblock", "unblocked", Some(BLOCK_COLLECTION), true),
+            ("mute", "muted", None, false),
+            ("unmute", "unmuted", None, false),
+        ] {
+            let action = GraphAction::from_key(key).unwrap();
+            assert_eq!(action.key(), key);
+            assert_eq!(action.past_tense(), past);
+            assert_eq!(action.collection(), collection);
+            assert_eq!(action.is_removal(), removal);
+        }
+        assert_eq!(GraphAction::from_key("follows"), None);
+        assert_eq!(GraphAction::from_key(""), None);
+    }
+
+    #[test]
+    fn graph_write_records_carry_the_subject_and_type() {
+        for (action, collection) in [
+            (GraphAction::Follow, FOLLOW_COLLECTION),
+            (GraphAction::Block, BLOCK_COLLECTION),
+        ] {
+            let record = match action {
+                GraphAction::Follow => follow_record("did:plc:target"),
+                GraphAction::Block => block_record("did:plc:target"),
+                _ => unreachable!(),
+            };
+            assert_eq!(record["$type"], collection);
+            assert_eq!(record["subject"], "did:plc:target");
+            assert!(
+                record["createdAt"]
+                    .as_str()
+                    .is_some_and(|s| s.ends_with('Z')),
+                "a datetime: {record}"
+            );
+        }
+    }
+
+    #[test]
+    fn rkeys_for_subject_matches_only_the_target() {
+        let records = vec![
+            (
+                "a".to_string(),
+                serde_json::json!({"subject": "did:plc:target"}),
+            ),
+            (
+                "b".to_string(),
+                serde_json::json!({"subject": "did:plc:other"}),
+            ),
+            (
+                "c".to_string(),
+                serde_json::json!({"subject": "did:plc:target"}),
+            ),
+            ("d".to_string(), serde_json::json!({})),
+        ];
+        assert_eq!(
+            rkeys_for_subject(&records, "did:plc:target"),
+            vec!["a".to_string(), "c".to_string()]
+        );
+        assert!(rkeys_for_subject(&records, "did:plc:none").is_empty());
+    }
 
     #[test]
     fn graph_kinds_round_trip_and_route_to_endpoints() {
