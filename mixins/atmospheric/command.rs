@@ -11,7 +11,8 @@
 // <did|handle> reads a player's latest verified snapshot record (M13);
 // /atmospheric skin-of <did|handle> reads their verified skin record and
 // downloads the blobs (M14); /atmospheric chat-of <did|handle> reads their
-// mirrored chat history (M16).
+// mirrored chat history (M16); /atmospheric server-of <did|handle> reads their
+// server profile record and verifies its signing key (M19).
 fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut bool) {
     use crate::game::atmospheric as m;
     if !game.native_on(m::ID) {
@@ -21,7 +22,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-of <did|handle>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -159,6 +160,15 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
         } else {
             m::fetch_player_skin(subject);
             game.native_chat("atmospheric: reading the player's skin record…");
+        }
+    } else if rest == "server-of" || rest.starts_with("server-of ") {
+        let subject = rest.strip_prefix("server-of").unwrap_or("").trim();
+        *ran = true;
+        if subject.is_empty() {
+            game.native_chat("atmospheric: /atmospheric server-of <did | handle>");
+        } else {
+            m::fetch_server_profile(subject);
+            game.native_chat("atmospheric: reading the server profile record…");
         }
     } else if rest == "chat-of" || rest.starts_with("chat-of ") {
         let subject = rest.strip_prefix("chat-of").unwrap_or("").trim();

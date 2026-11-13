@@ -123,6 +123,10 @@ pub enum GameCommand {
     /// skin/cape blobs into the mod's storage folder (M14, atpcraft skin-sync
     /// read side). Works logged out.
     FetchPlayerSkin { subject: String },
+    /// Read an account's `at.atpcraft.server.profile` record from their own
+    /// PDS and verify its signing key against trusted keys (M19, read side
+    /// of M10). Works logged out.
+    FetchServerProfile { subject: String },
     /// Post the player's death message (only when `post_death_messages` is on).
     PostDeathMessage { text: String },
     /// Log out: drop the session and delete the persisted refresh token.
@@ -278,6 +282,41 @@ pub struct SkinDigest {
     pub cape: Option<BlobDigest>,
 }
 
+/// The trust verdict on a server profile's `signingKey` block (M19). Plain
+/// data: the worker side has the same enum in the `atmospheric` crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerVerdict {
+    /// `key_id` is a key you trust (own key or a `trusted_server_keys` entry)
+    /// and its published public key matches.
+    Trusted { key_id: String },
+    /// `key_id` is not in the trusted set.
+    Unknown,
+    /// `key_id` is trusted but its `publicKey` does not match the key you have.
+    KeyMismatch { key_id: String },
+    /// The record is not a structurally valid server profile.
+    Malformed,
+}
+
+/// What the HUD shows for a server profile (M19). Plain data: the worker side
+/// has the same struct in the `atmospheric` crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerDigest {
+    pub did: String,
+    pub rkey: String,
+    pub at_uri: String,
+    pub name: String,
+    pub description: String,
+    pub address: String,
+    pub minecraft_version: String,
+    pub atpcraft_version: String,
+    pub capabilities: Vec<String>,
+    pub operator_handle: String,
+    pub created_at: Option<String>,
+    pub updated_at: String,
+    pub signing_key_id: String,
+    pub verdict: ServerVerdict,
+}
+
 /// Events the worker thread reports back to the game side.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,6 +377,16 @@ pub enum ModEvent {
         via: String,
         // Boxed: SkinDigest is one of the event enum's largest variants.
         skin: Box<Option<SkinDigest>>,
+    },
+    /// The latest server profile of an account (M19, the read side of M10):
+    /// the DID (`subject`), the PDS it was read from (`via`), and the digest
+    /// with its signing-key trust verdict (`None` when the repo has no
+    /// server profile).
+    ServerProfile {
+        subject: String,
+        via: String,
+        // Boxed: ServerDigest is one of the event enum's largest variants.
+        profile: Box<Option<ServerDigest>>,
     },
 }
 
@@ -455,6 +504,35 @@ pub fn status_text(event: &ModEvent) -> String {
                     d.model,
                     blob(&d.skin),
                     blob(&d.cape)
+                )
+            }
+        },
+        ModEvent::ServerProfile {
+            subject, profile, ..
+        } => match &**profile {
+            None => format!("atmospheric: no server profile for {subject}"),
+            Some(d) => {
+                let verdict = match &d.verdict {
+                    ServerVerdict::Trusted { key_id } => format!("key {key_id} trusted"),
+                    ServerVerdict::Unknown => {
+                        if d.signing_key_id.is_empty() {
+                            "key unknown".to_string()
+                        } else {
+                            format!("key {} unknown", d.signing_key_id)
+                        }
+                    }
+                    ServerVerdict::KeyMismatch { key_id } => format!("key {key_id} mismatched"),
+                    ServerVerdict::Malformed => "malformed record".into(),
+                };
+                let n_caps = d.capabilities.len();
+                let caps = if n_caps == 1 {
+                    "1 capability".to_string()
+                } else {
+                    format!("{n_caps} capabilities")
+                };
+                format!(
+                    "atmospheric: {} — MC {}, {caps}, {verdict}",
+                    d.name, d.minecraft_version
                 )
             }
         },
@@ -735,6 +813,15 @@ pub fn fetch_player(subject: &str) {
 /// DID or a handle.
 pub fn fetch_player_skin(subject: &str) {
     send(GameCommand::FetchPlayerSkin {
+        subject: subject.into(),
+    });
+}
+
+/// Ask the worker to read an account's latest server profile record and verify
+/// its published signing key (M19, read side of M10). `subject` is a DID or a
+/// handle.
+pub fn fetch_server_profile(subject: &str) {
+    send(GameCommand::FetchServerProfile {
         subject: subject.into(),
     });
 }
@@ -1313,6 +1400,10 @@ fn encode_command(command: &GameCommand) -> String {
             "FetchPlayerSkin",
             jobj(vec![("subject", jstr(subject))]),
         )]),
+        GameCommand::FetchServerProfile { subject } => jobj(vec![(
+            "FetchServerProfile",
+            jobj(vec![("subject", jstr(subject))]),
+        )]),
         GameCommand::PostDeathMessage { text } => {
             jobj(vec![("PostDeathMessage", jobj(vec![("text", jstr(text))]))])
         }
@@ -1452,6 +1543,56 @@ fn decode_skin_digest(value: &Json) -> Option<SkinDigest> {
     })
 }
 
+fn decode_server_verdict(value: &Json) -> Option<ServerVerdict> {
+    match value {
+        Json::Str(s) => match s.as_str() {
+            "Unknown" => Some(ServerVerdict::Unknown),
+            "Malformed" => Some(ServerVerdict::Malformed),
+            _ => None,
+        },
+        Json::Obj(pairs) if pairs.len() == 1 => match pairs[0].0.as_str() {
+            "Trusted" => {
+                let obj = as_obj(&pairs[0].1)?;
+                Some(ServerVerdict::Trusted {
+                    key_id: req_str(obj, "key_id")?,
+                })
+            }
+            "KeyMismatch" => {
+                let obj = as_obj(&pairs[0].1)?;
+                Some(ServerVerdict::KeyMismatch {
+                    key_id: req_str(obj, "key_id")?,
+                })
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn decode_server_digest(value: &Json) -> Option<ServerDigest> {
+    let obj = as_obj(value)?;
+    let capabilities = as_arr(jget(obj, "capabilities")?)?
+        .iter()
+        .map(|c| as_str(c).map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    Some(ServerDigest {
+        did: req_str(obj, "did")?,
+        rkey: req_str(obj, "rkey")?,
+        at_uri: req_str(obj, "at_uri")?,
+        name: req_str(obj, "name")?,
+        description: req_str(obj, "description")?,
+        address: req_str(obj, "address")?,
+        minecraft_version: req_str(obj, "minecraft_version")?,
+        atpcraft_version: req_str(obj, "atpcraft_version")?,
+        capabilities,
+        operator_handle: req_str(obj, "operator_handle")?,
+        created_at: jget(obj, "created_at").and_then(as_opt_str)?,
+        updated_at: req_str(obj, "updated_at")?,
+        signing_key_id: req_str(obj, "signing_key_id")?,
+        verdict: decode_server_verdict(jget(obj, "verdict")?)?,
+    })
+}
+
 /// Decode one JSON line from the sidecar worker into a game-side event.
 /// Returns `None` on any shape mismatch (the caller reports a Failed event).
 fn decode_event(line: &str) -> Option<ModEvent> {
@@ -1547,6 +1688,18 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 skin: Box::new(skin),
             })
         }
+        "ServerProfile" => {
+            let obj = payload_obj()?;
+            let profile = match jget(obj, "profile")? {
+                Json::Null => None,
+                other => Some(decode_server_digest(other)?),
+            };
+            Some(ModEvent::ServerProfile {
+                subject: req_str(obj, "subject")?,
+                via: req_str(obj, "via")?,
+                profile: Box::new(profile),
+            })
+        }
         _ => None,
     }
 }
@@ -1595,6 +1748,7 @@ mod tests {
         fetch_labeler_labels("did:plc:labeler", None);
         fetch_player("someone.example");
         fetch_player_skin("someone.example");
+        fetch_server_profile("someone.example");
         check_gate(
             "at://did:plc:example/app.bsky.graph.list/3abc",
             "did:plc:example",
@@ -1674,6 +1828,12 @@ mod tests {
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::FetchPlayerSkin { subject }) => assert_eq!(subject, "someone.example"),
             other => panic!("expected FetchPlayerSkin, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::FetchServerProfile { subject }) => {
+                assert_eq!(subject, "someone.example")
+            }
+            other => panic!("expected FetchServerProfile, got {:?}", other),
         }
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::CheckGate { list, subject }) => {
@@ -2115,6 +2275,12 @@ mod tests {
             r#"{"FetchPlayerSkin":{"subject":"did:plc:z"}}"#
         );
         assert_eq!(
+            encode_command(&GameCommand::FetchServerProfile {
+                subject: "did:plc:z".into()
+            }),
+            r#"{"FetchServerProfile":{"subject":"did:plc:z"}}"#
+        );
+        assert_eq!(
             encode_command(&GameCommand::PostDeathMessage { text: "t".into() }),
             r#"{"PostDeathMessage":{"text":"t"}}"#
         );
@@ -2300,6 +2466,39 @@ mod tests {
                 })),
             })
         );
+        assert_eq!(
+            decode_event(r#"{"ServerProfile":{"subject":"s","via":"v","profile":null}}"#),
+            Some(ModEvent::ServerProfile {
+                subject: "s".into(),
+                via: "v".into(),
+                profile: Box::new(None),
+            })
+        );
+        assert_eq!(
+            decode_event(
+                r#"{"ServerProfile":{"subject":"s","via":"v","profile":{"did":"d","rkey":"r","at_uri":"u","name":"n","description":"desc","address":"addr","minecraft_version":"mc","atpcraft_version":"atp","capabilities":["cap"],"operator_handle":"op","created_at":"c","updated_at":"up","signing_key_id":"k","verdict":{"Trusted":{"key_id":"k"}}}}}"#
+            ),
+            Some(ModEvent::ServerProfile {
+                subject: "s".into(),
+                via: "v".into(),
+                profile: Box::new(Some(ServerDigest {
+                    did: "d".into(),
+                    rkey: "r".into(),
+                    at_uri: "u".into(),
+                    name: "n".into(),
+                    description: "desc".into(),
+                    address: "addr".into(),
+                    minecraft_version: "mc".into(),
+                    atpcraft_version: "atp".into(),
+                    capabilities: vec!["cap".into()],
+                    operator_handle: "op".into(),
+                    created_at: Some("c".into()),
+                    updated_at: "up".into(),
+                    signing_key_id: "k".into(),
+                    verdict: ServerVerdict::Trusted { key_id: "k".into() },
+                })),
+            })
+        );
         // Malformed lines decode to None (the caller reports a Failed event).
         for bad in [
             "",
@@ -2311,6 +2510,7 @@ mod tests {
             r#"{"GateDecision":{"list":"l","subject":"s","allowed":"yes"}}"#,
             r#"{"Session":"Maybe"}"#,
             r#"{"PlayerSnapshot":{"subject":"s","via":"v","snapshot":{"did":"d"}}}"#,
+            r#"{"ServerProfile":{"subject":"s","via":"v","profile":{"did":"d"}}}"#,
             "{\"a\":1} trailing",
         ] {
             assert_eq!(decode_event(bad), None, "line: {bad:?}");

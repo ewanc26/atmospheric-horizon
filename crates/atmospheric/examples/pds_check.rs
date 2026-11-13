@@ -25,6 +25,7 @@
 //! ATMOSPHERIC_GATE="at://…/app.bsky.graph.list/<rkey> | URL" \  # optional, M15
 //! ATMOSPHERIC_GATE_SUBJECT="did:plc:… | handle" \               # optional, M15 (default: own DID)
 //! ATMOSPHERIC_FETCH_CHAT="did:plc:… | handle" \                 # optional, M16
+//! ATMOSPHERIC_FETCH_SERVER="did:plc:… | handle" \               # optional, M19
 //! cargo run -p atmospheric --example pds_check
 //! ```
 //!
@@ -523,6 +524,40 @@ fn main() {
                         }
                         Event::Failed { message } => {
                             eprintln!("chat fetch failed: {message}");
+                            exit(1);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(error) => {
+                    eprintln!("no event from the worker: {error}");
+                    exit(1);
+                }
+            }
+        }
+    }
+
+    // Optionally read an account's server profile (M19, read side of M10):
+    // unauthenticated listRecords on their own PDS, preferred "self" rkey,
+    // and verify the signingKey against trusted keys.
+    if let Some(subject) = env::var("ATMOSPHERIC_FETCH_SERVER")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        command_tx
+            .send(Command::FetchServerProfile { subject })
+            .expect("send FetchServerProfile");
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(event) => {
+                    println!("event: {event:?}");
+                    match event {
+                        Event::ServerProfile { profile, .. } => {
+                            println!("server profile: {profile:?}");
+                            break;
+                        }
+                        Event::Failed { message } => {
+                            eprintln!("server profile fetch failed: {message}");
                             exit(1);
                         }
                         _ => {}
