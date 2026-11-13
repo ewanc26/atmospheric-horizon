@@ -273,11 +273,7 @@ mod tests {
                 summary: records::SnapshotSummary {
                     username: "u".into(),
                     dimension: "overworld".into(),
-                    position: records::Position {
-                        x: 1,
-                        y: 2,
-                        z: 3,
-                    },
+                    position: records::Position { x: 1, y: 2, z: 3 },
                     health: "20".into(),
                     food: 20,
                     xp_level: 0,
