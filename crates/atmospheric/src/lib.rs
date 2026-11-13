@@ -13,6 +13,7 @@ pub mod labels;
 pub mod lists;
 pub mod notifications;
 pub mod oauth;
+pub mod presence;
 pub mod records;
 pub mod session;
 pub mod signing;
