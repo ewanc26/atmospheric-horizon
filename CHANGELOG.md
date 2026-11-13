@@ -18,6 +18,12 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   <did|handle>` pages `app.bsky.graph.getFollows`, `getFollowers`,
   `getBlocks` or `getMutes` on the public AppView and reports the count plus
   the first handles in the HUD. Unauthenticated, so it works logged out.
+- **M21 — interactions (#53).** `/atmospheric reply <at-uri> <text>`,
+  `/atmospheric like <at-uri>` and `/atmospheric repost <at-uri>` read the
+  target post's CID (and thread root) with an unauthenticated
+  `com.atproto.repo.getRecord`, then publish `app.bsky.feed.post` (with
+  `reply` strong refs), `app.bsky.feed.like` or `app.bsky.feed.repost` to your
+  own repo. bsky.app post URLs are accepted too.
 
 ## [0.1.0] — 2026-11-13
 
