@@ -7,8 +7,8 @@ fn atmospheric_death(game: &mut crate::game::Game<'_>, text: &horizon_client::te
     if !game.native_on(m::ID) || !game.native_playing() {
         return;
     }
-    let is_death = text
-        .component()
+    let component = text.component();
+    let is_death = component
         .get("translate")
         .and_then(|value| value.as_str())
         .is_some_and(|key| key.starts_with("death."));
