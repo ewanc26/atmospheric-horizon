@@ -72,6 +72,10 @@ pub enum Command {
     PostChat { message: String, automatic: bool },
     /// Start the Colibri bridge (M26) as the server account.
     ColibriStart,
+    /// Reconnect the Colibri event stream while keeping the bridge active
+    /// (M31). The worker re-mints the service-auth token; membership and
+    /// profile state are unchanged.
+    ColibriReconnect,
     /// Stop the Colibri bridge and drop its stream.
     ColibriStop,
     /// Report whether the bridge is active and connected.
@@ -355,6 +359,10 @@ mod tests {
             })
             .unwrap(),
             r#"{"FetchLabelerLabels":{"labeler":"did:plc:x","subject":null}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::ColibriReconnect).unwrap(),
+            r#""ColibriReconnect""#
         );
         assert_eq!(
             serde_json::to_string(&Command::ColibriHandled {
