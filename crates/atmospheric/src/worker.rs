@@ -15,6 +15,7 @@ use crate::{
     records::{self, SnapshotRecord},
     session::{self, Agent, SessionState, StoredSession},
     signing::{self, SigningKey},
+    skins,
     tid::TidGen,
 };
 use ed25519_dalek::VerifyingKey;
@@ -35,6 +36,8 @@ pub const SIGNING_KEY_FILE: &str = "signing-key.json";
 pub const SNAPSHOT_STATE_FILE: &str = "snapshot-state.json";
 /// The persisted refresh token, same folder (session resume across restarts).
 pub const SESSION_FILE: &str = "session.json";
+/// Where verified skin/cape blobs downloaded by M14 reads are saved.
+pub const SKINS_DIR: &str = "skins";
 
 /// Write a file that holds secrets (app password in `config.json`, the
 /// session/refresh token and DPoP private key in `session.json`, the Ed25519
@@ -421,6 +424,18 @@ impl Worker {
                         subject,
                         via,
                         snapshot: Box::new(snapshot),
+                    }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::FetchPlayerSkin { subject } => {
+                // A public read against the subject's own PDS: works logged
+                // out, no token refresh.
+                match self.fetch_player_skin(&subject).await {
+                    Ok((subject, via, skin)) => self.emit(Event::PlayerSkin {
+                        subject,
+                        via,
+                        skin: Box::new(skin),
                     }),
                     Err(error) => self.fail(error.to_string()),
                 }
@@ -876,6 +891,70 @@ impl Worker {
             .map(|(rkey, value)| presence::digest(&did, &rkey, &value, &keys))
             .transpose()?;
         Ok((did, pds, snapshot))
+    }
+
+    /// Read a player's latest `at.atpcraft.player.skin` record from their own
+    /// PDS, verify the endorsement, and — only when it verifies — download
+    /// the skin/cape blobs into the storage folder (M14, the atpcraft
+    /// skin-sync read side). The listRecords/getBlob calls are
+    /// unauthenticated, so this works logged out.
+    async fn fetch_player_skin(
+        &self,
+        subject: &str,
+    ) -> crate::error::Result<(String, String, Option<skins::SkinDigest>)> {
+        let config = self.load_config().unwrap_or_default();
+        let (did, pds) = presence::resolve_player(&self.http, &self.resolver, subject).await?;
+        let records =
+            presence::list_records(&self.http, &pds, &did, records::SKIN_COLLECTION).await?;
+        let keys = self.verification_keys(&config);
+        let Some((rkey, value)) = skins::latest_skin(&records) else {
+            return Ok((did, pds, None));
+        };
+        let mut digest = skins::digest(&did, &rkey, &value, &keys)?;
+        // Only verified records have their blobs persisted — an unverified
+        // record is reported (with its verdict) but nothing is downloaded.
+        if matches!(digest.verdict, records::EndorsementVerdict::Verified { .. }) {
+            for blob in [&mut digest.skin, &mut digest.cape].into_iter().flatten() {
+                self.save_verified_blob(&pds, &did, blob).await?;
+            }
+        }
+        Ok((did, pds, Some(digest)))
+    }
+
+    /// Download one blob and save it under `<storage>/skins/<cid>.png`,
+    /// rejecting non-PNG content and anything over the lexicon's 1 MiB cap
+    /// before writing (the worker owns disk I/O).
+    async fn save_verified_blob(
+        &self,
+        pds: &str,
+        did: &str,
+        blob: &mut skins::BlobDigest,
+    ) -> crate::error::Result<()> {
+        if blob.cid.is_empty() {
+            return Ok(());
+        }
+        let (mime, bytes) = skins::get_blob(&self.http, pds, did, &blob.cid).await?;
+        if crate::actions::image_mime(&bytes) != Some("image/png") {
+            return Err(AtmosphericError::Message(format!(
+                "blob {} is not a PNG (content-type {mime})",
+                blob.cid
+            )));
+        }
+        if bytes.len() > records::MAX_SKIN_BYTES {
+            return Err(AtmosphericError::Message(format!(
+                "blob {} is over the lexicon's 1 MiB cap ({} bytes)",
+                blob.cid,
+                bytes.len()
+            )));
+        }
+        blob.mime_type = mime;
+        blob.size = bytes.len() as u64;
+        let dir = self.storage_dir.join(SKINS_DIR);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{}.png", blob.cid));
+        std::fs::write(&path, &bytes)?;
+        blob.path = Some(path.display().to_string());
+        Ok(())
     }
 
     /// The endorsement verification keys for presence reads (M13): the mod's
@@ -1751,6 +1830,37 @@ mod tests {
                 ),
             }
         };
+        // getBlob answers with raw bytes and the blob's content type, not
+        // JSON — the M14 read side downloads blobs through it.
+        if path.starts_with("/xrpc/com.atproto.sync.getBlob") {
+            let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let cid = query
+                .split('&')
+                .find_map(|pair| {
+                    pair.split_once('=')
+                        .filter(|(k, _)| *k == "cid")
+                        .map(|(_, v)| v.to_string())
+                })
+                .unwrap_or_default();
+            if STUB_CIDS.contains(&cid.as_str()) {
+                let png = tiny_png();
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    png.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&png);
+            } else {
+                let body = r#"{"error":"BlobNotFound","message":"no such blob"}"#;
+                let response = format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+            let _ = stream.flush();
+            return;
+        }
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
             payload.len()
@@ -3042,7 +3152,7 @@ mod tests {
                 assert_eq!(d.rkey, key_file.key_id);
                 assert_eq!(
                     d.verdict,
-                    presence::SnapshotVerdict::Verified {
+                    records::EndorsementVerdict::Verified {
                         endorser: key_file.key_id.clone()
                     }
                 );
@@ -3196,7 +3306,7 @@ mod tests {
                 assert_eq!(d.rkey, foreign_id);
                 assert_eq!(
                     d.verdict,
-                    presence::SnapshotVerdict::Verified {
+                    records::EndorsementVerdict::Verified {
                         endorser: foreign_id.clone()
                     }
                 );
@@ -3224,7 +3334,7 @@ mod tests {
         match wait_for(&event_rx, |e| matches!(e, Event::PlayerSnapshot { .. })) {
             Event::PlayerSnapshot { snapshot, .. } => assert_eq!(
                 snapshot.unwrap().verdict,
-                presence::SnapshotVerdict::BadSignature
+                records::EndorsementVerdict::BadSignature
             ),
             other => panic!("expected PlayerSnapshot, got {other:?}"),
         }
@@ -3243,10 +3353,229 @@ mod tests {
             Event::PlayerSnapshot { snapshot, .. } => {
                 let d = snapshot.unwrap();
                 assert_eq!(d.version, 4);
-                assert_eq!(d.verdict, presence::SnapshotVerdict::UnknownEndorser);
+                assert_eq!(d.verdict, records::EndorsementVerdict::UnknownEndorser);
             }
             other => panic!("expected PlayerSnapshot, got {other:?}"),
         }
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn fetch_player_skin_reads_verifies_and_saves_the_blobs() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("fetch-skin");
+        write_config(&dir, &test_config(pds.url.clone()));
+        let (command_tx, event_rx, handle) =
+            spawn_worker_with_resolver(dir.clone(), stub_resolver(&pds.url));
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        // Publish a skin: the stub stores the putRecord body and uploadBlob
+        // answers with STUB_CIDS[0] as the skin blob's CID.
+        let skin = dir.join("skin.png");
+        std::fs::write(&skin, tiny_png()).unwrap();
+        command_tx
+            .send(Command::PostSkin {
+                skin_path: Some(skin.display().to_string()),
+                cape_path: None,
+                model: "slim".into(),
+            })
+            .unwrap();
+        let _ = wait_for(&event_rx, |e| matches!(e, Event::Posted { .. }));
+
+        // Read it back by handle (the stub doubles as the handle service).
+        command_tx
+            .send(Command::FetchPlayerSkin {
+                subject: "stub.test".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::PlayerSkin { .. })) {
+            Event::PlayerSkin { subject, via, skin } => {
+                assert_eq!(subject, "did:plc:stubuser");
+                assert_eq!(via, pds.url);
+                let d = skin.expect("a skin record exists");
+                assert_eq!(d.model, "slim");
+                let key_file: signing::SigningKeyFile = serde_json::from_str(
+                    &std::fs::read_to_string(dir.join(SIGNING_KEY_FILE)).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(d.rkey, key_file.key_id);
+                assert_eq!(
+                    d.verdict,
+                    records::EndorsementVerdict::Verified {
+                        endorser: key_file.key_id.clone()
+                    }
+                );
+                // The verified blob was downloaded and saved under skins/.
+                let skin_blob = d.skin.as_ref().expect("a skin blob");
+                assert_eq!(skin_blob.cid, STUB_CIDS[0]);
+                assert_eq!(skin_blob.mime_type, "image/png");
+                let path = skin_blob.path.as_ref().expect("verified blob is saved");
+                assert!(path.contains(SKINS_DIR), "{path}");
+                assert!(path.ends_with(&format!("{}.png", STUB_CIDS[0])), "{path}");
+                assert_eq!(std::fs::read(path).unwrap(), tiny_png());
+                assert!(d.cape.is_none());
+            }
+            other => panic!("expected PlayerSkin, got {other:?}"),
+        }
+        // The listRecords and getBlob calls went out unauthenticated.
+        let requests = pds.requests();
+        let list_hit = requests
+            .iter()
+            .find(|r| r.path.starts_with("/xrpc/com.atproto.repo.listRecords"))
+            .expect("listRecords was called");
+        assert!(!list_hit.authorized, "the read is unauthenticated");
+        assert!(list_hit.path.contains("collection=at.atpcraft.player.skin"));
+        let blob_hit = requests
+            .iter()
+            .find(|r| r.path.starts_with("/xrpc/com.atproto.sync.getBlob"))
+            .expect("getBlob was called");
+        assert!(!blob_hit.authorized, "the blob read is unauthenticated");
+        assert!(blob_hit.path.contains(&format!("cid={}", STUB_CIDS[0])));
+
+        // A record URI is not a player account: fails before any network call.
+        let before = pds.requests().len();
+        command_tx
+            .send(Command::FetchPlayerSkin {
+                subject: "at://did:plc:stubuser/app.bsky.feed.post/3abc".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("want a player account"), "{message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            pds.requests().len(),
+            before,
+            "no HTTP call for a record URI"
+        );
+
+        // A repo with no skin records reports None.
+        command_tx
+            .send(Command::FetchPlayerSkin {
+                subject: "did:plc:empty".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::PlayerSkin { .. })) {
+            Event::PlayerSkin { subject, skin, .. } => {
+                assert_eq!(subject, "did:plc:empty");
+                assert!(skin.is_none());
+            }
+            other => panic!("expected PlayerSkin, got {other:?}"),
+        }
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn fetch_player_skin_trusts_configured_keys_and_skips_unverified_blobs() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("fetch-skin-trusted");
+        // A foreign "server" key, trusted via the settings file (blank key id
+        // in the entry, so the worker derives it from the public key).
+        let foreign = signing::generate();
+        let foreign_id = signing::key_id_of(&foreign.verifying_key());
+        let mut config = test_config(pds.url.clone());
+        config.trusted_server_keys = vec![crate::config::TrustedServerKey {
+            key_id: String::new(),
+            public_key: signing::public_key_spki_b64(&foreign.verifying_key()),
+        }];
+        write_config(&dir, &config);
+
+        // A skin record signed by `key`; `tamper` edits the model after
+        // signing. Returns the record and the endorsing key id (the rkey).
+        let signed_record = |key: &signing::SigningKey, tamper: bool| {
+            let key_id = signing::key_id_of(&key.verifying_key());
+            let mut record = serde_json::json!({
+                "$type": records::SKIN_COLLECTION,
+                "skin": {
+                    "$type": "blob",
+                    "ref": {"$link": STUB_CIDS[1]},
+                    "mimeType": "image/png",
+                    "size": 42,
+                },
+                "model": "default",
+                "timestamp": "2026-11-12T12:00:00.000Z",
+                "endorsements": [],
+            });
+            let payload = skins::skin_payload("did:plc:stubuser", &record, &key_id).unwrap();
+            let sig = signing::sign_b64(key, &payload);
+            if tamper {
+                record["model"] = serde_json::json!("slim");
+            }
+            record["endorsements"] = serde_json::json!([{
+                "server": key_id,
+                "alg": "ed25519",
+                "sig": {"$bytes": sig},
+            }]);
+            (record, key_id)
+        };
+
+        // Logged out: the reads are unauthenticated and the trusted key
+        // verifies, so the blob is downloaded and saved.
+        let (record, rkey) = signed_record(&foreign, false);
+        pds.seed_record(records::SKIN_COLLECTION, &rkey, record);
+        let (command_tx, event_rx, handle) =
+            spawn_worker_with_resolver(dir.clone(), stub_resolver(&pds.url));
+        command_tx
+            .send(Command::FetchPlayerSkin {
+                subject: "did:plc:stubuser".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::PlayerSkin { .. })) {
+            Event::PlayerSkin { subject, via, skin } => {
+                assert_eq!(subject, "did:plc:stubuser");
+                assert_eq!(via, pds.url);
+                let d = skin.expect("a skin record exists");
+                assert_eq!(d.rkey, foreign_id);
+                assert_eq!(d.model, "default");
+                assert_eq!(
+                    d.verdict,
+                    records::EndorsementVerdict::Verified {
+                        endorser: foreign_id.clone()
+                    }
+                );
+                let skin_blob = d.skin.as_ref().expect("a skin blob");
+                assert_eq!(skin_blob.cid, STUB_CIDS[1]);
+                assert!(skin_blob.path.is_some(), "verified blob is saved");
+            }
+            other => panic!("expected PlayerSkin, got {other:?}"),
+        }
+        let blob_calls = || {
+            pds.requests()
+                .iter()
+                .filter(|r| r.path.starts_with("/xrpc/com.atproto.sync.getBlob"))
+                .count()
+        };
+        assert_eq!(blob_calls(), 1, "the verified blob was downloaded");
+
+        // The same record edited after signing: known key, bad signature, and
+        // no blob is downloaded for it.
+        let (record, _) = signed_record(&foreign, true);
+        pds.seed_record(records::SKIN_COLLECTION, &foreign_id, record);
+        command_tx
+            .send(Command::FetchPlayerSkin {
+                subject: "did:plc:stubuser".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::PlayerSkin { .. })) {
+            Event::PlayerSkin { skin, .. } => {
+                let d = skin.expect("a skin record exists");
+                assert_eq!(d.verdict, records::EndorsementVerdict::BadSignature);
+                assert!(
+                    d.skin.as_ref().map(|b| b.path.is_none()).unwrap_or(false),
+                    "unverified blobs are not persisted"
+                );
+            }
+            other => panic!("expected PlayerSkin, got {other:?}"),
+        }
+        assert_eq!(blob_calls(), 1, "no getBlob for an unverified record");
 
         command_tx.send(Command::Shutdown).unwrap();
         handle.join().unwrap();
