@@ -26,6 +26,7 @@
 //! ATMOSPHERIC_GATE_SUBJECT="did:plc:… | handle" \               # optional, M15 (default: own DID)
 //! ATMOSPHERIC_FETCH_CHAT="did:plc:… | handle" \                 # optional, M16
 //! ATMOSPHERIC_FETCH_SERVER="did:plc:… | handle" \               # optional, M19
+//! ATMOSPHERIC_GRAPH="follows:did:plc:…" \                      # optional, M20
 //! cargo run -p atmospheric --example pds_check
 //! ```
 //!
@@ -558,6 +559,45 @@ fn main() {
                         }
                         Event::Failed { message } => {
                             eprintln!("server profile fetch failed: {message}");
+                            exit(1);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(error) => {
+                    eprintln!("no event from the worker: {error}");
+                    exit(1);
+                }
+            }
+        }
+    }
+
+    // Optionally read a social graph (M20): public AppView reads of follows,
+    // followers, blocks or mutes. Format: "<kind>:<did|handle>".
+    if let Some(raw) = env::var("ATMOSPHERIC_GRAPH")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    {
+        let (kind, subject) = raw
+            .split_once(':')
+            .expect("ATMOSPHERIC_GRAPH is <kind>:<subject>");
+        command_tx
+            .send(Command::FetchGraph {
+                kind: kind.into(),
+                subject: subject.into(),
+            })
+            .expect("send FetchGraph");
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(event) => {
+                    println!("event: {event:?}");
+                    match event {
+                        Event::SocialGraph { members, .. } => {
+                            println!("social graph: {members:?}");
+                            break;
+                        }
+                        Event::Failed { message } => {
+                            eprintln!("social graph fetch failed: {message}");
                             exit(1);
                         }
                         _ => {}

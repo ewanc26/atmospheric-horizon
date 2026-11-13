@@ -9,6 +9,7 @@
 use crate::{
     Command, Config, Event, actions, chats,
     error::AtmosphericError,
+    graph,
     notifications::{self, SeenCursor},
     oauth::{self, DpopState, SharedDpop},
     presence::{self, PlayerDigest},
@@ -473,6 +474,18 @@ impl Worker {
                         subject,
                         via,
                         profile: Box::new(profile),
+                    }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::FetchGraph { kind, subject } => {
+                // Public AppView read: works logged out, no token refresh.
+                match self.fetch_graph(&kind, &subject).await {
+                    Ok((kind, subject, via, members)) => self.emit(Event::SocialGraph {
+                        kind,
+                        subject,
+                        via,
+                        members,
                     }),
                     Err(error) => self.fail(error.to_string()),
                 }
@@ -1005,6 +1018,30 @@ impl Worker {
         };
         let digest = servers::digest(&did, &rkey, &value, &keys)?;
         Ok((did, pds, Some(digest)))
+    }
+
+    /// Read one of an account's public social graphs (M20): follows,
+    /// followers, blocks or mutes via the AppView. The reads are
+    /// unauthenticated, so this works logged out.
+    async fn fetch_graph(
+        &self,
+        kind: &str,
+        subject: &str,
+    ) -> crate::error::Result<(String, String, String, Vec<graph::GraphMember>)> {
+        let kind = graph::GraphKind::from_key(kind).ok_or_else(|| {
+            AtmosphericError::Message(format!(
+                "unknown graph kind {kind:?} (want follows, followers, blocks or mutes)"
+            ))
+        })?;
+        let config = self.load_config().unwrap_or_default();
+        let appview = if config.appview_url.is_empty() {
+            crate::lists::DEFAULT_APPVIEW.to_string()
+        } else {
+            config.appview_url.clone()
+        };
+        let actor = graph::resolve_subject(&self.http, &self.resolver, subject).await?;
+        let members = graph::fetch_graph(&self.http, &appview, kind, &actor).await?;
+        Ok((kind.key().to_string(), actor, appview, members))
     }
 
     /// Download one blob and save it under `<storage>/skins/<cid>.png`,
@@ -1770,6 +1807,36 @@ mod tests {
                         )
                     }
                 }
+                "/xrpc/app.bsky.graph.getFollows" => {
+                    // Two pages: cursor "c2" on the first, none on the second.
+                    if path.contains("cursor=c2") {
+                        (
+                            "200 OK",
+                            r#"{"follows":[{"did":"did:plc:carol","handle":"carol.test","displayName":"Carol"}]}"#
+                                .to_string(),
+                        )
+                    } else {
+                        (
+                            "200 OK",
+                            r#"{"follows":[{"did":"did:plc:alice","handle":"alice.test","displayName":"Alice"},{"did":"did:plc:bob","handle":"bob.test"}],"cursor":"c2"}"#
+                                .to_string(),
+                        )
+                    }
+                }
+                "/xrpc/app.bsky.graph.getFollowers" => (
+                    "200 OK",
+                    r#"{"followers":[{"did":"did:plc:dave","handle":"dave.test"}]}"#
+                        .to_string(),
+                ),
+                "/xrpc/app.bsky.graph.getBlocks" => (
+                    "200 OK",
+                    r#"{"blocks":[{"did":"did:plc:mallory","handle":"mallory.test"}]}"#
+                        .to_string(),
+                ),
+                "/xrpc/app.bsky.graph.getMutes" => (
+                    "200 OK",
+                    r#"{"mutes":[]}"#.to_string(),
+                ),
                 "/xrpc/app.bsky.graph.getList" => {
                     // Two pages: cursor "c2" on the first, none on the second.
                     // The first page's list view carries labels (M12).
@@ -4513,5 +4580,82 @@ mod tests {
         command_tx.send(Command::Shutdown).unwrap();
         handle.join().unwrap();
         assert!(event_rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn fetch_graph_reads_each_relation() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("fetch-graph");
+        let mut config = test_config(pds.url.clone());
+        config.appview_url = pds.url.clone(); // the stub doubles as the AppView
+        write_config(&dir, &config);
+
+        let (command_tx, event_rx, handle) =
+            spawn_worker_with_resolver(dir.clone(), stub_resolver(&pds.url));
+
+        for (kind, expected) in [
+            ("follows", 3usize),
+            ("followers", 1),
+            ("blocks", 1),
+            ("mutes", 0),
+        ] {
+            command_tx
+                .send(Command::FetchGraph {
+                    kind: kind.into(),
+                    subject: "stub.test".into(),
+                })
+                .unwrap();
+            match wait_for(&event_rx, |e| matches!(e, Event::SocialGraph { .. })) {
+                Event::SocialGraph {
+                    kind: got,
+                    subject,
+                    via,
+                    members,
+                } => {
+                    assert_eq!(got, kind);
+                    assert_eq!(subject, "did:plc:stubuser");
+                    assert_eq!(via, pds.url);
+                    assert_eq!(members.len(), expected, "{kind}: {members:?}");
+                    if kind == "follows" {
+                        assert_eq!(members[0].handle, "alice.test");
+                        assert_eq!(members[0].display_name, "Alice");
+                        assert_eq!(members[2].did, "did:plc:carol");
+                    }
+                }
+                other => panic!("expected SocialGraph, got {other:?}"),
+            }
+        }
+
+        // Every read went out unauthenticated (follows paged twice).
+        let graph_hits: Vec<_> = pds
+            .requests()
+            .into_iter()
+            .filter(|r| r.path.starts_with("/xrpc/app.bsky.graph.get"))
+            .collect();
+        assert_eq!(graph_hits.len(), 5, "follows paged twice, the rest once");
+        assert!(graph_hits.iter().all(|r| !r.authorized));
+
+        // An unknown kind fails before any HTTP call.
+        let before = pds.requests().len();
+        command_tx
+            .send(Command::FetchGraph {
+                kind: "likes".into(),
+                subject: "did:plc:stubuser".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("unknown graph kind"), "{message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            pds.requests().len(),
+            before,
+            "no HTTP call for an unknown kind"
+        );
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
     }
 }
