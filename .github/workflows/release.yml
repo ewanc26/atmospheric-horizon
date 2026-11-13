@@ -1,0 +1,118 @@
+name: Release
+
+# Cut a release by pushing an annotated tag from main:
+#   git tag -a v0.1.0 -m "atmospheric-horizon 0.1.0" && git push origin v0.1.0
+# This workflow builds the sidecar worker for each supported OS, packs the
+# mixins bundle, writes SHA256SUMS, and attaches everything to the GitHub
+# Release for the tag.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  worker:
+    name: worker (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - name: macos-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Build the sidecar worker
+        run: cargo build --locked --release -p atmospheric --bin atmospheric-worker --target ${{ matrix.target }}
+
+      - name: Package the worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="atmospheric-worker-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          mkdir -p dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a "dist/$name.zip" "target/${{ matrix.target }}/release/atmospheric-worker.exe"
+          else
+            tar -C "target/${{ matrix.target }}/release" -czf "dist/$name.tar.gz" atmospheric-worker
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  mixins:
+    name: mixins bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the manifest version
+        run: |
+          set -euo pipefail
+          version=$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+
+      - name: Build the mixins bundle
+        run: |
+          set -euo pipefail
+          name="atmospheric-horizon-mixins-${GITHUB_REF_NAME}"
+          mkdir -p dist
+          tar --create --gzip --file "dist/$name.tar.gz" \
+            mixins/atmospheric compatibility.json LICENSE README.md CHANGELOG.md docs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mixins-bundle
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: [worker, mixins]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Write checksums
+        run: |
+          set -euo pipefail
+          cd artifacts
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: atmospheric-horizon ${{ github.ref_name }}
+          generate_release_notes: true
+          files: artifacts/*
+          fail_on_unmatched_files: true
