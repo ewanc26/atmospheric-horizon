@@ -52,6 +52,9 @@ Everything else, with zero Horizon imports so it builds and tests with plain
 - `lists` — M11 public list reads (`app.bsky.graph.getList` pagination)
 - `labels` — M12 labeler read side (AppView view `labels`, labeler
   `#atproto_labeler` endpoint resolution, `com.atproto.label.queryLabels`)
+- `presence` — M13 verified reads of other players' `at.atpcraft.player.snapshot`
+  records (`com.atproto.repo.listRecords` on the subject's own PDS, highest
+  version, Ed25519 endorsement verification)
 - `worker` — owns the tokio runtime, the agent, and the files; the **only**
   module that performs network or disk I/O
 - `error` — one error enum, mapped to HUD strings at the edge
@@ -397,6 +400,59 @@ labeler HTTP endpoint).
   with `ATMOSPHERIC_FETCH_LABELS` / `ATMOSPHERIC_LABELER` (optional
   `ATMOSPHERIC_LABELER_SUBJECT`).
 
+### M13: player presence reads (`at.atpcraft.player.snapshot`)
+
+`/atmospheric player <did|handle>` sends `Command::FetchPlayer` — the read
+side of atpcraft's player-state sync, so a client can see where a player
+last was, with the record's server endorsement checked. The flow, in
+`presence.rs`:
+
+1. `resolve_player` parses the subject (reusing the M12 subject parser;
+   record URIs are rejected — a player is an account), resolves handles via
+   the same `resolveHandle` service OAuth login uses, fetches the DID
+   document (plc.directory / did:web), and takes its `#atproto_pds` endpoint;
+2. `list_records` pages `com.atproto.repo.listRecords`
+   (`collection=at.atpcraft.player.snapshot`, `limit=100`, cursor until
+   absent, capped at 100 pages) against that PDS, **unauthenticated** —
+   public repos serve it, so the read works logged out;
+3. `latest` keeps the structurally valid record with the highest `version`
+   (aspect names sorted and unique, as atpcraft's `fromJson` enforces);
+4. `verify` mirrors atpcraft's `PlayerSnapshotRecord.verify`: for each
+   `ed25519` endorsement, the canonical payload is rebuilt from the raw
+   record JSON (`snapshot_payload` — `{did, version, issuedAt, server,
+   summary, aspects}` with aspects name-sorted as `{name, blob: cid}` or
+   `{name, inline: base64url}`, so foreign records with inline aspects
+   verify too; a unit test asserts parity with the M6 writer's
+   `signable_payload` for blob aspects) and checked against a key-id →
+   public-key map. The map is the mod's own persisted signing key (loaded
+   only if present — a read never creates one) plus `trusted_server_keys`
+   from `config.json` (`keyId` + base64 SPKI `publicKey`, key id derived
+   when blank, malformed entries skipped — atpcraft's `TrustedServerKeys`
+   semantics). Verdicts: `Verified { endorser }` / `UnknownEndorser` /
+   `BadSignature` / `Malformed` (the server-side rollback check is not a
+   client concern).
+
+The worker emits `Event::PlayerSnapshot { subject, via, snapshot }` with a
+`PlayerDigest` (username, dimension, position, version, issuedAt, verdict);
+the game side mirrors it as plain data (boxed — it is the event enum's
+largest variant) and the HUD summarizes it ("atmospheric: Steve v7 in
+minecraft:overworld at -25, 67, -3 — verified by keyid…"). Wire shapes come
+from the lexicons only — no code is copied from atpcraft (its repo carries no
+licence).
+
+Verified: `presence` unit tests (two-page `listRecords` against a stub,
+payload parity with the M6 writer, inline-aspect payloads, all four
+verdicts, unsorted-aspect rejection, latest-version selection, digest
+fields) and worker tests against the stub PDS (which now stores
+`createRecord` bodies and serves `listRecords` per repo): a posted snapshot
+reads back verified by the persisted key, a foreign key trusted via config
+verifies, a tampered record reports `BadSignature`, an untrusted endorser
+reports `UnknownEndorser`, a record-URI subject fails before any HTTP call,
+a repo with no records reports `None`, and the `listRecords` request is
+asserted unauthenticated. Real-PDS wire check: `pds_check` with
+`ATMOSPHERIC_FETCH_PLAYER` (and `ATMOSPHERIC_TRUSTED_SERVER_KEYS` for
+trusted-key verification).
+
 ### Manual check against a real PDS
 
 `crates/atmospheric/examples/pds_check.rs` spawns the worker exactly as the
@@ -419,6 +475,8 @@ ATMOSPHERIC_FETCH_LIST="at://did:…/app.bsky.graph.list/<rkey>" \ # optional, M
 ATMOSPHERIC_FETCH_LABELS="at://did:…/app.bsky.feed.post/<rkey>" \ # optional, M12
 ATMOSPHERIC_LABELER="did:plc:…" \                  # optional, M12 (labeler query)
 ATMOSPHERIC_LABELER_SUBJECT="did:plc:…" \          # optional, M12 (default: own DID)
+ATMOSPHERIC_FETCH_PLAYER="did:plc:… | handle" \     # optional, M13 (presence read)
+ATMOSPHERIC_TRUSTED_SERVER_KEYS="keyId=publicKeyB64,…" \ # optional, M13
 cargo run -p atmospheric --example pds_check
 ```
 
