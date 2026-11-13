@@ -500,6 +500,10 @@ impl Worker {
                     .await
             }
             Command::ClaimServerLink { code } => self.claim_server_link(&code).await,
+            Command::StartBrowserLink {
+                player_uuid,
+                player_name,
+            } => self.start_browser_link(&player_uuid, &player_name).await,
             Command::PostText { text } => {
                 self.ensure_oauth_fresh().await;
                 let result = match (&self.agent, &self.did) {
@@ -1646,6 +1650,48 @@ impl Worker {
         }
     }
 
+    /// Start M39 browser linking for an online player. The worker asks the
+    /// identity service for a one-time URL using the server-only link token.
+    /// The player's UUID was supplied by the game hook; the browser never
+    /// chooses it, so an OAuth login cannot claim another player's UUID.
+    async fn start_browser_link(&self, player_uuid: &str, player_name: &str) {
+        let config = match self.load_config() {
+            Ok(config) => config,
+            Err(error) => {
+                self.fail(format!("could not read the settings file: {error}"));
+                return;
+            }
+        };
+        if config.server_api_url.trim().is_empty() {
+            self.fail(
+                "server_api_url is not configured: set the M35 identity service URL in config.json",
+            );
+            return;
+        }
+        if config.server_link_token.trim().is_empty() {
+            self.fail(
+                "server_link_token is not configured: copy the identity service's ATMOSPHERIC_SERVER_LINK_TOKEN into config.json",
+            );
+            return;
+        }
+        match identity::start_browser_link(
+            &self.http,
+            &config.server_api_url,
+            &config.server_link_token,
+            player_uuid,
+            player_name,
+        )
+        .await
+        {
+            Ok(link) => self.emit(Event::BrowserLink {
+                player_uuid: player_uuid.to_owned(),
+                url: link.url,
+                expires_at: link.expires_at,
+            }),
+            Err(error) => self.fail(error.to_string()),
+        }
+    }
+
     /// App-password login: read the settings file, log in, cache the agent
     /// and the DID from `get_session`.
     async fn login(&mut self) {
@@ -2685,6 +2731,7 @@ mod tests {
             game_version: "26.3".into(),
             appview_url: "https://public.api.bsky.app".into(),
             server_api_url: String::new(),
+            server_link_token: String::new(),
             join_gate_enabled: false,
             join_gate_list: String::new(),
             trusted_server_keys: Vec::new(),
@@ -4077,6 +4124,7 @@ mod tests {
             game_version: "26.3".into(),
             appview_url: "https://public.api.bsky.app".into(),
             server_api_url: String::new(),
+            server_link_token: String::new(),
             join_gate_enabled: false,
             join_gate_list: String::new(),
             trusted_server_keys: Vec::new(),

@@ -107,6 +107,13 @@ pub enum Command {
     /// (M36). The worker posts only the code, its DID and optional handle to
     /// `server_api_url`; success is reported as a status line.
     ClaimServerLink { code: String },
+    /// Start M39 browser linking for an online player. The worker asks the
+    /// identity service for a one-time URL using the authenticated
+    /// `server_link_token`; the browser OAuth result binds this UUID.
+    StartBrowserLink {
+        player_uuid: String,
+        player_name: String,
+    },
     /// Publish the player's state as an `at.atpcraft.player.snapshot` record,
     /// endorsed with the mod's own Ed25519 key (atpcraft port, M6). An empty
     /// `summary.username` is filled from the configured identifier.
@@ -355,6 +362,14 @@ pub enum Event {
     /// A new local-player Colibri membership needs moderator approval (M32);
     /// the runtime shows `message` in chat and the HUD.
     ColibriMembershipPending { message: String },
+    /// A one-time browser link URL (M39) for `player_uuid`. The browser OAuth
+    /// result is bound to that UUID, so the URL must only be shown to the
+    /// player who requested it.
+    BrowserLink {
+        player_uuid: String,
+        url: String,
+        expires_at: u64,
+    },
 }
 
 #[cfg(test)]
@@ -411,6 +426,14 @@ mod tests {
             })
             .unwrap(),
             r#"{"ClaimServerLink":{"code":"ABCD-EFGH"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::StartBrowserLink {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
+            })
+            .unwrap(),
+            r#"{"StartBrowserLink":{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}}"#
         );
         assert_eq!(
             serde_json::to_string(&Command::ColibriHandled {
@@ -473,6 +496,10 @@ mod tests {
             },
             Command::ClaimServerLink {
                 code: "ABCD-EFGH".into(),
+            },
+            Command::StartBrowserLink {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
             },
             Command::ColibriPlayerJoined {
                 player_uuid: "00000000-0000-4000-8000-000000000001".into(),
@@ -700,6 +727,11 @@ mod tests {
             },
             Event::ColibriMembershipPending {
                 message: "Your join is pending. A moderator must approve it.".into(),
+            },
+            Event::BrowserLink {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                url: "https://links.example/link/token".into(),
+                expires_at: 1_800_000_000,
             },
         ];
         for event in events {

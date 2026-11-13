@@ -23,4 +23,16 @@ fn atmospheric_tick(game: &mut crate::game::Game<'_>) {
             game.native_tell(uuid, horizon_client::text::Text::literal(&line));
         }
     }
+    for link in m::drain_browser_links() {
+        let Some(uuid) = m::uuid_value(&link.player_uuid) else {
+            continue;
+        };
+        game.native_tell(
+            uuid,
+            horizon_client::text::Text::literal(&format!(
+                "atmospheric: open {} to link your Bluesky account",
+                link.url
+            )),
+        );
+    }
 }
