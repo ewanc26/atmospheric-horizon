@@ -151,6 +151,74 @@ pub async fn put_record(
     Ok(output.data.uri)
 }
 
+/// Delete one record (`com.atproto.repo.deleteRecord`). Used to undo follow
+/// and block records (M23).
+pub async fn delete_record(agent: &Agent, did: &str, collection: &str, rkey: &str) -> Result<()> {
+    use atrium_api::com::atproto::repo::delete_record;
+    let input = delete_record::InputData {
+        collection: collection.parse().expect("valid NSID"),
+        repo: did
+            .parse()
+            .map_err(|_| AtmosphericError::Message(format!("invalid DID: {did}")))?,
+        rkey: rkey
+            .parse()
+            .map_err(|_| AtmosphericError::Message(format!("invalid record key: {rkey}")))?,
+        swap_commit: None,
+        swap_record: None,
+    };
+    agent
+        .api
+        .com
+        .atproto
+        .repo
+        .delete_record(input.into())
+        .await
+        .map_err(AtmosphericError::protocol)?;
+    Ok(())
+}
+
+/// Mute an account (`app.bsky.graph.muteActor`, M23). Mutes are private and
+/// live on the AppView, not as a record in your repo.
+pub async fn mute_actor(agent: &Agent, actor: &str) -> Result<()> {
+    use atrium_api::app::bsky::graph::mute_actor;
+    let actor = actor
+        .parse()
+        .map_err(|_| AtmosphericError::Message(format!("invalid account identifier: {actor}")))?;
+    agent
+        .api
+        .app
+        .bsky
+        .graph
+        .mute_actor(
+            mute_actor::InputData {
+                actor,
+                only_quoteposts: None,
+                only_reposts: None,
+            }
+            .into(),
+        )
+        .await
+        .map_err(AtmosphericError::protocol)?;
+    Ok(())
+}
+
+/// Unmute an account (`app.bsky.graph.unmuteActor`, M23).
+pub async fn unmute_actor(agent: &Agent, actor: &str) -> Result<()> {
+    use atrium_api::app::bsky::graph::unmute_actor;
+    let actor = actor
+        .parse()
+        .map_err(|_| AtmosphericError::Message(format!("invalid account identifier: {actor}")))?;
+    agent
+        .api
+        .app
+        .bsky
+        .graph
+        .unmute_actor(unmute_actor::InputData { actor }.into())
+        .await
+        .map_err(AtmosphericError::protocol)?;
+    Ok(())
+}
+
 /// Fetch one record's body (`com.atproto.repo.getRecord`), or `None` when the
 /// record does not exist yet.
 pub async fn get_record(
