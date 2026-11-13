@@ -33,6 +33,13 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   startup, refreshes independently of the player and can publish the server
   profile as the server account. The existing `/atmospheric server` still
   publishes as the player account.
+- **M26 — Colibri bridge core (#67).** `/atmospheric colibri
+  start|stop|status|send <text>` parses a channel AT-URI or app link, mints a
+  service-auth token from the server account, holds the Colibri `subscribeEvents`
+  WebSocket, and shows channel upserts in native chat. Game chat is mirrored
+  into the channel as the player account while the bridge runs. The Colibri
+  OAuth grants are added only when `colibri_bridge_enabled` is set. Membership
+  repair, server event notices, the profile prompt and token rotation remain.
 
 ### Changed
 

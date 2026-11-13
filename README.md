@@ -19,9 +19,9 @@ This is the successor to [jollywhoppers-socialsync](https://github.com/ewanc26/j
 
 Shipped in v0.2.0: OAuth and app-password login, text and screenshot posts, notifications, atpcraft-compatible chat, signed snapshots and skins, a server profile, read sides for lists, labels, presence, skins, chat history and server profiles, social-graph reads, and reply/like/repost.
 
-On `main` for the next release: social-graph writes — follow/unfollow, block/unblock and mute/unmute (`M23`) — Bluesky profile reads with atpcraft's pronoun precedence (`M24`), and a separate, persisted server account with its own OAuth session and server-profile publishing (`M25`).
+On `main` for the next release: social-graph writes — follow/unfollow, block/unblock and mute/unmute (`M23`) — Bluesky profile reads with atpcraft's pronoun precedence (`M24`), a separate, persisted server account with its own OAuth session and server-profile publishing (`M25`), and the Colibri chat-bridge core (`M26`).
 
-Not yet: launcher registry distribution, which waits on third-party native-mod support upstream ([#28](https://github.com/ewanc26/atmospheric-horizon/issues/28)); label issuance, join-gate enforcement, Colibri bridging, RPG item discovery and full player-data aspect capture/restore. The server account those surfaces need is now in place.
+Not yet: launcher registry distribution, which waits on third-party native-mod support upstream ([#28](https://github.com/ewanc26/atmospheric-horizon/issues/28)); label issuance, join-gate enforcement, Colibri membership repair/server notices/token rotation, RPG item discovery and full player-data aspect capture/restore. The server account and Colibri bridge core those surfaces need are now in place.
 
 ## Features
 
@@ -33,6 +33,7 @@ Not yet: launcher registry distribution, which waits on third-party native-mod s
 - **Shape your social graph.** Follow, unfollow, block, unblock, mute or unmute an account from its DID or handle.
 - **Sign in properly.** OAuth in the system browser (PAR + PKCE + DPoP, loopback redirect), with app passwords as the fallback.
 - **Run a server account.** `/atmospheric server-account login <handle>` gives the server its own persisted OAuth identity, separate from the player, and can publish the server descriptor from that account.
+- **Bridge a Colibri channel.** With `colibri_bridge_enabled`, the server account opens the Colibri event stream; channel messages appear in game chat, and game chat is published into the channel as your player account.
 - **Never block the game.** All network and disk I/O lives on one worker thread; the game thread only exchanges JSON lines with it.
 - **No surprises.** Writes go to your own PDS, public reads go to the configured AppView or the subject's PDS, and nothing is sent anywhere else.
 
@@ -94,6 +95,7 @@ All commands are under `/atmospheric`:
 | `skin [path] [default\|slim]` | Publish a skin/cape record and its blobs |
 | `server` | Publish or refresh the server profile from the player account |
 | `server-account login <handle>\|status\|logout\|publish` | Manage the separate server account and publish the server profile from it |
+| `colibri start\|stop\|status\|send <text>` | Start, stop, inspect or write to the Colibri chat bridge |
 | `server-of <did\|handle>` | Read and verify a server profile |
 | `profile <did\|handle>` | Read a Bluesky profile and its pronouns |
 | `list <at-uri\|bsky.app URL>` | List the members of a Bluesky list |
@@ -133,12 +135,16 @@ All commands are under `/atmospheric`:
 | `server_capabilities` | `player-data-sync`, `skin-sync` | Capability list, sorted and deduped on write |
 | `game_version` | `26.3` | `minecraftVersion` in the server profile |
 | `trusted_server_keys` | `[]` | `{key_id, public_key}` endorsements accepted on reads |
+| `colibri_bridge_enabled` | `false` | Arm the bridge after server-account login |
+| `colibri_channel_uri` | empty | Channel AT-URI or Colibri app link |
+| `colibri_appview_url` | `https://api.colibri.social` | Colibri AppView base URL |
+| `colibri_appview_did` | `did:web:api.colibri.social` | AppView service DID; `#colibri_appview` is appended for the audience |
 
 The app password is the only secret in `config.json`; OAuth sessions never store one.
 
 ## Roadmap
 
-M1–M21 are shipped, through v0.1.0 and v0.2.0, and M23 (social-graph writes), M24 (profile reads) and M25 (server account) are on `main` for the next release; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, the server-side surfaces that build on the server account, and the next read/write surfaces.
+M1–M21 are shipped, through v0.1.0 and v0.2.0, and M23 (social-graph writes), M24 (profile reads), M25 (server account) and M26 (Colibri bridge core) are on `main` for the next release; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, the server-side surfaces that build on the server account, and the next read/write surfaces.
 
 ### Porting atpcraft
 
@@ -155,7 +161,7 @@ atpcraft is a server-side Fabric mod, while Horizon native mods can hook the ser
 | Labeler publishing player activity | **M12** (read side only): labels on a subject via the AppView's `labels` fields (`/atmospheric labels <subject>`), and `com.atproto.label.queryLabels` at a labeler's `#atproto_labeler` DID-document endpoint (`/atmospheric labeler <did> [subject]`). Label *issuance* stays server-side — a client mod cannot host the HTTP endpoint |
 | Server profile record (`at.atpcraft.server.profile`) | **M10**: published at rkey `self` via `putRecord` with `/atmospheric server` (identity fields from `config.json`, `signingKey` block = the mod's Ed25519 key, `createdAt` preserved across re-publishes). **M19** (read side): `/atmospheric server-of <did\|handle>` lists the collection and reports the server name, MC version, capabilities, and whether its published signing key is trusted, unknown or mismatched |
 | Join gate reading a public Bluesky list | **M11** (read side): `/atmospheric list <at-uri \| bsky.app URL>` fetches member DIDs via paginated `app.bsky.graph.getList`. **M15** (the decision): `/atmospheric gate <list> <did\|handle>` reports whether the DID is on the list, fail-closed (enforcement itself stays server-side) |
-| Colibri chat bridge | not implemented yet: the bridge joins a channel and relays chat, which needs the server thread, service-auth tokens and a WebSocket stream. **M25** now supplies the server account those tokens belong to |
+| Colibri chat bridge | **M26**: `/atmospheric colibri start\|stop\|status\|send <text>` parses a channel AT-URI or app link, mints a service-auth token as the server account, holds the `social.colibri.sync.subscribeEvents` WebSocket, shows channel messages in game chat, and publishes game chat as the player account. Membership repair, server join/leave/death notices, the profile prompt and the 45-minute token rotation remain |
 | RPG item discovery (`equipment.rpg.*`) | not implemented yet: discovery scans the server-side inventory and writes provider attestations from the server account, which **M25** now supplies |
 | Full player-data aspect sync | **M13** reads and verifies snapshots, including their aspect list, but does not capture or restore inventory/advancements/stats. Capture and restore are server-side and remain to be implemented; the aspect payloads are opaque NBT/JSON blobs |
 | Server account | **M25**: `/atmospheric server-account login <handle>` runs a separate localhost OAuth flow and keeps the result in `server-session.json`; `status`, `logout` and `publish` manage it. The server profile can then be published as that account (`/atmospheric server-account publish`), as atpcraft's server does. It is the identity foundation for the remaining server-side work |
@@ -170,8 +176,8 @@ This mod talks to the network **by design**: the AT Protocol services needed to 
 
 - Handle resolution uses `com.atproto.identity.resolveHandle` on `https://bsky.social`, and DID documents come from `https://plc.directory` (did:plc) or the domain's `/.well-known/did.json` (did:web). The DID document supplies the PDS's `#atproto_pds` service endpoint and a labeler's `#atproto_labeler` endpoint.
 - OAuth (M8) discovers the PDS's `/.well-known/oauth-protected-resource` and the authorization server's `/.well-known/oauth-authorization-server`, then sends a pushed authorization request (`POST <authorization server>/oauth/par`) with PKCE and a DPoP key thumbprint. The authorize page opens in your system browser (the URL is always shown first; if no browser can launch, the worker tells you to open it manually), and the redirect is received on `http://127.0.0.1:<port>/` (loopback only). The code is exchanged at the authorization server's token endpoint (`POST <authorization server>/oauth/token`), which is also used for refreshes.
-- Every request to the authorization server, and every PDS request while OAuth-logged-in, carries `Authorization: DPoP <access token>` plus a `DPoP` proof JWT (ES256, signed by a per-install P-256 key). The client registers as the loopback client `http://localhost?scope=atproto%20transition%3Ageneric`; if your PDS's authorization server does not support that, set `oauth_client_id` to a hosted copy of `oauth-client-metadata.json`. This repo serves one at `https://ewanc26.github.io/atmospheric-horizon/oauth-client-metadata.json` ([#21](https://github.com/ewanc26/atmospheric-horizon/issues/21)).
-- `/atmospheric server-account login <handle>` runs the same OAuth flow for a second account and persists it separately; `/atmospheric server-account publish` writes the server profile as that account.
+- Every request to the authorization server, and every PDS request while OAuth-logged-in, carries `Authorization: DPoP <access token>` plus a `DPoP` proof JWT (ES256, signed by a per-install P-256 key). The client registers as the loopback client `http://localhost?scope=…`; when the Colibri bridge is enabled the scope also contains the `social.colibri.message`/`membership` repo grants and `social.colibri.sync.subscribeEvents?aud=…`, which the PDS requires before it will mint the AppView token. Without the bridge the scope remains `atproto transition:generic`. If your PDS's authorization server does not support the loopback form, set `oauth_client_id` to a hosted copy of `oauth-client-metadata.json`. This repo serves one at `https://ewanc26.github.io/atmospheric-horizon/oauth-client-metadata.json` ([#21](https://github.com/ewanc26/atmospheric-horizon/issues/21)).
+- `/atmospheric server-account login <handle>` runs the same OAuth flow for a second account and persists it separately; `/atmospheric server-account publish` writes the server profile as that account. Enable the Colibri bridge before logging in this account so its scope contains the stream grant; a session created earlier must be logged out and authorised again.
 - App-password login uses `com.atproto.server.createSession`, checks the session with `com.atproto.server.getSession`, and resumes restarts with `com.atproto.server.refreshSession` (or the OAuth token endpoint's `refresh_token` grant). `/atmospheric logout` drops the session.
 
 ### Public reads
@@ -188,12 +194,13 @@ All of these are unauthenticated, and the query carries only the subject's DID o
 - **Social graphs (M20):** `app.bsky.graph.getFollows`, `getFollowers`, `getBlocks` and `getMutes` (paged, limit 100) against `appview_url` for `/atmospheric follows|followers|blocks|mutes`. The member list comes back to you; nothing about you goes out.
 - **Social-graph write lookups (M23):** undoing a follow or block uses `com.atproto.repo.listRecords` for `app.bsky.graph.follow`/`block` against your own PDS (public, unauthenticated) to find records whose `subject` is the target DID. The create/delete/mute calls themselves are in the writes section below.
 - **Interaction targets (M21):** `com.atproto.repo.getRecord` from the target author's PDS (query: their DID, collection `app.bsky.feed.post`, and record key) to obtain the post's CID and, for replies, its thread root.
+- **Colibri stream (M26):** the worker opens `wss://<appview>/xrpc/social.colibri.sync.subscribeEvents` with `Sec-WebSocket-Protocol: colibri.auth.bearer, <service-token>`, sends a heartbeat every 30 seconds, and reconnects with backoff. The token comes from `com.atproto.server.getServiceAuth` on the server account's PDS, audience `<colibri_appview_did>#colibri_appview`. Only message upserts are used; other event types are ignored. The stream does not send player data beyond the account identity already carried by the token.
 
 ### Writes to your PDS
 
 - Notification polling uses `app.bsky.notification.listNotifications` with a `seenAt` timestamp, on a timer and on `/atmospheric notifications`.
 - Text and screenshot posts use `com.atproto.repo.uploadBlob` for the image, then `com.atproto.repo.createRecord` with an `app.bsky.embed.images` embed (or a plain text post). The post-location keybind and death messages publish `app.bsky.feed.post` records the same way; death messages only when `post_death_messages` is enabled.
-- Chat lines use `com.atproto.repo.createRecord` in the `at.atpcraft.player.chat` collection, TID-keyed — only when `post_chat_messages` is enabled, or one at a time via `/atmospheric chat <text>`.
+- Chat lines use `com.atproto.repo.createRecord` in the `at.atpcraft.player.chat` collection, TID-keyed — only when `post_chat_messages` is enabled, or one at a time via `/atmospheric chat <text>`. While the Colibri bridge is active, the same chat line is also written to `social.colibri.message` in the player's repo, keyed by a fresh TID; `/atmospheric colibri send <text>` writes one without posting the game chat record.
 - Snapshots use `com.atproto.repo.createRecord` in `at.atpcraft.player.snapshot`, carrying your position/dimension and an Ed25519 endorsement signature.
 - Skins use `com.atproto.repo.uploadBlob` for each PNG, `com.atproto.repo.getRecord` to keep other servers' endorsements, then `com.atproto.repo.putRecord` in `at.atpcraft.player.skin` at the endorsing key id.
 - The server profile uses `com.atproto.repo.getRecord` to preserve `createdAt`, then `com.atproto.repo.putRecord` in `at.atpcraft.server.profile` at rkey `self`. `/atmospheric server` writes it as the player account; `/atmospheric server-account publish` writes it as the separate server account (M25).
@@ -211,7 +218,7 @@ Everything lives in the worker's own data folder — never in a world save. In s
 - `signing-key.json` holds the Ed25519 seed for snapshot and skin endorsements, generated once.
 - `session.json` holds the player's refresh token used to resume across restarts. For OAuth sessions it also holds the DPoP private key (JWK) and token endpoint; app passwords are never stored in it. Delete it or use `/atmospheric logout` to revoke a session.
 - `server-session.json` holds the same OAuth material for the separate server account (M25), written owner-only. It is independent of the player session and is deleted by `/atmospheric server-account logout`.
-- `cursor.json` (the notification seen-cursor, so restarts do not re-show old notifications) and `snapshot-state.json` (the snapshot version counter, so records never roll back) are not secret.
+- `cursor.json` (the notification seen-cursor, so restarts do not re-show old notifications) and `snapshot-state.json` (the snapshot version counter, so records never roll back) are not secret. The Colibri bridge stores no additional credential: its service token lives in memory and is minted again on start.
 - `skins/` holds skin/cape PNGs downloaded by `/atmospheric skin-of`, content-addressed by blob CID. They are written only for records whose endorsement verified.
 
 The files that hold secrets are written with owner-only permissions (0600 on unix; the OS file ACLs apply on Windows and macOS). The image you post is read from the game's `screenshots/` folder only when you press the post-screenshot keybind; otherwise the latest path stays in memory. Skin/cape PNGs are read from the path you pass (or `skin_path`/`cape_path`) only at that moment; nothing else is read. The login session is held in memory for the running game; the refresh token is persisted so restarts resume automatically unless `persist_session` is off.
