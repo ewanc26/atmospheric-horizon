@@ -202,7 +202,7 @@ pub fn spawn(
                         }
                         update = colibri_rx.recv() => {
                             if let Some(update) = update {
-                                worker.handle_colibri_update(update);
+                                worker.handle_colibri_update(update).await;
                             }
                         }
                         _ = poll.tick() => {
@@ -1933,17 +1933,24 @@ impl Worker {
             ));
             return;
         };
-        if self.server_did.is_none() {
+        let Some(server_did) = self.server_did.clone() else {
             self.fail(
                 "log in the server account first: /atmospheric server-account login <handle>",
             );
             return;
-        }
+        };
         self.ensure_server_oauth_fresh().await;
         let Some(agent) = self.server_agent.as_ref() else {
             self.fail("the server account is not logged in");
             return;
         };
+        let membership_rkey = self.tid.next_tid();
+        if let Err(error) =
+            colibri::ensure_membership(agent, &server_did, &channel, &membership_rkey).await
+        {
+            self.fail(format!("could not declare Colibri membership: {error}"));
+            return;
+        }
         let aud = colibri::appview_service_ref(&config.colibri_appview_did);
         let token = match colibri::service_auth(agent, &aud, colibri::SUBSCRIBE_EVENTS_LXM).await {
             Ok(token) => token,
@@ -1992,7 +1999,7 @@ impl Worker {
 
     /// Handle one update from the socket loop. Only messages in the bridged
     /// channel are surfaced, and the worker's own writes are filtered out.
-    fn handle_colibri_update(&mut self, update: StreamEvent) {
+    async fn handle_colibri_update(&mut self, update: StreamEvent) {
         match update {
             StreamEvent::Connected => {
                 self.colibri_connected = true;
@@ -2002,6 +2009,7 @@ impl Worker {
                 self.colibri_connected = false;
                 self.emit_colibri(Some(error));
             }
+            StreamEvent::Rotate => self.start_colibri().await,
             StreamEvent::Message(message) => {
                 let Some(channel) = &self.colibri_channel else {
                     return;
@@ -2961,6 +2969,47 @@ mod tests {
         command_tx.send(Command::Shutdown).unwrap();
         handle.join().unwrap();
         assert!(pds.requests().is_empty());
+    }
+
+    #[test]
+    fn colibri_membership_is_created_once() {
+        let pds = StubPds::start(false);
+        let config = test_config(pds.url.clone());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (agent, _) = runtime
+            .block_on(session::login(&config, oauth::new_shared_dpop()))
+            .unwrap();
+        let channel =
+            ChannelRef::parse("at://did:plc:community/social.colibri.channel/3jchannel").unwrap();
+        let first = runtime
+            .block_on(colibri::ensure_membership(
+                &agent,
+                "did:plc:stubuser",
+                &channel,
+                "3jmembership",
+            ))
+            .unwrap();
+        assert!(first, "the first call creates the membership record");
+        let second = runtime
+            .block_on(colibri::ensure_membership(
+                &agent,
+                "did:plc:stubuser",
+                &channel,
+                "3jmembership2",
+            ))
+            .unwrap();
+        assert!(!second, "a second call reuses the existing record");
+        let creates: Vec<_> = pds
+            .requests()
+            .into_iter()
+            .filter(|request| {
+                request.path == "/xrpc/com.atproto.repo.createRecord"
+                    && request.body.contains(colibri::MEMBERSHIP_COLLECTION)
+            })
+            .collect();
+        assert_eq!(creates.len(), 1, "exactly one membership record is written");
+        let body: serde_json::Value = serde_json::from_str(&creates[0].body).unwrap();
+        assert_eq!(body["record"]["community"], channel.community_uri());
     }
 
     #[test]
