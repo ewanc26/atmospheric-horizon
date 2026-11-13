@@ -127,6 +127,10 @@ pub enum GameCommand {
     /// PDS and verify its signing key against trusted keys (M19, read side
     /// of M10). Works logged out.
     FetchServerProfile { subject: String },
+    /// Read one of an account's public social graphs (M20): `kind` is
+    /// "follows", "followers", "blocks" or "mutes", and `subject` is a DID
+    /// or a handle. Works logged out.
+    FetchGraph { kind: String, subject: String },
     /// Post the player's death message (only when `post_death_messages` is on).
     PostDeathMessage { text: String },
     /// Log out: drop the session and delete the persisted refresh token.
@@ -145,6 +149,15 @@ pub struct ChatDigest {
     pub server: String,
     /// The message, truncated for the HUD line.
     pub message: String,
+}
+
+/// One account in a social-graph read (M20), reduced to what the HUD shows.
+/// Plain data: the worker side has the same struct in the `atmospheric` crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphMember {
+    pub did: String,
+    pub handle: String,
+    pub display_name: String,
 }
 
 /// The player-state summary a snapshot record carries. Plain data; the
@@ -388,6 +401,15 @@ pub enum ModEvent {
         // Boxed: ServerDigest is one of the event enum's largest variants.
         profile: Box<Option<ServerDigest>>,
     },
+    /// One of an account's social graphs (M20): the relation (`kind`), the
+    /// subject's resolved DID, the AppView it was read from (`via`), and the
+    /// accounts in page order.
+    SocialGraph {
+        kind: String,
+        subject: String,
+        via: String,
+        members: Vec<GraphMember>,
+    },
 }
 
 /// The HUD wording for an endorsement verdict (M13/M14).
@@ -536,6 +558,38 @@ pub fn status_text(event: &ModEvent) -> String {
                 )
             }
         },
+        ModEvent::SocialGraph {
+            kind,
+            subject,
+            via,
+            members,
+        } => {
+            if members.is_empty() {
+                format!("atmospheric: no {kind} for {subject} (via {via})")
+            } else {
+                let heads: Vec<String> = members
+                    .iter()
+                    .take(3)
+                    .map(|m| {
+                        if m.handle.is_empty() {
+                            m.did.clone()
+                        } else {
+                            m.handle.clone()
+                        }
+                    })
+                    .collect();
+                let more = if members.len() > 3 {
+                    format!(" +{} more", members.len() - 3)
+                } else {
+                    String::new()
+                };
+                format!(
+                    "atmospheric: {kind} of {subject} via {via}: {} account(s) — {}{more}",
+                    members.len(),
+                    heads.join(", ")
+                )
+            }
+        }
         ModEvent::Notifications { items } => {
             if items.is_empty() {
                 "atmospheric: no new notifications".into()
@@ -822,6 +876,16 @@ pub fn fetch_player_skin(subject: &str) {
 /// handle.
 pub fn fetch_server_profile(subject: &str) {
     send(GameCommand::FetchServerProfile {
+        subject: subject.into(),
+    });
+}
+
+/// Ask the worker to read one of an account's public social graphs (M20):
+/// `kind` is "follows", "followers", "blocks" or "mutes"; `subject` is a DID
+/// or a handle.
+pub fn fetch_graph(kind: &str, subject: &str) {
+    send(GameCommand::FetchGraph {
+        kind: kind.into(),
         subject: subject.into(),
     });
 }
@@ -1404,6 +1468,10 @@ fn encode_command(command: &GameCommand) -> String {
             "FetchServerProfile",
             jobj(vec![("subject", jstr(subject))]),
         )]),
+        GameCommand::FetchGraph { kind, subject } => jobj(vec![(
+            "FetchGraph",
+            jobj(vec![("kind", jstr(kind)), ("subject", jstr(subject))]),
+        )]),
         GameCommand::PostDeathMessage { text } => {
             jobj(vec![("PostDeathMessage", jobj(vec![("text", jstr(text))]))])
         }
@@ -1478,6 +1546,15 @@ fn decode_label(value: &Json) -> Option<LabelDigest> {
         cts: req_str(obj, "cts")?,
         // `exp` is skipped entirely when absent (skip_serializing_if).
         exp: jget(obj, "exp").and_then(as_opt_str).flatten(),
+    })
+}
+
+fn decode_graph_member(value: &Json) -> Option<GraphMember> {
+    let obj = as_obj(value)?;
+    Some(GraphMember {
+        did: req_str(obj, "did")?,
+        handle: req_str(obj, "handle")?,
+        display_name: req_str(obj, "display_name")?,
     })
 }
 
@@ -1700,6 +1777,19 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 profile: Box::new(profile),
             })
         }
+        "SocialGraph" => {
+            let obj = payload_obj()?;
+            let members = as_arr(jget(obj, "members")?)?
+                .iter()
+                .map(decode_graph_member)
+                .collect::<Option<Vec<_>>>()?;
+            Some(ModEvent::SocialGraph {
+                kind: req_str(obj, "kind")?,
+                subject: req_str(obj, "subject")?,
+                via: req_str(obj, "via")?,
+                members,
+            })
+        }
         _ => None,
     }
 }
@@ -1749,6 +1839,7 @@ mod tests {
         fetch_player("someone.example");
         fetch_player_skin("someone.example");
         fetch_server_profile("someone.example");
+        fetch_graph("follows", "someone.example");
         check_gate(
             "at://did:plc:example/app.bsky.graph.list/3abc",
             "did:plc:example",
@@ -1834,6 +1925,13 @@ mod tests {
                 assert_eq!(subject, "someone.example")
             }
             other => panic!("expected FetchServerProfile, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::FetchGraph { kind, subject }) => {
+                assert_eq!(kind, "follows");
+                assert_eq!(subject, "someone.example");
+            }
+            other => panic!("expected FetchGraph, got {:?}", other),
         }
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::CheckGate { list, subject }) => {
@@ -1936,6 +2034,35 @@ mod tests {
 
     #[test]
     fn status_text_covers_every_event() {
+        assert_eq!(
+            status_text(&ModEvent::SocialGraph {
+                kind: "follows".into(),
+                subject: "did:plc:x".into(),
+                via: "https://public.api.bsky.app".into(),
+                members: vec![
+                    GraphMember {
+                        did: "did:plc:a".into(),
+                        handle: "a.test".into(),
+                        display_name: "A".into(),
+                    },
+                    GraphMember {
+                        did: "did:plc:b".into(),
+                        handle: String::new(),
+                        display_name: String::new(),
+                    },
+                ],
+            }),
+            "atmospheric: follows of did:plc:x via https://public.api.bsky.app: 2 account(s) — a.test, did:plc:b"
+        );
+        assert_eq!(
+            status_text(&ModEvent::SocialGraph {
+                kind: "mutes".into(),
+                subject: "did:plc:x".into(),
+                via: "https://public.api.bsky.app".into(),
+                members: vec![],
+            }),
+            "atmospheric: no mutes for did:plc:x (via https://public.api.bsky.app)"
+        );
         assert_eq!(
             status_text(&ModEvent::Session(SessionState::LoggedIn {
                 did: "did:plc:x".into()
@@ -2281,6 +2408,13 @@ mod tests {
             r#"{"FetchServerProfile":{"subject":"did:plc:z"}}"#
         );
         assert_eq!(
+            encode_command(&GameCommand::FetchGraph {
+                kind: "follows".into(),
+                subject: "did:plc:z".into(),
+            }),
+            r#"{"FetchGraph":{"kind":"follows","subject":"did:plc:z"}}"#
+        );
+        assert_eq!(
             encode_command(&GameCommand::PostDeathMessage { text: "t".into() }),
             r#"{"PostDeathMessage":{"text":"t"}}"#
         );
@@ -2290,6 +2424,21 @@ mod tests {
 
     #[test]
     fn decode_event_wire_shapes() {
+        assert_eq!(
+            decode_event(
+                r#"{"SocialGraph":{"kind":"follows","subject":"did:plc:x","via":"https://public.api.bsky.app","members":[{"did":"did:plc:a","handle":"a.test","display_name":"A"}]}}"#
+            ),
+            Some(ModEvent::SocialGraph {
+                kind: "follows".into(),
+                subject: "did:plc:x".into(),
+                via: "https://public.api.bsky.app".into(),
+                members: vec![GraphMember {
+                    did: "did:plc:a".into(),
+                    handle: "a.test".into(),
+                    display_name: "A".into(),
+                }],
+            })
+        );
         assert_eq!(
             decode_event(r#"{"Session":"LoggedOut"}"#),
             Some(ModEvent::Session(SessionState::LoggedOut))
