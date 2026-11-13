@@ -16,9 +16,9 @@
 //! `{name, inline: base64url}`).
 
 use crate::error::{AtmosphericError, Result};
-use crate::records;
+use crate::records::{self, EndorsementVerdict};
 use base64::{Engine as _, engine::general_purpose};
-use ed25519_dalek::{Verifier as _, VerifyingKey};
+use ed25519_dalek::VerifyingKey;
 use std::collections::HashMap;
 
 /// `com.atproto.repo.listRecords` page size.
@@ -26,22 +26,6 @@ pub const LIST_LIMIT: u32 = 100;
 
 /// Defensive pagination cap (100 pages = 10 000 records).
 pub const MAX_PAGES: usize = 100;
-
-/// The verdict of verifying a snapshot record's endorsements, mirroring
-/// atpcraft's `VerifyResult` (minus the rollback check, which only the
-/// writing server can do with its persisted version index).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum SnapshotVerdict {
-    /// At least one endorsement from a known key verified.
-    Verified { endorser: String },
-    /// No endorsement came from a known key.
-    UnknownEndorser,
-    /// Endorsements from known keys were present but every signature failed —
-    /// the record was edited after signing.
-    BadSignature,
-    /// The record carries no endorsements (the lexicon requires at least 1).
-    Malformed,
-}
 
 /// What the HUD shows for a player's latest snapshot (M13).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -62,7 +46,7 @@ pub struct PlayerDigest {
     pub food: i64,
     pub xp_level: i64,
     pub game_mode: String,
-    pub verdict: SnapshotVerdict,
+    pub verdict: EndorsementVerdict,
 }
 
 /// Resolve a player reference (a DID or handle — not a record URI) to the
@@ -137,15 +121,6 @@ pub async fn list_records(
     Ok(out)
 }
 
-/// Decode base64 with or without padding (atpcraft writes signatures and
-/// inline bytes without padding; some producers pad).
-fn decode_b64(text: &str) -> Option<Vec<u8>> {
-    general_purpose::STANDARD_NO_PAD
-        .decode(text)
-        .ok()
-        .or_else(|| general_purpose::STANDARD.decode(text).ok())
-}
-
 /// The record's version if the value is structurally a snapshot record:
 /// `version`/`issuedAt`/`summary`/`aspects`/`endorsements` present, aspect
 /// names sorted and unique, each aspect a blob or inline payload — the
@@ -212,7 +187,7 @@ pub fn snapshot_payload(did: &str, record: &serde_json::Value, server: &str) -> 
                 let bytes_b64 = inline["$bytes"].as_str().ok_or_else(|| {
                     AtmosphericError::Message("inline aspect has no bytes".into())
                 })?;
-                let bytes = decode_b64(bytes_b64).ok_or_else(|| {
+                let bytes = records::decode_b64_flexible(bytes_b64).ok_or_else(|| {
                     AtmosphericError::Message("inline aspect bytes are not base64".into())
                 })?;
                 // atpcraft signs inline bytes as base64url without padding.
@@ -244,46 +219,10 @@ pub fn verify(
     did: &str,
     record: &serde_json::Value,
     keys: &HashMap<String, VerifyingKey>,
-) -> SnapshotVerdict {
-    let Some(endorsements) = record["endorsements"].as_array() else {
-        return SnapshotVerdict::Malformed;
-    };
-    if endorsements.is_empty() {
-        return SnapshotVerdict::Malformed;
-    }
-    let mut found_known_key = false;
-    for endorsement in endorsements {
-        let Some(server) = endorsement["server"].as_str() else {
-            continue;
-        };
-        if endorsement["alg"].as_str() != Some(crate::signing::ALG_ED25519) {
-            continue;
-        }
-        let Some(sig_b64) = endorsement["sig"]["$bytes"].as_str() else {
-            continue;
-        };
-        let Some(sig_bytes) = decode_b64(sig_b64) else {
-            continue;
-        };
-        let Ok(payload) = snapshot_payload(did, record, server) else {
-            continue;
-        };
-        if let Some(key) = keys.get(server) {
-            found_known_key = true;
-            if let Ok(signature) = ed25519_dalek::Signature::from_slice(&sig_bytes)
-                && key.verify(&payload, &signature).is_ok()
-            {
-                return SnapshotVerdict::Verified {
-                    endorser: server.to_string(),
-                };
-            }
-        }
-    }
-    if found_known_key {
-        SnapshotVerdict::BadSignature
-    } else {
-        SnapshotVerdict::UnknownEndorser
-    }
+) -> EndorsementVerdict {
+    records::verify_endorsements(&record["endorsements"], keys, |server| {
+        snapshot_payload(did, record, server).ok()
+    })
 }
 
 /// Build the HUD digest of a snapshot record: the summary fields plus the
@@ -440,31 +379,31 @@ mod tests {
         // A known key that verifies.
         assert_eq!(
             verify(did, &record, &keys_of(&key)),
-            SnapshotVerdict::Verified {
+            EndorsementVerdict::Verified {
                 endorser: key_id.clone()
             }
         );
         // No known keys at all.
         assert_eq!(
             verify(did, &record, &HashMap::new()),
-            SnapshotVerdict::UnknownEndorser
+            EndorsementVerdict::UnknownEndorser
         );
         // A known key whose signature does not match (the record was edited).
         let mut tampered = record.clone();
         tampered["summary"]["food"] = serde_json::json!(0);
         assert_eq!(
             verify(did, &tampered, &keys_of(&key)),
-            SnapshotVerdict::BadSignature
+            EndorsementVerdict::BadSignature
         );
         // A signature over a different DID does not verify either.
         assert_eq!(
             verify("did:plc:bob", &record, &keys_of(&key)),
-            SnapshotVerdict::BadSignature
+            EndorsementVerdict::BadSignature
         );
         // No endorsements at all.
         assert_eq!(
             verify(did, &record_value(1, serde_json::json!([])), &keys_of(&key)),
-            SnapshotVerdict::Malformed
+            EndorsementVerdict::Malformed
         );
         // A foreign algorithm is skipped; with no other endorsements the
         // verdict is "unknown" (atpcraft's behaviour).
@@ -473,7 +412,7 @@ mod tests {
             serde_json::json!([{"server": key_id, "alg": "p256", "sig": {"$bytes": "eA"}}]);
         assert_eq!(
             verify(did, &other_alg, &keys_of(&key)),
-            SnapshotVerdict::UnknownEndorser
+            EndorsementVerdict::UnknownEndorser
         );
     }
 
@@ -491,7 +430,7 @@ mod tests {
         let (record, _) = signed(record, did, &key);
         assert_eq!(
             verify(did, &record, &keys_of(&key)),
-            SnapshotVerdict::Verified {
+            EndorsementVerdict::Verified {
                 endorser: signing::key_id_of(&key.verifying_key())
             }
         );
@@ -559,7 +498,7 @@ mod tests {
         assert_eq!(d.food, 20);
         assert_eq!(d.xp_level, 3);
         assert_eq!(d.game_mode, "survival");
-        assert_eq!(d.verdict, SnapshotVerdict::Verified { endorser: key_id });
+        assert_eq!(d.verdict, EndorsementVerdict::Verified { endorser: key_id });
         assert!(digest(did, "k", &serde_json::json!({}), &HashMap::new()).is_err());
     }
 

@@ -17,6 +17,7 @@ pub mod presence;
 pub mod records;
 pub mod session;
 pub mod signing;
+pub mod skins;
 pub mod tid;
 pub mod worker;
 
