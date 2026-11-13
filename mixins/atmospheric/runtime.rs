@@ -105,6 +105,10 @@ pub enum GameCommand {
         labeler: String,
         subject: Option<String>,
     },
+    /// Read a player's latest `at.atpcraft.player.snapshot` record from their
+    /// own PDS and verify its endorsement (M13, atpcraft presence read side):
+    /// the subject is a DID or a handle. Works logged out.
+    FetchPlayer { subject: String },
     /// Post the player's death message (only when `post_death_messages` is on).
     PostDeathMessage { text: String },
     /// Log out: drop the session and delete the persisted refresh token.
@@ -185,6 +189,42 @@ pub struct LabelDigest {
     pub exp: Option<String>,
 }
 
+/// The verdict of verifying a snapshot record's endorsements (M13). Plain
+/// data: the worker side has the same enum in the `atmospheric` crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotVerdict {
+    /// At least one endorsement from a known key verified.
+    Verified { endorser: String },
+    /// No endorsement came from a known key.
+    UnknownEndorser,
+    /// Known keys were present but every signature failed.
+    BadSignature,
+    /// The record carries no endorsements.
+    Malformed,
+}
+
+/// A player's latest snapshot record, reduced to what the HUD shows (M13).
+/// Plain data: the worker side has the same struct in the `atmospheric`
+/// crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerDigest {
+    pub did: String,
+    pub rkey: String,
+    pub at_uri: String,
+    pub version: i64,
+    pub issued_at: String,
+    pub username: String,
+    pub dimension: String,
+    pub x: i64,
+    pub y: i64,
+    pub z: i64,
+    pub health: String,
+    pub food: i64,
+    pub xp_level: i64,
+    pub game_mode: String,
+    pub verdict: SnapshotVerdict,
+}
+
 /// Events the worker thread reports back to the game side.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,6 +250,15 @@ pub enum ModEvent {
         subject: String,
         via: String,
         labels: Vec<LabelDigest>,
+    },
+    /// The latest snapshot record of a player (M13, presence read side): the
+    /// DID (`subject`), the PDS it was read from (`via`), and the digest with
+    /// its endorsement verdict (`None` when the repo has no snapshot records).
+    PlayerSnapshot {
+        subject: String,
+        via: String,
+        // Boxed: PlayerDigest is the enum's largest variant.
+        snapshot: Box<Option<PlayerDigest>>,
     },
 }
 
@@ -262,6 +311,23 @@ pub fn status_text(event: &ModEvent) -> String {
                 )
             }
         }
+        ModEvent::PlayerSnapshot {
+            subject, snapshot, ..
+        } => match &**snapshot {
+            None => format!("atmospheric: no snapshot records for {subject}"),
+            Some(d) => {
+                let verdict = match &d.verdict {
+                    SnapshotVerdict::Verified { endorser } => format!("verified by {endorser}"),
+                    SnapshotVerdict::UnknownEndorser => "unknown endorser".into(),
+                    SnapshotVerdict::BadSignature => "BAD SIGNATURE".into(),
+                    SnapshotVerdict::Malformed => "malformed record".into(),
+                };
+                format!(
+                    "atmospheric: {} v{} in {} at {}, {}, {} — {verdict}",
+                    d.username, d.version, d.dimension, d.x, d.y, d.z
+                )
+            }
+        },
         ModEvent::Notifications { items } => {
             if items.is_empty() {
                 "atmospheric: no new notifications".into()
@@ -507,6 +573,14 @@ pub fn fetch_labeler_labels(labeler: &str, subject: Option<&str>) {
     });
 }
 
+/// Ask the worker to read a player's latest snapshot record and verify its
+/// endorsement (M13). `subject` is a DID or a handle.
+pub fn fetch_player(subject: &str) {
+    send(GameCommand::FetchPlayer {
+        subject: subject.into(),
+    });
+}
+
 /// Ask the worker to post a death message (published only when the settings
 /// enable `post_death_messages`).
 pub fn post_death_message(text: &str) {
@@ -554,6 +628,7 @@ mod tests {
         fetch_labels("at://did:plc:example/app.bsky.feed.post/3abc");
         fetch_labeler_labels("did:plc:labeler", Some("did:plc:example"));
         fetch_labeler_labels("did:plc:labeler", None);
+        fetch_player("someone.example");
         logout();
         assert!(!post_screenshot("no screenshot yet"));
         remember_screenshot("/tmp/shots/2026-11-12_07.00.00.png");
@@ -620,6 +695,10 @@ mod tests {
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::FetchLabelerLabels { subject, .. }) => assert_eq!(subject, None),
             other => panic!("expected FetchLabelerLabels, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::FetchPlayer { subject }) => assert_eq!(subject, "someone.example"),
+            other => panic!("expected FetchPlayer, got {:?}", other),
         }
         assert!(matches!(
             command_rx.recv_timeout(std::time::Duration::from_secs(5)),
@@ -767,6 +846,64 @@ mod tests {
                 labels: vec![],
             }),
             "atmospheric: no labels on at://did:plc:x/app.bsky.feed.post/1"
+        );
+        assert_eq!(
+            status_text(&ModEvent::PlayerSnapshot {
+                subject: "did:plc:x".into(),
+                via: "https://pds.example".into(),
+                snapshot: Box::new(Some(PlayerDigest {
+                    did: "did:plc:x".into(),
+                    rkey: "keyid0000000001".into(),
+                    at_uri: "at://did:plc:x/at.atpcraft.player.snapshot/keyid0000000001".into(),
+                    version: 7,
+                    issued_at: "2026-11-12T12:00:00.000Z".into(),
+                    username: "Steve".into(),
+                    dimension: "minecraft:overworld".into(),
+                    x: -25,
+                    y: 67,
+                    z: -3,
+                    health: "19.5".into(),
+                    food: 20,
+                    xp_level: 3,
+                    game_mode: "survival".into(),
+                    verdict: SnapshotVerdict::Verified {
+                        endorser: "keyid0000000001".into()
+                    },
+                })),
+            }),
+            "atmospheric: Steve v7 in minecraft:overworld at -25, 67, -3 — verified by keyid0000000001"
+        );
+        assert_eq!(
+            status_text(&ModEvent::PlayerSnapshot {
+                subject: "did:plc:x".into(),
+                via: "https://pds.example".into(),
+                snapshot: Box::new(Some(PlayerDigest {
+                    did: "did:plc:x".into(),
+                    rkey: "k".into(),
+                    at_uri: "at://did:plc:x/at.atpcraft.player.snapshot/k".into(),
+                    version: 2,
+                    issued_at: String::new(),
+                    username: "Mallory".into(),
+                    dimension: "minecraft:the_end".into(),
+                    x: 0,
+                    y: 0,
+                    z: 0,
+                    health: "20".into(),
+                    food: 20,
+                    xp_level: 0,
+                    game_mode: "survival".into(),
+                    verdict: SnapshotVerdict::BadSignature,
+                })),
+            }),
+            "atmospheric: Mallory v2 in minecraft:the_end at 0, 0, 0 — BAD SIGNATURE"
+        );
+        assert_eq!(
+            status_text(&ModEvent::PlayerSnapshot {
+                subject: "did:plc:empty".into(),
+                via: "https://pds.example".into(),
+                snapshot: Box::new(None),
+            }),
+            "atmospheric: no snapshot records for did:plc:empty"
         );
     }
 

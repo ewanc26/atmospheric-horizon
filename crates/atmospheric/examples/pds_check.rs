@@ -19,6 +19,8 @@
 //! ATMOSPHERIC_FETCH_LABELS="at://did:…/app.bsky.feed.post/<rkey>" \ # optional, M12
 //! ATMOSPHERIC_LABELER="did:plc:…" \                             # optional, M12
 //! ATMOSPHERIC_LABELER_SUBJECT="did:plc:…" \                     # optional, M12
+//! ATMOSPHERIC_FETCH_PLAYER="did:plc:… | handle" \               # optional, M13
+//! ATMOSPHERIC_TRUSTED_SERVER_KEYS="keyId=publicKeyB64,…" \      # optional, M13
 //! cargo run -p atmospheric --example pds_check
 //! ```
 //!
@@ -97,6 +99,24 @@ fn main() {
         server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
         game_version: "26.3".into(),
         appview_url: "https://public.api.bsky.app".into(),
+        // M13: trusted endorsement keys for presence reads, as
+        // "keyId=publicKeyB64" pairs separated by commas (an empty keyId is
+        // derived from the public key).
+        trusted_server_keys: env::var("ATMOSPHERIC_TRUSTED_SERVER_KEYS")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|raw| {
+                raw.split(',')
+                    .filter_map(|pair| {
+                        let (key_id, public_key) = pair.split_once('=')?;
+                        Some(atmospheric::config::TrustedServerKey {
+                            key_id: key_id.trim().to_string(),
+                            public_key: public_key.trim().to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     };
     if oauth_handle.is_none() {
         // App-password mode needs all three; OAuth mode needs none of them.
@@ -343,6 +363,46 @@ fn main() {
                         }
                         Event::Failed { message } => {
                             eprintln!("labeler query failed: {message}");
+                            exit(1);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(error) => {
+                    eprintln!("no event from the worker: {error}");
+                    exit(1);
+                }
+            }
+        }
+    }
+
+    // Optionally read a player's latest snapshot record (M13, presence read
+    // side): resolved to their PDS via the DID document, listed
+    // unauthenticated, and verified against the own/trusted keys.
+    if let Some(subject) = env::var("ATMOSPHERIC_FETCH_PLAYER")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        command_tx
+            .send(Command::FetchPlayer { subject })
+            .expect("send FetchPlayer");
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(event) => {
+                    println!("event: {event:?}");
+                    match event {
+                        Event::PlayerSnapshot { snapshot, .. } => {
+                            match &*snapshot {
+                                Some(d) => println!(
+                                    "player snapshot: {} v{} — {:?}",
+                                    d.username, d.version, d.verdict
+                                ),
+                                None => println!("no snapshot records"),
+                            }
+                            break;
+                        }
+                        Event::Failed { message } => {
+                            eprintln!("player fetch failed: {message}");
                             exit(1);
                         }
                         _ => {}
