@@ -19,9 +19,9 @@ This is the successor to [jollywhoppers-socialsync](https://github.com/ewanc26/j
 
 Shipped in v0.2.0: OAuth and app-password login, text and screenshot posts, notifications, atpcraft-compatible chat, signed snapshots and skins, a server profile, read sides for lists, labels, presence, skins, chat history and server profiles, social-graph reads, and reply/like/repost.
 
-On `main` for the next release: social-graph writes — follow/unfollow, block/unblock and mute/unmute (`M23`).
+On `main` for the next release: social-graph writes — follow/unfollow, block/unblock and mute/unmute (`M23`) — and Bluesky profile reads with atpcraft's pronoun precedence (`M24`).
 
-Not yet: launcher registry distribution, which waits on third-party native-mod support upstream ([#28](https://github.com/ewanc26/atmospheric-horizon/issues/28)); and label issuance and join-gate enforcement, which stay server-side.
+Not yet: launcher registry distribution, which waits on third-party native-mod support upstream ([#28](https://github.com/ewanc26/atmospheric-horizon/issues/28)); label issuance and join-gate enforcement, which stay server-side; and atpcraft's newer server-side surfaces — Colibri bridging, RPG item discovery, full player-data aspect capture/restore and the server account.
 
 ## Features
 
@@ -29,7 +29,7 @@ Not yet: launcher registry distribution, which waits on third-party native-mod s
 - **Join the conversation.** Reply to, like or repost any Bluesky post, from its AT-URI or its bsky.app URL.
 - **Notifications in the HUD.** A digest line, a poll timer and a cursor that survives restarts.
 - **atpcraft-compatible records.** Chat messages, Ed25519-endorsed snapshots and skins with blob uploads, and a server descriptor at rkey `self`.
-- **Read the public side.** List membership (with a fail-closed gate decision), labels and labeler queries, player presence, skins, chat history, server profiles, and follows/followers/blocks/mutes.
+- **Read the public side.** List membership (with a fail-closed gate decision), labels and labeler queries, player presence, skins, chat history, server profiles, profiles with display names and pronouns, and follows/followers/blocks/mutes.
 - **Shape your social graph.** Follow, unfollow, block, unblock, mute or unmute an account from its DID or handle.
 - **Sign in properly.** OAuth in the system browser (PAR + PKCE + DPoP, loopback redirect), with app passwords as the fallback.
 - **Never block the game.** All network and disk I/O lives on one worker thread; the game thread only exchanges JSON lines with it.
@@ -93,6 +93,7 @@ All commands are under `/atmospheric`:
 | `skin [path] [default\|slim]` | Publish a skin/cape record and its blobs |
 | `server` | Publish or refresh the server profile |
 | `server-of <did\|handle>` | Read and verify a server profile |
+| `profile <did\|handle>` | Read a Bluesky profile and its pronouns |
 | `list <at-uri\|bsky.app URL>` | List the members of a Bluesky list |
 | `gate <list> <did\|handle>` | Decide list membership, fail-closed |
 | `labels <subject>` | Read labels from the AppView |
@@ -135,7 +136,7 @@ The app password is the only secret in `config.json`; OAuth sessions never store
 
 ## Roadmap
 
-M1–M21 are shipped, through v0.1.0 and v0.2.0, and M23 (social-graph writes) is on `main` for the next release; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, the server-side halves a client mod cannot host, and the next read/write surfaces.
+M1–M21 are shipped, through v0.1.0 and v0.2.0, and M23 (social-graph writes) and M24 (profile reads) are on `main` for the next release; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, the server-side halves a client mod cannot host, and the next read/write surfaces.
 
 ### Porting atpcraft
 
@@ -144,6 +145,7 @@ atpcraft is a server-side Fabric mod, while Horizon native mods can hook the ser
 | atpcraft feature | atmospheric-horizon |
 | --- | --- |
 | Bluesky sign-in | **M8**: localhost OAuth login (`/atmospheric login <handle>` — PAR + PKCE + DPoP with a loopback redirect); app-password login remains the fallback via bare `/atmospheric login` |
+| Profile pronouns and display names | **M24**: `/atmospheric profile <did\|handle>` reads the AppView's `app.bsky.actor.getProfile` and the direct `app.bsky.actor.profile` record at rkey `self`. The direct record's pronouns win when that read succeeds (even when the field is absent); a failed record read falls back to the AppView, matching atpcraft's precedence. Both reads are unauthenticated |
 | Chat messages as records (`at.atpcraft.player.chat`) | **M5**: the chat hook mirrors each line, and the worker publishes TID-keyed records when `post_chat_messages` is on; `/atmospheric chat <text>` always publishes one. **M16** (read side): `/atmospheric chat-of <did\|handle>` lists the collection on the subject's own PDS, unauthenticated, and reports the count plus the newest messages — chat records are unsigned by design |
 | Player state snapshots (`at.atpcraft.player.snapshot`, `defs`) | **M6**: the keybind or `/atmospheric snapshot` publishes a self-endorsed record (the worker generates and persists an Ed25519 key; rkey = key id, monotonic version). **M13** (read side): `/atmospheric player <did\|handle>` pages `com.atproto.repo.listRecords`, takes the highest `version`, and verifies the endorsement against your own key or `trusted_server_keys` |
 | Reading other players' snapshots (presence) | **M13**: as above — the client-side half of atpcraft's player-data sync |
@@ -151,6 +153,10 @@ atpcraft is a server-side Fabric mod, while Horizon native mods can hook the ser
 | Labeler publishing player activity | **M12** (read side only): labels on a subject via the AppView's `labels` fields (`/atmospheric labels <subject>`), and `com.atproto.label.queryLabels` at a labeler's `#atproto_labeler` DID-document endpoint (`/atmospheric labeler <did> [subject]`). Label *issuance* stays server-side — a client mod cannot host the HTTP endpoint |
 | Server profile record (`at.atpcraft.server.profile`) | **M10**: published at rkey `self` via `putRecord` with `/atmospheric server` (identity fields from `config.json`, `signingKey` block = the mod's Ed25519 key, `createdAt` preserved across re-publishes). **M19** (read side): `/atmospheric server-of <did\|handle>` lists the collection and reports the server name, MC version, capabilities, and whether its published signing key is trusted, unknown or mismatched |
 | Join gate reading a public Bluesky list | **M11** (read side): `/atmospheric list <at-uri \| bsky.app URL>` fetches member DIDs via paginated `app.bsky.graph.getList`. **M15** (the decision): `/atmospheric gate <list> <did\|handle>` reports whether the DID is on the list, fail-closed (enforcement itself stays server-side) |
+| Colibri chat bridge | not planned for the client mod: the bridge joins a channel and relays every server chat line, which needs the server thread and the server account's service-auth token |
+| RPG item discovery (`equipment.rpg.*`) | not planned for the client mod: discovery scans the server-side inventory and writes provider attestations from the server account |
+| Full player-data aspect sync | **M13** reads and verifies snapshots, including their aspect list, but does not capture or restore inventory/advancements/stats. Capture and restore are server-side; the aspect payloads are opaque NBT/JSON blobs |
+| Server account and labeler issuance | server-side: registering the PDS account, publishing the labeler service record, serving label routes and enforcing the join gate all need a long-running HTTP server |
 | Web server for login pages / lexicons | not planned for the client mod; OAuth sign-in is the alternative |
 
 ## Network use
@@ -170,6 +176,7 @@ All of these are unauthenticated, and the query carries only the subject's DID o
 
 - **Lists and the join gate (M11/M15):** `app.bsky.graph.getList` (paged, limit 100) against `appview_url` for `/atmospheric list` and `/atmospheric gate`. A failed read is a deny-with-reason, never a silent allow.
 - **Labels (M12):** `app.bsky.actor.getProfile`, `app.bsky.feed.getPosts` and `app.bsky.graph.getList` (first page, limit 1 — the view carries the labels) against the same AppView for `/atmospheric labels`; and `com.atproto.label.queryLabels` (paged, limit 100) at the labeler's `#atproto_labeler` endpoint for `/atmospheric labeler`.
+- **Profiles (M24):** `app.bsky.actor.getProfile` (query: the subject's DID) against `appview_url`, plus `com.atproto.repo.getRecord` (query: the subject's DID, collection `app.bsky.actor.profile`, rkey `self`) against the subject's own PDS, for `/atmospheric profile`. The direct record's `pronouns` is preferred when that read succeeds; a failed direct read falls back to the AppView value. Nothing is written or stored.
 - **Presence (M13):** `com.atproto.repo.listRecords` for `at.atpcraft.player.snapshot` (paged, limit 100) against the subject's own PDS for `/atmospheric player`.
 - **Skins (M14):** `com.atproto.repo.listRecords` for `at.atpcraft.player.skin`, then — only when the endorsement verifies — `com.atproto.sync.getBlob` for the skin/cape blob CIDs (query: the subject's DID and the CID) to download the PNGs.
 - **Chat history (M16):** `com.atproto.repo.listRecords` for `at.atpcraft.player.chat` against the subject's own PDS for `/atmospheric chat-of`. Chat records are unsigned by design, so nothing is verified.
@@ -211,7 +218,7 @@ No telemetry, no analytics, no other endpoints.
 ## Layout
 
 - `mixins/atmospheric/` — horizon-mixins declarations: the injected std-only `runtime.rs` (which also spawns and bridges the sidecar), its placeholder hook, and `horizon-mixin.toml`.
-- `crates/atmospheric/` — the protocol library: `config`, `session`, `oauth` (M8), `actions`, `notifications`, `lists` (M11/M15), `labels` (M12), `presence` (M13), `skins` (M14), `chats` (M16), `servers` (M19), `graph` (M20 reads/M23 writes), `interactions` (M21), `records` (atpcraft lexicon types), `tid`, `signing` (Ed25519 endorsements) and `worker`, plus the `atmospheric-worker` bin and its end-to-end test (`tests/sidecar.rs`).
+- `crates/atmospheric/` — the protocol library: `config`, `session`, `oauth` (M8), `actions`, `notifications`, `lists` (M11/M15), `labels` (M12), `presence` (M13), `profiles` (M24), `skins` (M14), `chats` (M16), `servers` (M19), `graph` (M20 reads/M23 writes), `interactions` (M21), `records` (atpcraft lexicon types), `tid`, `signing` (Ed25519 endorsements) and `worker`, plus the `atmospheric-worker` bin and its end-to-end test (`tests/sidecar.rs`).
 - `oauth-client-metadata.json` — the OAuth client metadata document to host when an authorization server does not support the loopback client ([#21](https://github.com/ewanc26/atmospheric-horizon/issues/21)).
 - `compatibility.json` — the pinned Horizon and horizon-mixins revisions the bundle is built against.
 - `CHANGELOG.md` — release notes and the release process.

@@ -20,6 +20,13 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   repo; undoing them lists the matching record and deletes it. Mutes use
   `app.bsky.graph.muteActor` / `unmuteActor`. Self-actions are refused, and
   success reports a `GraphChanged` HUD line.
+- **M24 — profile reads (#63).** `/atmospheric profile <did|handle>` reads
+  the AppView's `app.bsky.actor.getProfile` and the direct
+  `app.bsky.actor.profile` record at rkey `self`, unauthenticated. The direct
+  record's pronouns win when that read succeeds, even when the field is
+  absent; a failed direct read falls back to the AppView value, matching
+  atpcraft's precedence. The HUD shows handle, display name, pronouns and a
+  truncated description.
 
 ### Changed
 
