@@ -495,8 +495,9 @@ pub const STATUS_LINES_MAX: usize = 3;
 pub const STATUS_LINE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn status_slot() -> &'static Mutex<Vec<(String, std::time::Instant)>> {
-    // Empty until the first worker event: with no worker attached (see
-    // issue #2) there is nothing worth showing, so the HUD box stays hidden.
+    // Empty until the first worker event: with no worker attached (no sidecar
+    // binary found, see issue #2) there is nothing worth showing, so the HUD
+    // box stays hidden.
     STATUS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
@@ -509,12 +510,14 @@ fn last_shot_slot() -> &'static Mutex<Option<String>> {
     LAST_SHOT.get_or_init(|| Mutex::new(None))
 }
 
-/// Create the channel pair and install the game side.
+/// Create the channel pair and install the game side in-process.
 ///
 /// Returns the worker side — the receiving end of the commands and the
 /// sending end of the events — exactly once. A second call returns `None`.
-// Called by the worker glue once the bundle crate can be staged into the
-// game build; until then the hooks only send.
+/// In-game the worker attaches as a sidecar process instead (M17,
+/// [`ensure_attached`]); this in-process pair is for tests and for a future
+/// `[[crate]]` glue when horizon-mixins can stage the worker crate (issue #2
+/// options 1/2).
 #[allow(dead_code)]
 pub fn install() -> Option<(Receiver<GameCommand>, Sender<ModEvent>)> {
     if COMMAND_TX.get().is_some() {
@@ -751,6 +754,801 @@ pub fn logout() {
 #[allow(dead_code)]
 pub fn shutdown() {
     send(GameCommand::Shutdown);
+}
+
+// ---- M17: the sidecar worker bridge (issue #2 option 3, #40) ----
+//
+// The game crate cannot depend on the `atmospheric` crate (horizon-mixins
+// allow-lists registry deps to Horizon's Cargo.lock), so instead of linking
+// the worker in, the game spawns the `atmospheric-worker` binary next to the
+// game executable and bridges the channel pair over its stdio: one JSON
+// `GameCommand` line per command in, one JSON `ModEvent` line per event out.
+// The wire format is serde's externally tagged default — pinned crate-side
+// in `crates/atmospheric/src/lib.rs` tests; encoded/decoded here by hand
+// because this module is std-only.
+
+/// The sidecar binary's file name, looked up next to the game executable.
+const WORKER_BIN_NAME: &str = if cfg!(windows) {
+    "atmospheric-worker.exe"
+} else {
+    "atmospheric-worker"
+};
+
+/// The directory the game executable lives in.
+fn exe_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|p| p.to_path_buf())
+}
+
+/// Where the sidecar worker binary is and which data dir to give it:
+/// `ATMOSPHERIC_WORKER_BIN` / `ATMOSPHERIC_DATA_DIR` override the defaults
+/// (the binary next to the game executable, `<exe dir>/atmospheric-data`).
+fn sidecar_paths() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let bin = std::env::var_os("ATMOSPHERIC_WORKER_BIN")
+        .map(std::path::PathBuf::from)
+        .or_else(|| exe_dir().map(|dir| dir.join(WORKER_BIN_NAME)))
+        .filter(|path| path.is_file());
+    let data_dir = std::env::var_os("ATMOSPHERIC_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| exe_dir().map(|dir| dir.join("atmospheric-data")));
+    bin.zip(data_dir)
+}
+
+static ATTACHED: OnceLock<bool> = OnceLock::new();
+
+/// Attach a worker exactly once: spawn the sidecar binary if one is found
+/// (M17), otherwise leave the channel unattached — sends stay no-ops and the
+/// HUD stays hidden, exactly as before. Returns true when a worker is
+/// attached (including an earlier in-process [`install`]). The tick helper
+/// calls this; after the first call it is a cheap static read.
+pub fn ensure_attached() -> bool {
+    *ATTACHED.get_or_init(|| {
+        if COMMAND_TX.get().is_some() {
+            return true;
+        }
+        match sidecar_paths() {
+            Some((bin, data_dir)) => attach_sidecar(&bin, &data_dir),
+            None => false,
+        }
+    })
+}
+
+/// Spawn the sidecar worker binary and wire the channel pair to its stdio.
+/// Returns the game side of the pair (commands out, events in), or `None`
+/// when the binary could not be spawned. The caller owns the ends; when the
+/// command sender is dropped, the writer thread closes the child's stdin and
+/// the worker stops (and a reaper thread collects the child).
+fn spawn_sidecar(
+    bin: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> Option<(Sender<GameCommand>, Receiver<ModEvent>)> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(bin)
+        .arg("--data-dir")
+        .arg(data_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let stdin = child.stdin.take()?;
+    let stdout = child.stdout.take()?;
+    let (command_tx, command_rx) = std::sync::mpsc::channel::<GameCommand>();
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<ModEvent>();
+
+    // Commands -> child stdin, one encoded JSON line each.
+    std::thread::Builder::new()
+        .name("atmospheric-sidecar-out".into())
+        .spawn(move || {
+            use std::io::Write;
+            let mut stdin = stdin;
+            while let Ok(command) = command_rx.recv() {
+                let line = encode_command(&command);
+                let written = stdin
+                    .write_all(line.as_bytes())
+                    .and_then(|_| stdin.write_all(b"\n"))
+                    .and_then(|_| stdin.flush())
+                    .is_ok();
+                if !written || matches!(command, GameCommand::Shutdown) {
+                    break;
+                }
+            }
+            // `stdin` drops here: the worker sees EOF and stops.
+        })
+        .ok()?;
+
+    // Child stdout -> events. Unreadable lines become a Failed event so the
+    // HUD says something instead of silently dropping worker output.
+    std::thread::Builder::new()
+        .name("atmospheric-sidecar-in".into())
+        .spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let event = decode_event(&line).unwrap_or_else(|| ModEvent::Failed {
+                    message: format!("unreadable worker event: {}", &line[..line.len().min(120)]),
+                });
+                if event_tx.send(event).is_err() {
+                    break;
+                }
+            }
+        })
+        .ok()?;
+
+    // Reap the child when it exits so it never lingers as a zombie.
+    std::thread::Builder::new()
+        .name("atmospheric-sidecar-wait".into())
+        .spawn(move || {
+            let _ = child.wait();
+        })
+        .ok()?;
+
+    Some((command_tx, event_rx))
+}
+
+/// Attach a sidecar worker to the channel statics (used by
+/// [`ensure_attached`]). Returns true on success.
+fn attach_sidecar(bin: &std::path::Path, data_dir: &std::path::Path) -> bool {
+    let Some((command_tx, event_rx)) = spawn_sidecar(bin, data_dir) else {
+        return false;
+    };
+    if COMMAND_TX.set(command_tx).is_err() || EVENTS_RX.set(Mutex::new(event_rx)).is_err() {
+        return false;
+    }
+    true
+}
+
+// ---- Minimal JSON (std-only), just enough for the sidecar wire format ----
+
+/// A parsed JSON value. Numbers are integers only — the wire format carries
+/// no floats.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Json {
+    Null,
+    Bool(bool),
+    Int(i128),
+    Str(String),
+    Arr(Vec<Json>),
+    Obj(Vec<(String, Json)>),
+}
+
+fn jstr(s: &str) -> Json {
+    Json::Str(s.to_string())
+}
+fn jint(n: i64) -> Json {
+    Json::Int(i128::from(n))
+}
+fn juint(n: u64) -> Json {
+    Json::Int(i128::from(n))
+}
+fn jbool(b: bool) -> Json {
+    Json::Bool(b)
+}
+fn jopt_str(value: &Option<String>) -> Json {
+    match value {
+        Some(s) => Json::Str(s.clone()),
+        None => Json::Null,
+    }
+}
+fn jobj(pairs: Vec<(&str, Json)>) -> Json {
+    Json::Obj(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+}
+/// Serialize a JSON value (compact, like serde_json::to_string).
+fn write_json(value: &Json, out: &mut String) {
+    match value {
+        Json::Null => out.push_str("null"),
+        Json::Bool(true) => out.push_str("true"),
+        Json::Bool(false) => out.push_str("false"),
+        Json::Int(n) => out.push_str(&n.to_string()),
+        Json::Str(s) => write_json_str(s, out),
+        Json::Arr(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_json(item, out);
+            }
+            out.push(']');
+        }
+        Json::Obj(pairs) => {
+            out.push('{');
+            for (i, (k, v)) in pairs.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_json_str(k, out);
+                out.push(':');
+                write_json(v, out);
+            }
+            out.push('}');
+        }
+    }
+}
+
+fn write_json_str(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// Parse one JSON document. Returns `None` on any syntax error.
+fn parse_json(input: &str) -> Option<Json> {
+    let mut p = Parser {
+        chars: input.chars().collect(),
+        pos: 0,
+    };
+    p.skip_ws();
+    let value = p.value()?;
+    p.skip_ws();
+    if p.pos == p.chars.len() {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+struct Parser {
+    chars: Vec<char>,
+    pos: usize,
+}
+
+impl Parser {
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.pos).copied()
+    }
+    fn next(&mut self) -> Option<char> {
+        let c = self.peek();
+        if c.is_some() {
+            self.pos += 1;
+        }
+        c
+    }
+    fn skip_ws(&mut self) {
+        while matches!(self.peek(), Some(' ' | '\t' | '\n' | '\r')) {
+            self.pos += 1;
+        }
+    }
+    fn expect(&mut self, c: char) -> Option<()> {
+        if self.next() == Some(c) {
+            Some(())
+        } else {
+            None
+        }
+    }
+    fn value(&mut self) -> Option<Json> {
+        self.skip_ws();
+        match self.peek()? {
+            'n' => self.literal("null", Json::Null),
+            't' => self.literal("true", Json::Bool(true)),
+            'f' => self.literal("false", Json::Bool(false)),
+            '"' => self.string().map(Json::Str),
+            '[' => {
+                self.pos += 1;
+                let mut items = Vec::new();
+                self.skip_ws();
+                if self.peek() == Some(']') {
+                    self.pos += 1;
+                    return Some(Json::Arr(items));
+                }
+                loop {
+                    items.push(self.value()?);
+                    self.skip_ws();
+                    match self.next()? {
+                        ',' => continue,
+                        ']' => return Some(Json::Arr(items)),
+                        _ => return None,
+                    }
+                }
+            }
+            '{' => {
+                self.pos += 1;
+                let mut pairs = Vec::new();
+                self.skip_ws();
+                if self.peek() == Some('}') {
+                    self.pos += 1;
+                    return Some(Json::Obj(pairs));
+                }
+                loop {
+                    self.skip_ws();
+                    let key = self.string()?;
+                    self.skip_ws();
+                    self.expect(':')?;
+                    let value = self.value()?;
+                    pairs.push((key, value));
+                    self.skip_ws();
+                    match self.next()? {
+                        ',' => continue,
+                        '}' => return Some(Json::Obj(pairs)),
+                        _ => return None,
+                    }
+                }
+            }
+            '-' | '0'..='9' => self.number(),
+            _ => None,
+        }
+    }
+    fn literal(&mut self, text: &str, value: Json) -> Option<Json> {
+        for c in text.chars() {
+            if self.next() != Some(c) {
+                return None;
+            }
+        }
+        Some(value)
+    }
+    fn number(&mut self) -> Option<Json> {
+        let start = self.pos;
+        if self.peek() == Some('-') {
+            self.pos += 1;
+        }
+        while matches!(self.peek(), Some('0'..='9')) {
+            self.pos += 1;
+        }
+        let text: String = self.chars[start..self.pos].iter().collect();
+        text.parse::<i128>().ok().map(Json::Int)
+    }
+    fn string(&mut self) -> Option<String> {
+        self.expect('"')?;
+        let mut out = String::new();
+        loop {
+            match self.next()? {
+                '"' => return Some(out),
+                '\\' => match self.next()? {
+                    '"' => out.push('"'),
+                    '\\' => out.push('\\'),
+                    '/' => out.push('/'),
+                    'b' => out.push('\u{0008}'),
+                    'f' => out.push('\u{000C}'),
+                    'n' => out.push('\n'),
+                    'r' => out.push('\r'),
+                    't' => out.push('\t'),
+                    'u' => {
+                        let hi = self.hex4()?;
+                        let code = if (0xD800..0xDC00).contains(&hi) {
+                            // High surrogate: a low surrogate must follow.
+                            if self.next() != Some('\\') || self.next() != Some('u') {
+                                return None;
+                            }
+                            let lo = self.hex4()?;
+                            if !(0xDC00..0xE000).contains(&lo) {
+                                return None;
+                            }
+                            0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)
+                        } else {
+                            hi
+                        };
+                        out.push(char::from_u32(code)?);
+                    }
+                    _ => return None,
+                },
+                c => out.push(c),
+            }
+        }
+    }
+    fn hex4(&mut self) -> Option<u32> {
+        let mut value = 0u32;
+        for _ in 0..4 {
+            let c = self.next()?;
+            let digit = c.to_digit(16)?;
+            value = value * 16 + digit;
+        }
+        Some(value)
+    }
+}
+
+// Decoding helpers: each returns None on a shape mismatch.
+fn jget<'a>(obj: &'a [(String, Json)], key: &str) -> Option<&'a Json> {
+    obj.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+}
+fn as_obj(value: &Json) -> Option<&[(String, Json)]> {
+    match value {
+        Json::Obj(pairs) => Some(pairs),
+        _ => None,
+    }
+}
+fn as_str(value: &Json) -> Option<&str> {
+    match value {
+        Json::Str(s) => Some(s),
+        _ => None,
+    }
+}
+fn as_int(value: &Json) -> Option<i128> {
+    match value {
+        Json::Int(n) => Some(*n),
+        _ => None,
+    }
+}
+fn as_bool(value: &Json) -> Option<bool> {
+    match value {
+        Json::Bool(b) => Some(*b),
+        _ => None,
+    }
+}
+fn as_arr(value: &Json) -> Option<&[Json]> {
+    match value {
+        Json::Arr(items) => Some(items),
+        _ => None,
+    }
+}
+/// `null` -> Some(None), string -> Some(Some), anything else -> None.
+fn as_opt_str(value: &Json) -> Option<Option<String>> {
+    match value {
+        Json::Null => Some(None),
+        Json::Str(s) => Some(Some(s.clone())),
+        _ => None,
+    }
+}
+fn req_str(obj: &[(String, Json)], key: &str) -> Option<String> {
+    as_str(jget(obj, key)?).map(str::to_string)
+}
+fn req_int(obj: &[(String, Json)], key: &str) -> Option<i128> {
+    as_int(jget(obj, key)?)
+}
+
+/// Encode a game-side command as one JSON line in the sidecar wire format
+/// (serde's externally tagged default, as pinned in the crate's lib tests):
+/// unit variants are bare strings, struct variants `{"Variant":{...}}`.
+fn encode_command(command: &GameCommand) -> String {
+    let value = match command {
+        GameCommand::Login => jstr("Login"),
+        GameCommand::LoginOAuth { handle } => {
+            jobj(vec![("LoginOAuth", jobj(vec![("handle", jstr(handle))]))])
+        }
+        GameCommand::SaveConfig { settings } => jobj(vec![(
+            "SaveConfig",
+            jobj(vec![(
+                "config",
+                jobj(vec![
+                    ("pds_url", jstr(&settings.pds_url)),
+                    ("identifier", jstr(&settings.identifier)),
+                    ("app_password", jstr(&settings.app_password)),
+                    ("poll_interval_secs", juint(settings.poll_interval_secs)),
+                    ("post_death_messages", jbool(settings.post_death_messages)),
+                    ("post_chat_messages", jbool(settings.post_chat_messages)),
+                    ("chat_server_id", jstr(&settings.chat_server_id)),
+                ]),
+            )]),
+        )]),
+        GameCommand::PostText { text } => {
+            jobj(vec![("PostText", jobj(vec![("text", jstr(text))]))])
+        }
+        GameCommand::PostImage {
+            path,
+            alt_text,
+            text,
+        } => jobj(vec![(
+            "PostImage",
+            jobj(vec![
+                ("path", jstr(path)),
+                ("alt_text", jstr(alt_text)),
+                ("text", jopt_str(text)),
+            ]),
+        )]),
+        GameCommand::RefreshNotifications => jstr("RefreshNotifications"),
+        GameCommand::PostChat { message, automatic } => jobj(vec![(
+            "PostChat",
+            jobj(vec![
+                ("message", jstr(message)),
+                ("automatic", jbool(*automatic)),
+            ]),
+        )]),
+        GameCommand::PostSnapshot { summary } => jobj(vec![(
+            "PostSnapshot",
+            jobj(vec![(
+                "summary",
+                jobj(vec![
+                    ("username", jstr(&summary.username)),
+                    ("dimension", jstr(&summary.dimension)),
+                    (
+                        "position",
+                        jobj(vec![
+                            ("x", jint(summary.x)),
+                            ("y", jint(summary.y)),
+                            ("z", jint(summary.z)),
+                        ]),
+                    ),
+                    ("health", jstr(&summary.health)),
+                    ("food", jint(summary.food)),
+                    ("xp_level", jint(summary.xp_level)),
+                    ("game_mode", jstr(&summary.game_mode)),
+                ]),
+            )]),
+        )]),
+        GameCommand::PostSkin {
+            skin_path,
+            cape_path,
+            model,
+        } => jobj(vec![(
+            "PostSkin",
+            jobj(vec![
+                ("skin_path", jopt_str(skin_path)),
+                ("cape_path", jopt_str(cape_path)),
+                ("model", jstr(model)),
+            ]),
+        )]),
+        GameCommand::PostServerProfile => jstr("PostServerProfile"),
+        GameCommand::FetchList { reference } => jobj(vec![(
+            "FetchList",
+            jobj(vec![("reference", jstr(reference))]),
+        )]),
+        GameCommand::CheckGate { list, subject } => jobj(vec![(
+            "CheckGate",
+            jobj(vec![("list", jstr(list)), ("subject", jstr(subject))]),
+        )]),
+        GameCommand::FetchChat { subject } => {
+            jobj(vec![("FetchChat", jobj(vec![("subject", jstr(subject))]))])
+        }
+        GameCommand::FetchLabels { subject } => jobj(vec![(
+            "FetchLabels",
+            jobj(vec![("subject", jstr(subject))]),
+        )]),
+        GameCommand::FetchLabelerLabels { labeler, subject } => jobj(vec![(
+            "FetchLabelerLabels",
+            jobj(vec![
+                ("labeler", jstr(labeler)),
+                ("subject", jopt_str(subject)),
+            ]),
+        )]),
+        GameCommand::FetchPlayer { subject } => jobj(vec![(
+            "FetchPlayer",
+            jobj(vec![("subject", jstr(subject))]),
+        )]),
+        GameCommand::FetchPlayerSkin { subject } => jobj(vec![(
+            "FetchPlayerSkin",
+            jobj(vec![("subject", jstr(subject))]),
+        )]),
+        GameCommand::PostDeathMessage { text } => {
+            jobj(vec![("PostDeathMessage", jobj(vec![("text", jstr(text))]))])
+        }
+        GameCommand::Logout => jstr("Logout"),
+        GameCommand::Shutdown => jstr("Shutdown"),
+    };
+    let mut out = String::new();
+    write_json(&value, &mut out);
+    out
+}
+
+fn decode_verdict(value: &Json) -> Option<EndorsementVerdict> {
+    match value {
+        Json::Str(s) => match s.as_str() {
+            "UnknownEndorser" => Some(EndorsementVerdict::UnknownEndorser),
+            "BadSignature" => Some(EndorsementVerdict::BadSignature),
+            "Malformed" => Some(EndorsementVerdict::Malformed),
+            _ => None,
+        },
+        Json::Obj(pairs) if pairs.len() == 1 && pairs[0].0 == "Verified" => {
+            let obj = as_obj(&pairs[0].1)?;
+            Some(EndorsementVerdict::Verified {
+                endorser: req_str(obj, "endorser")?,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn decode_session(value: &Json) -> Option<SessionState> {
+    match value {
+        Json::Str(s) => match s.as_str() {
+            "LoggedOut" => Some(SessionState::LoggedOut),
+            "LoggingIn" => Some(SessionState::LoggingIn),
+            _ => None,
+        },
+        Json::Obj(pairs) if pairs.len() == 1 => match pairs[0].0.as_str() {
+            "LoggedIn" => {
+                let obj = as_obj(&pairs[0].1)?;
+                Some(SessionState::LoggedIn {
+                    did: req_str(obj, "did")?,
+                })
+            }
+            "Failed" => {
+                let obj = as_obj(&pairs[0].1)?;
+                Some(SessionState::Failed {
+                    message: req_str(obj, "message")?,
+                })
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn decode_notification(value: &Json) -> Option<NotificationDigest> {
+    let obj = as_obj(value)?;
+    Some(NotificationDigest {
+        uri: req_str(obj, "uri")?,
+        author_handle: req_str(obj, "author_handle")?,
+        reason: req_str(obj, "reason")?,
+        text_snippet: req_str(obj, "text_snippet")?,
+    })
+}
+
+fn decode_label(value: &Json) -> Option<LabelDigest> {
+    let obj = as_obj(value)?;
+    Some(LabelDigest {
+        val: req_str(obj, "val")?,
+        src: req_str(obj, "src")?,
+        neg: jget(obj, "neg").and_then(as_bool).unwrap_or(false),
+        cts: req_str(obj, "cts")?,
+        // `exp` is skipped entirely when absent (skip_serializing_if).
+        exp: jget(obj, "exp").and_then(as_opt_str).flatten(),
+    })
+}
+
+fn decode_chat_digest(value: &Json) -> Option<ChatDigest> {
+    let obj = as_obj(value)?;
+    Some(ChatDigest {
+        rkey: req_str(obj, "rkey")?,
+        at_uri: req_str(obj, "at_uri")?,
+        sent_at: req_str(obj, "sent_at")?,
+        server: req_str(obj, "server")?,
+        message: req_str(obj, "message")?,
+    })
+}
+
+fn decode_player_digest(value: &Json) -> Option<PlayerDigest> {
+    let obj = as_obj(value)?;
+    Some(PlayerDigest {
+        did: req_str(obj, "did")?,
+        rkey: req_str(obj, "rkey")?,
+        at_uri: req_str(obj, "at_uri")?,
+        version: req_int(obj, "version")? as i64,
+        issued_at: req_str(obj, "issued_at")?,
+        username: req_str(obj, "username")?,
+        dimension: req_str(obj, "dimension")?,
+        x: req_int(obj, "x")? as i64,
+        y: req_int(obj, "y")? as i64,
+        z: req_int(obj, "z")? as i64,
+        health: req_str(obj, "health")?,
+        food: req_int(obj, "food")? as i64,
+        xp_level: req_int(obj, "xp_level")? as i64,
+        game_mode: req_str(obj, "game_mode")?,
+        verdict: decode_verdict(jget(obj, "verdict")?)?,
+    })
+}
+
+fn decode_blob_digest(value: &Json) -> Option<BlobDigest> {
+    let obj = as_obj(value)?;
+    Some(BlobDigest {
+        cid: req_str(obj, "cid")?,
+        mime_type: req_str(obj, "mime_type")?,
+        size: req_int(obj, "size")? as u64,
+        path: jget(obj, "path").and_then(as_opt_str)?,
+    })
+}
+
+fn decode_skin_digest(value: &Json) -> Option<SkinDigest> {
+    let obj = as_obj(value)?;
+    Some(SkinDigest {
+        did: req_str(obj, "did")?,
+        rkey: req_str(obj, "rkey")?,
+        at_uri: req_str(obj, "at_uri")?,
+        model: req_str(obj, "model")?,
+        timestamp: req_str(obj, "timestamp")?,
+        verdict: decode_verdict(jget(obj, "verdict")?)?,
+        skin: match jget(obj, "skin")? {
+            Json::Null => None,
+            other => decode_blob_digest(other),
+        },
+        cape: match jget(obj, "cape")? {
+            Json::Null => None,
+            other => decode_blob_digest(other),
+        },
+    })
+}
+
+/// Decode one JSON line from the sidecar worker into a game-side event.
+/// Returns `None` on any shape mismatch (the caller reports a Failed event).
+fn decode_event(line: &str) -> Option<ModEvent> {
+    let Json::Obj(top) = parse_json(line)? else {
+        return None;
+    };
+    let (tag, payload) = top.first()?;
+    let payload_obj = || as_obj(payload);
+    match tag.as_str() {
+        "Session" => decode_session(payload).map(ModEvent::Session),
+        "Posted" => Some(ModEvent::Posted {
+            uri: req_str(payload_obj()?, "uri")?,
+        }),
+        "Failed" => Some(ModEvent::Failed {
+            message: req_str(payload_obj()?, "message")?,
+        }),
+        "OAuthAuthorize" => Some(ModEvent::OAuthAuthorize {
+            url: req_str(payload_obj()?, "url")?,
+        }),
+        "Notifications" => {
+            let obj = payload_obj()?;
+            let items = as_arr(jget(obj, "items")?)?
+                .iter()
+                .map(decode_notification)
+                .collect::<Option<Vec<_>>>()?;
+            Some(ModEvent::Notifications { items })
+        }
+        "ListMembers" => {
+            let obj = payload_obj()?;
+            let members = as_arr(jget(obj, "members")?)?
+                .iter()
+                .map(|m| as_str(m).map(str::to_string))
+                .collect::<Option<Vec<_>>>()?;
+            Some(ModEvent::ListMembers {
+                list: req_str(obj, "list")?,
+                members,
+            })
+        }
+        "GateDecision" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::GateDecision {
+                list: req_str(obj, "list")?,
+                subject: req_str(obj, "subject")?,
+                allowed: jget(obj, "allowed").and_then(as_bool)?,
+            })
+        }
+        "ChatHistory" => {
+            let obj = payload_obj()?;
+            let items = as_arr(jget(obj, "items")?)?
+                .iter()
+                .map(decode_chat_digest)
+                .collect::<Option<Vec<_>>>()?;
+            Some(ModEvent::ChatHistory {
+                subject: req_str(obj, "subject")?,
+                via: req_str(obj, "via")?,
+                total: req_int(obj, "total")? as usize,
+                items,
+            })
+        }
+        "Labels" => {
+            let obj = payload_obj()?;
+            let labels = as_arr(jget(obj, "labels")?)?
+                .iter()
+                .map(decode_label)
+                .collect::<Option<Vec<_>>>()?;
+            Some(ModEvent::Labels {
+                subject: req_str(obj, "subject")?,
+                via: req_str(obj, "via")?,
+                labels,
+            })
+        }
+        "PlayerSnapshot" => {
+            let obj = payload_obj()?;
+            let snapshot = match jget(obj, "snapshot")? {
+                Json::Null => None,
+                other => Some(decode_player_digest(other)?),
+            };
+            Some(ModEvent::PlayerSnapshot {
+                subject: req_str(obj, "subject")?,
+                via: req_str(obj, "via")?,
+                snapshot: Box::new(snapshot),
+            })
+        }
+        "PlayerSkin" => {
+            let obj = payload_obj()?;
+            let skin = match jget(obj, "skin")? {
+                Json::Null => None,
+                other => Some(decode_skin_digest(other)?),
+            };
+            Some(ModEvent::PlayerSkin {
+                subject: req_str(obj, "subject")?,
+                via: req_str(obj, "via")?,
+                skin: Box::new(skin),
+            })
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1183,5 +1981,424 @@ mod tests {
             location_line(12.5, 64.0, -3.25, "minecraft:the_nether"),
             "At 12, 64, -4 in minecraft:the_nether — from Horizon"
         );
+    }
+
+    // ---- M17: the sidecar wire codec (the crate-side lib tests pin the same
+    // shapes with serde_json, so the two sides cannot drift apart) ----
+
+    fn sample_settings() -> Settings {
+        Settings {
+            pds_url: "https://pds.example".into(),
+            identifier: "someone.example".into(),
+            app_password: "abcd-1234-efgh-5678".into(),
+            poll_interval_secs: 30,
+            post_death_messages: false,
+            post_chat_messages: true,
+            chat_server_id: "horizon-client".into(),
+        }
+    }
+
+    #[test]
+    fn encode_command_wire_shapes() {
+        assert_eq!(encode_command(&GameCommand::Login), r#""Login""#);
+        assert_eq!(
+            encode_command(&GameCommand::LoginOAuth {
+                handle: "a.test".into()
+            }),
+            r#"{"LoginOAuth":{"handle":"a.test"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::SaveConfig {
+                settings: sample_settings()
+            }),
+            r#"{"SaveConfig":{"config":{"pds_url":"https://pds.example","identifier":"someone.example","app_password":"abcd-1234-efgh-5678","poll_interval_secs":30,"post_death_messages":false,"post_chat_messages":true,"chat_server_id":"horizon-client"}}}"#
+        );
+        // String escaping matches serde_json: quote, backslash, newline.
+        assert_eq!(
+            encode_command(&GameCommand::PostText {
+                text: "hi \"you\"\n\\".into()
+            }),
+            r#"{"PostText":{"text":"hi \"you\"\n\\"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::PostImage {
+                path: "/tmp/s.png".into(),
+                alt_text: "a shot".into(),
+                text: None,
+            }),
+            r#"{"PostImage":{"path":"/tmp/s.png","alt_text":"a shot","text":null}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::RefreshNotifications),
+            r#""RefreshNotifications""#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::PostChat {
+                message: "m".into(),
+                automatic: true,
+            }),
+            r#"{"PostChat":{"message":"m","automatic":true}}"#
+        );
+        // The flat game-side x/y/z map onto the nested `position` object.
+        assert_eq!(
+            encode_command(&GameCommand::PostSnapshot {
+                summary: snapshot_from_player("Steve", "minecraft:overworld", -24.5, 67.0, -2.5)
+            }),
+            r#"{"PostSnapshot":{"summary":{"username":"Steve","dimension":"minecraft:overworld","position":{"x":-25,"y":67,"z":-3},"health":"20","food":20,"xp_level":0,"game_mode":"survival"}}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::PostSkin {
+                skin_path: None,
+                cape_path: Some("/c.png".into()),
+                model: "slim".into(),
+            }),
+            r#"{"PostSkin":{"skin_path":null,"cape_path":"/c.png","model":"slim"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::PostServerProfile),
+            r#""PostServerProfile""#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::FetchList {
+                reference: "at://did:plc:x/app.bsky.graph.list/3k".into()
+            }),
+            r#"{"FetchList":{"reference":"at://did:plc:x/app.bsky.graph.list/3k"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::CheckGate {
+                list: "l".into(),
+                subject: "s".into(),
+            }),
+            r#"{"CheckGate":{"list":"l","subject":"s"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::FetchChat {
+                subject: "did:plc:z".into()
+            }),
+            r#"{"FetchChat":{"subject":"did:plc:z"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::FetchLabels {
+                subject: "did:plc:z".into()
+            }),
+            r#"{"FetchLabels":{"subject":"did:plc:z"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::FetchLabelerLabels {
+                labeler: "did:plc:l".into(),
+                subject: None,
+            }),
+            r#"{"FetchLabelerLabels":{"labeler":"did:plc:l","subject":null}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::FetchPlayer {
+                subject: "did:plc:z".into()
+            }),
+            r#"{"FetchPlayer":{"subject":"did:plc:z"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::FetchPlayerSkin {
+                subject: "did:plc:z".into()
+            }),
+            r#"{"FetchPlayerSkin":{"subject":"did:plc:z"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::PostDeathMessage { text: "t".into() }),
+            r#"{"PostDeathMessage":{"text":"t"}}"#
+        );
+        assert_eq!(encode_command(&GameCommand::Logout), r#""Logout""#);
+        assert_eq!(encode_command(&GameCommand::Shutdown), r#""Shutdown""#);
+    }
+
+    #[test]
+    fn decode_event_wire_shapes() {
+        assert_eq!(
+            decode_event(r#"{"Session":"LoggedOut"}"#),
+            Some(ModEvent::Session(SessionState::LoggedOut))
+        );
+        assert_eq!(
+            decode_event(r#"{"Session":"LoggingIn"}"#),
+            Some(ModEvent::Session(SessionState::LoggingIn))
+        );
+        assert_eq!(
+            decode_event(r#"{"Session":{"LoggedIn":{"did":"did:plc:x"}}}"#),
+            Some(ModEvent::Session(SessionState::LoggedIn {
+                did: "did:plc:x".into()
+            }))
+        );
+        assert_eq!(
+            decode_event(r#"{"Session":{"Failed":{"message":"m"}}}"#),
+            Some(ModEvent::Session(SessionState::Failed {
+                message: "m".into()
+            }))
+        );
+        assert_eq!(
+            decode_event(r#"{"Posted":{"uri":"at://u"}}"#),
+            Some(ModEvent::Posted {
+                uri: "at://u".into()
+            })
+        );
+        assert_eq!(
+            decode_event(r#"{"Failed":{"message":"m"}}"#),
+            Some(ModEvent::Failed {
+                message: "m".into()
+            })
+        );
+        assert_eq!(
+            decode_event(r#"{"OAuthAuthorize":{"url":"https://as.example"}}"#),
+            Some(ModEvent::OAuthAuthorize {
+                url: "https://as.example".into()
+            })
+        );
+        assert_eq!(
+            decode_event(
+                r#"{"Notifications":{"items":[{"uri":"u","author_handle":"a.test","reason":"like","text_snippet":"hi"}]}}"#
+            ),
+            Some(ModEvent::Notifications {
+                items: vec![NotificationDigest {
+                    uri: "u".into(),
+                    author_handle: "a.test".into(),
+                    reason: "like".into(),
+                    text_snippet: "hi".into(),
+                }]
+            })
+        );
+        assert_eq!(
+            decode_event(r#"{"ListMembers":{"list":"l","members":["did:plc:a","did:plc:b"]}}"#),
+            Some(ModEvent::ListMembers {
+                list: "l".into(),
+                members: vec!["did:plc:a".into(), "did:plc:b".into()]
+            })
+        );
+        assert_eq!(
+            decode_event(r#"{"GateDecision":{"list":"l","subject":"s","allowed":true}}"#),
+            Some(ModEvent::GateDecision {
+                list: "l".into(),
+                subject: "s".into(),
+                allowed: true
+            })
+        );
+        assert_eq!(
+            decode_event(
+                r#"{"ChatHistory":{"subject":"s","via":"https://pds.example","total":2,"items":[{"rkey":"r","at_uri":"at://u","sent_at":"t","server":"srv","message":"hi"}]}}"#
+            ),
+            Some(ModEvent::ChatHistory {
+                subject: "s".into(),
+                via: "https://pds.example".into(),
+                total: 2,
+                items: vec![ChatDigest {
+                    rkey: "r".into(),
+                    at_uri: "at://u".into(),
+                    sent_at: "t".into(),
+                    server: "srv".into(),
+                    message: "hi".into(),
+                }]
+            })
+        );
+        // `exp` is skipped when absent (skip_serializing_if) and present otherwise.
+        assert_eq!(
+            decode_event(
+                r#"{"Labels":{"subject":"s","via":"v","labels":[{"val":"online","src":"did:plc:l","neg":false,"cts":"t"}]}}"#
+            ),
+            Some(ModEvent::Labels {
+                subject: "s".into(),
+                via: "v".into(),
+                labels: vec![LabelDigest {
+                    val: "online".into(),
+                    src: "did:plc:l".into(),
+                    neg: false,
+                    cts: "t".into(),
+                    exp: None,
+                }]
+            })
+        );
+        assert_eq!(
+            decode_event(
+                r#"{"Labels":{"subject":"s","via":"v","labels":[{"val":"spam","src":"did:plc:l","neg":true,"cts":"t","exp":"e"}]}}"#
+            ),
+            Some(ModEvent::Labels {
+                subject: "s".into(),
+                via: "v".into(),
+                labels: vec![LabelDigest {
+                    val: "spam".into(),
+                    src: "did:plc:l".into(),
+                    neg: true,
+                    cts: "t".into(),
+                    exp: Some("e".into()),
+                }]
+            })
+        );
+        assert_eq!(
+            decode_event(r#"{"PlayerSnapshot":{"subject":"s","via":"v","snapshot":null}}"#),
+            Some(ModEvent::PlayerSnapshot {
+                subject: "s".into(),
+                via: "v".into(),
+                snapshot: Box::new(None),
+            })
+        );
+        assert_eq!(
+            decode_event(
+                r#"{"PlayerSnapshot":{"subject":"s","via":"v","snapshot":{"did":"d","rkey":"r","at_uri":"u","version":2,"issued_at":"i","username":"M","dimension":"dim","x":1,"y":2,"z":3,"health":"20","food":20,"xp_level":0,"game_mode":"survival","verdict":{"Verified":{"endorser":"k"}}}}}"#
+            ),
+            Some(ModEvent::PlayerSnapshot {
+                subject: "s".into(),
+                via: "v".into(),
+                snapshot: Box::new(Some(PlayerDigest {
+                    did: "d".into(),
+                    rkey: "r".into(),
+                    at_uri: "u".into(),
+                    version: 2,
+                    issued_at: "i".into(),
+                    username: "M".into(),
+                    dimension: "dim".into(),
+                    x: 1,
+                    y: 2,
+                    z: 3,
+                    health: "20".into(),
+                    food: 20,
+                    xp_level: 0,
+                    game_mode: "survival".into(),
+                    verdict: EndorsementVerdict::Verified {
+                        endorser: "k".into()
+                    },
+                })),
+            })
+        );
+        assert_eq!(
+            decode_event(
+                r#"{"PlayerSkin":{"subject":"s","via":"v","skin":{"did":"d","rkey":"r","at_uri":"u","model":"slim","timestamp":"t","verdict":"BadSignature","skin":{"cid":"c","mime_type":"image/png","size":5,"path":null},"cape":null}}}"#
+            ),
+            Some(ModEvent::PlayerSkin {
+                subject: "s".into(),
+                via: "v".into(),
+                skin: Box::new(Some(SkinDigest {
+                    did: "d".into(),
+                    rkey: "r".into(),
+                    at_uri: "u".into(),
+                    model: "slim".into(),
+                    timestamp: "t".into(),
+                    verdict: EndorsementVerdict::BadSignature,
+                    skin: Some(BlobDigest {
+                        cid: "c".into(),
+                        mime_type: "image/png".into(),
+                        size: 5,
+                        path: None,
+                    }),
+                    cape: None,
+                })),
+            })
+        );
+        // Malformed lines decode to None (the caller reports a Failed event).
+        for bad in [
+            "",
+            "not json",
+            "{}",
+            "[]",
+            r#"{"Unknown":{}}"#,
+            r#"{"Posted":{}}"#,
+            r#"{"GateDecision":{"list":"l","subject":"s","allowed":"yes"}}"#,
+            r#"{"Session":"Maybe"}"#,
+            r#"{"PlayerSnapshot":{"subject":"s","via":"v","snapshot":{"did":"d"}}}"#,
+            "{\"a\":1} trailing",
+        ] {
+            assert_eq!(decode_event(bad), None, "line: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn json_parser_handles_escapes_and_rejects_garbage() {
+        assert_eq!(
+            parse_json(r#""A\nb\t\"\\/""#),
+            Some(Json::Str("A\nb\t\"\\/".into()))
+        );
+        assert_eq!(parse_json(r#""\u0041""#), Some(Json::Str("A".into())));
+        // A surrogate pair: U+1F600.
+        assert_eq!(
+            parse_json(r#""\ud83d\ude00""#),
+            Some(Json::Str("\u{1F600}".into()))
+        );
+        assert_eq!(
+            parse_json(r#"{"a":[1,-2,null,true,false,{"b":"c"}]}"#),
+            Some(jobj(vec![(
+                "a",
+                Json::Arr(vec![
+                    Json::Int(1),
+                    Json::Int(-2),
+                    Json::Null,
+                    Json::Bool(true),
+                    Json::Bool(false),
+                    jobj(vec![("b", jstr("c"))]),
+                ])
+            )]))
+        );
+        // Whitespace is fine; trailing garbage and lone surrogates are not.
+        assert_eq!(
+            parse_json("  {\"a\" : 1 }  "),
+            Some(jobj(vec![("a", Json::Int(1))]))
+        );
+        assert_eq!(parse_json(""), None);
+        assert_eq!(parse_json("{\"a\":1} x"), None);
+        assert_eq!(parse_json(r#""\ud83d""#), None);
+        assert_eq!(parse_json(r#""\ud83dx""#), None);
+        assert_eq!(parse_json("1.5"), None, "the wire format has no floats");
+        assert_eq!(parse_json("[1,"), None);
+    }
+
+    /// The full spawn path against a fake worker script: commands go down the
+    /// child's stdin as JSON lines, the child's stdout lines come back as
+    /// events, and Shutdown ends both.
+    #[cfg(unix)]
+    #[test]
+    fn sidecar_bridge_forwards_both_directions() {
+        use std::os::unix::fs::PermissionsExt;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "atmospheric-sidecar-rt-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-worker");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             printf '%s\\n' '{\"Session\":\"LoggedOut\"}'\n\
+             while IFS= read -r line; do\n\
+             case \"$line\" in\n\
+             *Shutdown*) exit 0 ;;\n\
+             *) printf '%s\\n' \"{\\\"Failed\\\":{\\\"message\\\":\\\"got:$line\\\"}}\" ;;\n\
+             esac\n\
+             done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let data_dir = dir.join("data");
+
+        let (tx, rx) = spawn_sidecar(&script, &data_dir).expect("spawn the fake worker");
+        let timeout = std::time::Duration::from_secs(5);
+
+        // The handshake event arrives first.
+        assert_eq!(
+            rx.recv_timeout(timeout),
+            Ok(ModEvent::Session(SessionState::LoggedOut))
+        );
+        // A command goes down as one exact JSON line (echoed by the fake).
+        tx.send(GameCommand::PostText { text: "hi".into() })
+            .unwrap();
+        match rx.recv_timeout(timeout) {
+            Ok(ModEvent::Failed { message }) => {
+                assert!(
+                    message.contains(r#"{"PostText":{"text":"hi"}}"#),
+                    "the fake worker echoed: {message}"
+                );
+            }
+            other => panic!("expected the echo Failed event, got {other:?}"),
+        }
+        // Shutdown is forwarded; the fake exits, stdout closes, the channel ends.
+        tx.send(GameCommand::Shutdown).unwrap();
+        assert!(rx.recv_timeout(timeout).is_err());
+        drop(tx);
     }
 }
