@@ -1,0 +1,15 @@
+target
+.git
+.github
+.horizon-cache
+.agents
+.claude
+.codex
+.idea
+.vscode
+saves
+screenshots
+atmospheric-server-data
+*.tar.gz
+*.zip
+.DS_Store

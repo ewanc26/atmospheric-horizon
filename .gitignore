@@ -29,6 +29,7 @@ horizon-player.txt
 saves/
 screenshots/
 .horizon-cache/
+atmospheric-server-data/
 
 # OS
 .DS_Store
