@@ -32,7 +32,8 @@ use std::sync::Mutex;
 pub type Agent = AtpAgent<SessionStore, DpopClient>;
 
 /// Session health, mirrored on the HUD.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Serde: part of the sidecar wire format (M17) — `{"Session":"LoggedOut"}` etc.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionState {
     LoggedOut,
     LoggingIn,

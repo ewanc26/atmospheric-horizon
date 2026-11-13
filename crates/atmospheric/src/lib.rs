@@ -24,9 +24,14 @@ pub mod worker;
 
 pub use config::Config;
 pub use error::AtmosphericError;
+use serde::{Deserialize, Serialize};
 
 /// What the game side asks the worker thread to do.
-#[derive(Debug, Clone)]
+// Serde: the sidecar worker binary (M17) reads/writes these as newline-
+// delimited JSON over stdio, externally tagged (the serde default):
+// `"Login"`, `{"PostText":{"text":"…"}}` — the game-side module hand-rolls
+// exactly this shape without serde.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
     /// Log in with the configured credentials (app-password flow).
     Login,
@@ -118,7 +123,8 @@ pub enum Command {
 }
 
 /// What the worker thread reports back to the game side.
-#[derive(Debug, Clone)]
+// Serde: same sidecar wire format as [`Command`] (M17).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
     /// Session health, mirrored on the HUD.
     Session(session::SessionState),
@@ -181,4 +187,230 @@ pub enum Event {
         // Boxed: SkinDigest is one of the event enum's largest variants.
         skin: Box<Option<skins::SkinDigest>>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sidecar wire format (M17) is serde's externally tagged default; the
+    /// game-side module hand-rolls exactly these shapes, so pin them here.
+    #[test]
+    fn command_wire_shapes() {
+        assert_eq!(
+            serde_json::to_string(&Command::Login).unwrap(),
+            r#""Login""#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::PostText {
+                text: "hi \"there\"\n".into()
+            })
+            .unwrap(),
+            r#"{"PostText":{"text":"hi \"there\"\n"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::PostImage {
+                path: "/tmp/a.png".into(),
+                alt_text: "alt".into(),
+                text: None,
+            })
+            .unwrap(),
+            r#"{"PostImage":{"path":"/tmp/a.png","alt_text":"alt","text":null}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::PostChat {
+                message: "m".into(),
+                automatic: true,
+            })
+            .unwrap(),
+            r#"{"PostChat":{"message":"m","automatic":true}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::FetchLabelerLabels {
+                labeler: "did:plc:x".into(),
+                subject: None,
+            })
+            .unwrap(),
+            r#"{"FetchLabelerLabels":{"labeler":"did:plc:x","subject":null}}"#
+        );
+        // SaveConfig carries the full Config; the game side sends the Settings
+        // subset and container-level serde(default) fills the rest.
+        let json = serde_json::to_string(&Command::SaveConfig {
+            config: Config {
+                pds_url: "https://pds.example".into(),
+                identifier: "alice.test".into(),
+                app_password: "aaaa-bbbb-cccc-dddd".into(),
+                ..Config::default()
+            },
+        })
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value["SaveConfig"]["config"]["pds_url"],
+            "https://pds.example"
+        );
+        // Round-trip every variant's shape.
+        let commands = vec![
+            Command::Login,
+            Command::LoginOAuth {
+                handle: "a.test".into(),
+            },
+            Command::SaveConfig {
+                config: Config::default(),
+            },
+            Command::PostText { text: "t".into() },
+            Command::PostImage {
+                path: "p".into(),
+                alt_text: "a".into(),
+                text: Some("t".into()),
+            },
+            Command::RefreshNotifications,
+            Command::PostChat {
+                message: "m".into(),
+                automatic: false,
+            },
+            Command::PostSnapshot {
+                summary: records::SnapshotSummary {
+                    username: "u".into(),
+                    dimension: "overworld".into(),
+                    position: records::Position {
+                        x: 1,
+                        y: 2,
+                        z: 3,
+                    },
+                    health: "20".into(),
+                    food: 20,
+                    xp_level: 0,
+                    game_mode: "survival".into(),
+                    team: None,
+                    scores: None,
+                },
+            },
+            Command::PostSkin {
+                skin_path: None,
+                cape_path: Some("c".into()),
+                model: "slim".into(),
+            },
+            Command::PostServerProfile,
+            Command::FetchList {
+                reference: "at://x/app.bsky.graph.list/y".into(),
+            },
+            Command::CheckGate {
+                list: "l".into(),
+                subject: "s".into(),
+            },
+            Command::FetchChat {
+                subject: "did:plc:z".into(),
+            },
+            Command::FetchLabels {
+                subject: "did:plc:z".into(),
+            },
+            Command::FetchLabelerLabels {
+                labeler: "l".into(),
+                subject: Some("s".into()),
+            },
+            Command::FetchPlayer {
+                subject: "did:plc:z".into(),
+            },
+            Command::FetchPlayerSkin {
+                subject: "did:plc:z".into(),
+            },
+            Command::PostDeathMessage { text: "t".into() },
+            Command::Logout,
+            Command::Shutdown,
+        ];
+        for command in commands {
+            let line = serde_json::to_string(&command).unwrap();
+            assert!(!line.contains('\n'));
+            let back: Command = serde_json::from_str(&line).unwrap();
+            assert_eq!(format!("{back:?}"), format!("{command:?}"));
+        }
+    }
+
+    #[test]
+    fn event_wire_shapes() {
+        assert_eq!(
+            serde_json::to_string(&Event::Session(session::SessionState::LoggedOut)).unwrap(),
+            r#"{"Session":"LoggedOut"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Event::Session(session::SessionState::LoggedIn {
+                did: "did:plc:x".into()
+            }))
+            .unwrap(),
+            r#"{"Session":{"LoggedIn":{"did":"did:plc:x"}}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Event::Posted {
+                uri: "at://did:plc:x/app.bsky.feed.post/3k".into()
+            })
+            .unwrap(),
+            r#"{"Posted":{"uri":"at://did:plc:x/app.bsky.feed.post/3k"}}"#
+        );
+        // Box<Option<_>> serializes transparently: null or the inner object.
+        assert_eq!(
+            serde_json::to_string(&Event::PlayerSnapshot {
+                subject: "did:plc:x".into(),
+                via: "https://pds.example".into(),
+                snapshot: Box::new(None),
+            })
+            .unwrap(),
+            r#"{"PlayerSnapshot":{"subject":"did:plc:x","via":"https://pds.example","snapshot":null}}"#
+        );
+        let events = vec![
+            Event::Session(session::SessionState::Failed {
+                message: "m".into(),
+            }),
+            Event::Posted { uri: "u".into() },
+            Event::Failed {
+                message: "m".into(),
+            },
+            Event::OAuthAuthorize {
+                url: "https://x".into(),
+            },
+            Event::Notifications { items: vec![] },
+            Event::ListMembers {
+                list: "l".into(),
+                members: vec!["did:plc:a".into()],
+            },
+            Event::GateDecision {
+                list: "l".into(),
+                subject: "s".into(),
+                allowed: true,
+            },
+            Event::ChatHistory {
+                subject: "s".into(),
+                via: "v".into(),
+                total: 2,
+                items: vec![chats::ChatDigest {
+                    rkey: "r".into(),
+                    at_uri: "at://u".into(),
+                    sent_at: "2026-01-01T00:00:00.000Z".into(),
+                    server: "srv".into(),
+                    message: "hi".into(),
+                }],
+            },
+            Event::Labels {
+                subject: "s".into(),
+                via: "v".into(),
+                labels: vec![],
+            },
+            Event::PlayerSnapshot {
+                subject: "s".into(),
+                via: "v".into(),
+                snapshot: Box::new(None),
+            },
+            Event::PlayerSkin {
+                subject: "s".into(),
+                via: "v".into(),
+                skin: Box::new(None),
+            },
+        ];
+        for event in events {
+            let line = serde_json::to_string(&event).unwrap();
+            assert!(!line.contains('\n'));
+            let back: Event = serde_json::from_str(&line).unwrap();
+            assert_eq!(format!("{back:?}"), format!("{event:?}"));
+        }
+    }
 }
