@@ -490,6 +490,13 @@ impl Worker {
                     Err(error) => self.fail(error.to_string()),
                 }
             }
+            Command::GraphWrite { action, subject } => {
+                self.ensure_oauth_fresh().await;
+                match self.graph_write(&action, &subject).await {
+                    Ok((action, subject)) => self.emit(Event::GraphChanged { action, subject }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
             Command::Reply { uri, text } => {
                 self.ensure_oauth_fresh().await;
                 match self.reply(&uri, &text).await {
@@ -1063,6 +1070,85 @@ impl Worker {
         let actor = graph::resolve_subject(&self.http, &self.resolver, subject).await?;
         let members = graph::fetch_graph(&self.http, &appview, kind, &actor).await?;
         Ok((kind.key().to_string(), actor, appview, members))
+    }
+
+    /// Write one relationship (M23): follow/block create a record in your
+    /// repo, unfollow/unblock find and delete the matching record, and
+    /// mute/unmute call the AppView's private mute procedures. The subject is
+    /// resolved to a DID before anything is written, and self-actions are
+    /// refused before any network call.
+    async fn graph_write(
+        &mut self,
+        action: &str,
+        subject: &str,
+    ) -> crate::error::Result<(String, String)> {
+        let action = graph::GraphAction::from_key(action).ok_or_else(|| {
+            AtmosphericError::Message(format!(
+                "unknown graph action {action:?} (want follow, unfollow, block, unblock, mute or unmute)"
+            ))
+        })?;
+        let (Some(agent), Some(did)) = (&self.agent, &self.did) else {
+            return Err(AtmosphericError::NotLoggedIn);
+        };
+        let target = graph::resolve_subject(&self.http, &self.resolver, subject).await?;
+        if target == *did {
+            return Err(AtmosphericError::Message(
+                "you cannot follow, block or mute your own account".into(),
+            ));
+        }
+        match action {
+            graph::GraphAction::Follow => {
+                let rkey = self.tid.next_tid();
+                actions::create_record_json(
+                    agent,
+                    did,
+                    graph::FOLLOW_COLLECTION,
+                    Some(&rkey),
+                    graph::follow_record(&target),
+                )
+                .await?;
+            }
+            graph::GraphAction::Block => {
+                let rkey = self.tid.next_tid();
+                actions::create_record_json(
+                    agent,
+                    did,
+                    graph::BLOCK_COLLECTION,
+                    Some(&rkey),
+                    graph::block_record(&target),
+                )
+                .await?;
+            }
+            graph::GraphAction::Unfollow | graph::GraphAction::Unblock => {
+                let collection = action.collection().expect("removals have a collection");
+                let config = self.load_config().unwrap_or_default();
+                let pds = if config.pds_url.is_empty() {
+                    "https://bsky.social".to_string()
+                } else {
+                    config.pds_url
+                };
+                // Public repos serve listRecords unauthenticated, so the
+                // worker reads its own repo the same way the M13/M14 reads do.
+                let records = presence::list_records(&self.http, &pds, did, collection).await?;
+                let rkeys = graph::rkeys_for_subject(&records, &target);
+                if rkeys.is_empty() {
+                    let verb = if action == graph::GraphAction::Unfollow {
+                        "following"
+                    } else {
+                        "blocking"
+                    };
+                    return Err(AtmosphericError::Message(format!(
+                        "you are not {verb} {target}"
+                    )));
+                }
+                for rkey in rkeys {
+                    actions::delete_record(agent, did, collection, &rkey).await?;
+                }
+            }
+            graph::GraphAction::Mute => actions::mute_actor(agent, &target).await?,
+            graph::GraphAction::Unmute => actions::unmute_actor(agent, &target).await?,
+        }
+        Ok((action.key().to_string(), target))
     }
 
     /// Reply to a post (M21): fetch the target's strong ref + thread root
@@ -2032,6 +2118,37 @@ mod tests {
                         )
                     }
                 }
+                "/xrpc/com.atproto.repo.deleteRecord" => {
+                    if authorized {
+                        let body_json: serde_json::Value =
+                            serde_json::from_str(&body_string).unwrap_or_default();
+                        let collection = body_json["collection"].as_str().unwrap_or("");
+                        let rkey = body_json["rkey"].as_str().unwrap_or("");
+                        records
+                            .lock()
+                            .unwrap()
+                            .remove(&format!("{collection}/{rkey}"));
+                        ("200 OK", r#"{}"#.to_string())
+                    } else {
+                        (
+                            "401 Unauthorized",
+                            r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
+                        )
+                    }
+                }
+                "/xrpc/app.bsky.graph.muteActor" | "/xrpc/app.bsky.graph.unmuteActor" => {
+                    if authorized {
+                        // These procedures have no output schema; the real
+                        // service answers with an empty body and no JSON
+                        // content type, which the client maps to `()`.
+                        ("200 OK", String::new())
+                    } else {
+                        (
+                            "401 Unauthorized",
+                            r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
+                        )
+                    }
+                }
                 // The stub serves listRecords unauthenticated (public repos
                 // do), filtering the stored records by collection (M13).
                 "/xrpc/com.atproto.repo.listRecords" => {
@@ -2080,6 +2197,18 @@ mod tests {
                 ),
             }
         };
+        // The mute procedures have no output schema: answer with an empty
+        // body and no content type so the generated client sees a raw
+        // response and maps it to `()`.
+        if path.starts_with("/xrpc/app.bsky.graph.muteActor")
+            || path.starts_with("/xrpc/app.bsky.graph.unmuteActor")
+        {
+            let response =
+                format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+            return;
+        }
         // getBlob answers with raw bytes and the blob's content type, not
         // JSON — the M14 read side downloads blobs through it.
         if path.starts_with("/xrpc/com.atproto.sync.getBlob") {
@@ -4735,6 +4864,156 @@ mod tests {
             pds.requests().len(),
             before,
             "no HTTP call for an unknown kind"
+        );
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn graph_writes_create_delete_and_mute_relationships() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("graph-writes");
+        write_config(&dir, &test_config(pds.url.clone()));
+        let (command_tx, event_rx, handle) =
+            spawn_worker_with_resolver(dir.clone(), stub_resolver(&pds.url));
+
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+
+        // Seed an existing follow and block, so unfollow/unblock have a
+        // matching record to delete in addition to the one each create makes.
+        let target = "did:plc:target";
+        pds.seed_record(
+            graph::FOLLOW_COLLECTION,
+            "oldfollow",
+            serde_json::json!({"$type": graph::FOLLOW_COLLECTION, "subject": target}),
+        );
+        pds.seed_record(
+            graph::BLOCK_COLLECTION,
+            "oldblock",
+            serde_json::json!({"$type": graph::BLOCK_COLLECTION, "subject": target}),
+        );
+
+        for action in ["follow", "unfollow", "block", "unblock", "mute", "unmute"] {
+            command_tx
+                .send(Command::GraphWrite {
+                    action: action.into(),
+                    subject: target.into(),
+                })
+                .unwrap();
+            match wait_for(&event_rx, |e| {
+                matches!(e, Event::GraphChanged { .. } | Event::Failed { .. })
+            }) {
+                Event::GraphChanged {
+                    action: got,
+                    subject,
+                } => {
+                    assert_eq!(got, action);
+                    assert_eq!(subject, target);
+                }
+                other => panic!("expected GraphChanged for {action}, got {other:?}"),
+            }
+        }
+
+        let requests = pds.non_poll_requests();
+        let creates: Vec<serde_json::Value> = requests
+            .iter()
+            .filter(|r| r.path == "/xrpc/com.atproto.repo.createRecord")
+            .map(|r| serde_json::from_str(&r.body).unwrap())
+            .collect();
+        let follow = creates
+            .iter()
+            .find(|body| body["collection"] == graph::FOLLOW_COLLECTION)
+            .expect("a follow record was created");
+        assert_eq!(follow["record"]["$type"], graph::FOLLOW_COLLECTION);
+        assert_eq!(follow["record"]["subject"], target);
+        assert!(follow["record"]["createdAt"].is_string());
+        let block = creates
+            .iter()
+            .find(|body| body["collection"] == graph::BLOCK_COLLECTION)
+            .expect("a block record was created");
+        assert_eq!(block["record"]["$type"], graph::BLOCK_COLLECTION);
+        assert_eq!(block["record"]["subject"], target);
+
+        let deletes: Vec<serde_json::Value> = requests
+            .iter()
+            .filter(|r| r.path == "/xrpc/com.atproto.repo.deleteRecord")
+            .map(|r| serde_json::from_str(&r.body).unwrap())
+            .collect();
+        assert_eq!(deletes.len(), 4, "two follows and two blocks: {deletes:?}");
+        for rkey in ["oldfollow", "oldblock"] {
+            assert!(
+                deletes.iter().any(|body| body["rkey"] == rkey),
+                "{rkey} was deleted: {deletes:?}"
+            );
+        }
+        assert_eq!(
+            deletes
+                .iter()
+                .filter(|body| body["collection"] == graph::FOLLOW_COLLECTION)
+                .count(),
+            2
+        );
+        assert_eq!(
+            deletes
+                .iter()
+                .filter(|body| body["collection"] == graph::BLOCK_COLLECTION)
+                .count(),
+            2
+        );
+
+        let mutes: Vec<_> = requests
+            .iter()
+            .filter(|r| r.path.starts_with("/xrpc/app.bsky.graph."))
+            .collect();
+        assert_eq!(mutes.len(), 2, "muteActor + unmuteActor");
+        assert!(mutes.iter().all(|r| r.authorized));
+        assert!(
+            mutes
+                .iter()
+                .any(|r| r.path == "/xrpc/app.bsky.graph.muteActor")
+        );
+        assert!(
+            mutes
+                .iter()
+                .any(|r| r.path == "/xrpc/app.bsky.graph.unmuteActor")
+        );
+
+        // Undoing a relationship that is not there fails with the reason.
+        command_tx
+            .send(Command::GraphWrite {
+                action: "unfollow".into(),
+                subject: target.into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("not following"), "{message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+
+        // A self-action is refused before any HTTP call.
+        let before = pds.non_poll_requests().len();
+        command_tx
+            .send(Command::GraphWrite {
+                action: "follow".into(),
+                subject: "did:plc:stubuser".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("your own account"), "{message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            pds.non_poll_requests().len(),
+            before,
+            "a self-action does not touch the network"
         );
 
         command_tx.send(Command::Shutdown).unwrap();

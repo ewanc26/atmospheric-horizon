@@ -14,6 +14,7 @@
 // mirrored chat history (M16); /atmospheric server-of <did|handle> reads their
 // server profile record and verifies its signing key (M19); /atmospheric
 // follows|followers|blocks|mutes <did|handle> reads a public social graph (M20);
+// follow|unfollow|block|unblock|mute|unmute <did|handle> writes one (M23);
 // /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri> and
 // /atmospheric repost <at-uri> publish interactions (M21).
 fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut bool) {
@@ -25,7 +26,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-of <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-of <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -210,6 +211,35 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
         } else {
             m::repost(uri);
             game.native_chat("atmospheric: reposting…");
+        }
+    } else if ["follow", "unfollow", "block", "unblock", "mute", "unmute"]
+        .iter()
+        .any(|action| rest == *action || rest.starts_with(&format!("{action} ")))
+    {
+        let mut args = rest.splitn(2, ' ');
+        let action = args.next().unwrap_or_default();
+        let subject = args.next().unwrap_or("").trim();
+        *ran = true;
+        if subject.is_empty() {
+            game.native_chat(&format!("atmospheric: /atmospheric {action} <did | handle>"));
+        } else {
+            match action {
+                "follow" => m::follow(subject),
+                "unfollow" => m::unfollow(subject),
+                "block" => m::block(subject),
+                "unblock" => m::unblock(subject),
+                "mute" => m::mute(subject),
+                _ => m::unmute(subject),
+            }
+            let verb = match action {
+                "follow" => "following",
+                "unfollow" => "unfollowing",
+                "block" => "blocking",
+                "unblock" => "unblocking",
+                "mute" => "muting",
+                _ => "unmuting",
+            };
+            game.native_chat(&format!("atmospheric: {verb} {subject}…"));
         }
     } else if ["follows", "followers", "blocks", "mutes"]
         .iter()
