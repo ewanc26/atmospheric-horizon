@@ -268,9 +268,10 @@ profile (atproto.com/specs/oauth), reimplemented from the spec:
 The `client_id` is the spec's loopback form `http://localhost?scope=…`
 (verified against the real bsky.social and eurosky.social authorization
 servers: PAR accepted, `request_uri` issued). Authorization servers without
-the loopback exception need a hosted client-metadata URL instead — ship
-`oauth-client-metadata.json` (GitHub Pages etc.) and set `oauth_client_id`
-in `config.json`.
+the loopback exception need a hosted client-metadata URL instead — this
+repo's `oauth-client-metadata.json` is served via GitHub Pages at
+`https://ewanc26.github.io/atmospheric-horizon/oauth-client-metadata.json`
+(#21); set `oauth_client_id` in `config.json` to that URL.
 
 DPoP binding: a per-install P-256 key (ES256 proofs, persisted as a private
 JWK in `session.json`) signs every request. `session.rs` has a custom
