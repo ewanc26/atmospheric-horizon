@@ -8,8 +8,8 @@
 // output, which must suppress the connection-event fallback.
 fn atmospheric_colibri_notice(line: &horizon_client::text::Text) {
     use crate::game::atmospheric as m;
-    let key = line
-        .component()
+    let component = line.component();
+    let key = component
         .get("translate")
         .and_then(|value| value.as_str());
     let text = line.plain();
