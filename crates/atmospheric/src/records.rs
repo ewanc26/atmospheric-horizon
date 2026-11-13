@@ -9,7 +9,10 @@
 
 use crate::error::Result;
 use atrium_api::types::{Unknown, string::Datetime};
+use base64::{Engine as _, engine::general_purpose};
+use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// The `at.atpcraft.player.chat` collection: one record per chat message,
 /// keyed by a TID so a player's messages accumulate as an append-only history.
@@ -172,6 +175,82 @@ pub struct Endorsement {
     pub server: String,
     pub alg: String,
     pub sig: BytesB64,
+}
+
+/// The verdict of verifying a record's endorsements (M13 presence reads, M14
+/// skin reads), mirroring atpcraft's `VerifyResult`/`SkinVerifyResult` (minus
+/// the server-side rollback check, which only the writing server can do with
+/// its persisted version index).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EndorsementVerdict {
+    /// At least one endorsement from a known key verified.
+    Verified { endorser: String },
+    /// No endorsement came from a known key.
+    UnknownEndorser,
+    /// Endorsements from known keys were present but every signature failed —
+    /// the record was edited after signing.
+    BadSignature,
+    /// The record carries no endorsements (the lexicon requires at least 1).
+    Malformed,
+}
+
+/// Decode base64 with or without padding (atpcraft writes signatures without
+/// padding; some producers pad).
+pub(crate) fn decode_b64_flexible(text: &str) -> Option<Vec<u8>> {
+    general_purpose::STANDARD_NO_PAD
+        .decode(text)
+        .ok()
+        .or_else(|| general_purpose::STANDARD.decode(text).ok())
+}
+
+/// Verify a record's `endorsements` array against `keys` (key id → public
+/// key), mirroring atpcraft's verify loops: any `ed25519` endorsement from a
+/// known key whose signature verifies over `payload(server)` is enough.
+/// `payload` builds the canonical signed bytes for the endorsing key id.
+pub fn verify_endorsements(
+    endorsements: &serde_json::Value,
+    keys: &HashMap<String, VerifyingKey>,
+    payload: impl Fn(&str) -> Option<Vec<u8>>,
+) -> EndorsementVerdict {
+    let Some(list) = endorsements.as_array() else {
+        return EndorsementVerdict::Malformed;
+    };
+    if list.is_empty() {
+        return EndorsementVerdict::Malformed;
+    }
+    let mut found_known_key = false;
+    for endorsement in list {
+        let Some(server) = endorsement["server"].as_str() else {
+            continue;
+        };
+        if endorsement["alg"].as_str() != Some(crate::signing::ALG_ED25519) {
+            continue;
+        }
+        let Some(sig_b64) = endorsement["sig"]["$bytes"].as_str() else {
+            continue;
+        };
+        let Some(sig_bytes) = decode_b64_flexible(sig_b64) else {
+            continue;
+        };
+        let Some(payload) = payload(server) else {
+            continue;
+        };
+        if let Some(key) = keys.get(server) {
+            found_known_key = true;
+            if let Ok(signature) = Signature::from_slice(&sig_bytes)
+                && key.verify(&payload, &signature).is_ok()
+            {
+                return EndorsementVerdict::Verified {
+                    endorser: server.to_string(),
+                };
+            }
+        }
+    }
+    if found_known_key {
+        EndorsementVerdict::BadSignature
+    } else {
+        EndorsementVerdict::UnknownEndorser
+    }
 }
 
 /// One `at.atpcraft.player.snapshot` record.
