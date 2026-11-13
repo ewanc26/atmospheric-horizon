@@ -56,6 +56,30 @@ pub fn public_key_spki_b64(verifying_key: &VerifyingKey) -> String {
     general_purpose::STANDARD.encode(spki_bytes(verifying_key))
 }
 
+/// Rebuild a verifying key from its base64 X.509/SPKI encoding (padded or
+/// not) — the `publicKey` form used in `at.atpcraft.server.profile` records
+/// and `trusted_server_keys` config entries (M13 presence reads).
+pub fn verifying_key_from_spki_b64(b64: &str) -> Result<VerifyingKey> {
+    // Accept any of the four base64 spellings: normalise to unpadded
+    // base64url, which decodes them all.
+    let normalized = b64
+        .trim()
+        .trim_end_matches('=')
+        .replace('+', "-")
+        .replace('/', "_");
+    let bytes = general_purpose::URL_SAFE_NO_PAD
+        .decode(normalized)
+        .map_err(|e| AtmosphericError::Message(format!("bad public key encoding: {e}")))?;
+    let raw = bytes
+        .strip_prefix(SPKI_ED25519_PREFIX)
+        .ok_or_else(|| AtmosphericError::Message("not an Ed25519 SPKI key".into()))?;
+    let raw: [u8; 32] = raw
+        .try_into()
+        .map_err(|_| AtmosphericError::Message("bad Ed25519 public key length".into()))?;
+    VerifyingKey::from_bytes(&raw)
+        .map_err(|e| AtmosphericError::Message(format!("bad Ed25519 public key: {e}")))
+}
+
 /// Generate a fresh signing key (random seed).
 pub fn generate() -> SigningKey {
     SigningKey::generate(&mut rand_core::OsRng)
@@ -129,6 +153,23 @@ mod tests {
             key_id,
             key_id_of(&SigningKey::from_bytes(&seed).verifying_key())
         );
+    }
+
+    #[test]
+    fn spki_b64_round_trips_through_verifying_key_from_spki_b64() {
+        let key = generate();
+        let b64 = public_key_spki_b64(&key.verifying_key());
+        let back = verifying_key_from_spki_b64(&b64).unwrap();
+        assert_eq!(back, key.verifying_key());
+        // Unpadded input is accepted too.
+        let unpadded = general_purpose::STANDARD_NO_PAD.encode(spki_bytes(&key.verifying_key()));
+        assert_eq!(
+            verifying_key_from_spki_b64(&unpadded).unwrap(),
+            key.verifying_key()
+        );
+        // Garbage and non-Ed25519 keys are rejected.
+        assert!(verifying_key_from_spki_b64("not base64!!").is_err());
+        assert!(verifying_key_from_spki_b64(&general_purpose::STANDARD.encode([0u8; 44])).is_err());
     }
 
     #[test]
