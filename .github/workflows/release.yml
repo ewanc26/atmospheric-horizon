@@ -1,7 +1,7 @@
 name: Release
 
 # Cut a release by pushing an annotated tag from main:
-#   git tag -a v0.1.0 -m "atmospheric-horizon 0.1.0" && git push origin v0.1.0
+#   git tag -a v0.2.0 -m "atmospheric-horizon 0.2.0" && git push origin v0.2.0
 # This workflow builds the sidecar worker for each supported OS, packs the
 # mixins bundle, writes SHA256SUMS, and attaches everything to the GitHub
 # Release for the tag.

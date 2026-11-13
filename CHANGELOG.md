@@ -12,8 +12,19 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-11-13
+
+Second tagged release. Adds the read side of the server descriptor, public
+social-graph reads, and the three basic post interactions; also brings the
+repository templates and documentation in line with the sibling projects.
+
 ### Added
 
+- **M19 — server-profile reads (#44).** `/atmospheric server-of <did|handle>`
+  pages `at.atpcraft.server.profile` on the subject's own PDS, prefers the
+  `self` record, and reports the server name, Minecraft version,
+  capabilities, operator and whether the published signing key is trusted,
+  unknown or mismatched.
 - **M20 — social-graph reads (#48).** `/atmospheric follows|followers|blocks|mutes
   <did|handle>` pages `app.bsky.graph.getFollows`, `getFollowers`,
   `getBlocks` or `getMutes` on the public AppView and reports the count plus
@@ -24,6 +35,12 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   `com.atproto.repo.getRecord`, then publish `app.bsky.feed.post` (with
   `reply` strong refs), `app.bsky.feed.like` or `app.bsky.feed.repost` to your
   own repo. bsky.app post URLs are accepted too.
+
+### Changed
+
+- **Repository conventions (#50).** The shared bug/feature/documentation issue
+  forms, a pull-request checklist, `.gitattributes`, and the sibling README
+  Contributing/Star History sections.
 
 ## [0.1.0] — 2026-11-13
 
@@ -94,5 +111,6 @@ unless it writes to your own repo.
 - Label issuance and server-side join-gate enforcement are server concerns
   and are documented, not implemented in the client mod (#29).
 
-[Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.1.0

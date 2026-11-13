@@ -63,7 +63,7 @@ cargo test --workspace --locked
 
 The published mod installs through the Horizon launcher's Mods page once it is in the [horizon-mods registry](https://playhorizon.dev/mods); native mods are built by the launcher against the pinned revisions in `compatibility.json`.
 
-**Sidecar worker (M17).** The game-side hooks talk to a separate worker process, not to code linked into the game (horizon-mixins allow-lists bundle-crate deps to Horizon's `Cargo.lock`, which has no `atrium-api`/`reqwest` — issue #2). Since `v0.1.0` the [releases page](https://github.com/ewanc26/atmospheric-horizon/releases) carries a prebuilt `atmospheric-worker` for Linux x86_64, macOS arm64 and Windows x86_64, plus the mixins bundle and a `SHA256SUMS` file; download the archive for your OS, check its hash, and unpack the binary next to the game executable. To build it yourself:
+**Sidecar worker (M17).** The game-side hooks talk to a separate worker process, not to code linked into the game (horizon-mixins allow-lists bundle-crate deps to Horizon's `Cargo.lock`, which has no `atrium-api`/`reqwest` — issue #2). The [releases page](https://github.com/ewanc26/atmospheric-horizon/releases) carries a prebuilt `atmospheric-worker` for Linux x86_64, macOS arm64 and Windows x86_64, plus the mixins bundle and a `SHA256SUMS` file; download the archive for your OS, check its hash, and unpack the binary next to the game executable. To build it yourself:
 
 ```bash
 cargo build --release -p atmospheric --bin atmospheric-worker
@@ -95,7 +95,7 @@ This mod talks to the network **by design**: the AT Protocol services needed to 
 ## Files
 
 - `mixins/atmospheric/` — horizon-mixins declarations: the injected `runtime.rs` module (std-only; also spawns/bridges the M17 sidecar worker), its placeholder hook, and `horizon-mixin.toml`
-- `crates/atmospheric/` — the protocol library: `config`, `session`, `oauth` (M8: DPoP/PKCE/PAR/loopback/token flow), `actions`, `notifications`, `lists` (M11/M15), `labels` (M12), `presence` (M13), `skins` (M14), `chats` (M16), `servers` (M19: server profile reads), `records` (atpcraft lexicon types), `tid` (record keys), `signing` (Ed25519 endorsements), `worker` (all game-free and testable); plus the `atmospheric-worker` sidecar bin (`src/bin/atmospheric-worker.rs`, M17) and its end-to-end test (`tests/sidecar.rs`)
+- `crates/atmospheric/` — the protocol library: `config`, `session`, `oauth` (M8: DPoP/PKCE/PAR/loopback/token flow), `actions`, `notifications`, `lists` (M11/M15), `labels` (M12), `presence` (M13), `skins` (M14), `chats` (M16), `servers` (M19: server profile reads), `graph` (M20: social-graph reads), `interactions` (M21: reply/like/repost), `records` (atpcraft lexicon types), `tid` (record keys), `signing` (Ed25519 endorsements), `worker` (all game-free and testable); plus the `atmospheric-worker` sidecar bin (`src/bin/atmospheric-worker.rs`, M17) and its end-to-end test (`tests/sidecar.rs`)
 - `oauth-client-metadata.json` — the OAuth client metadata document to host when an authorization server does not support the loopback client; this repo serves it via GitHub Pages at `https://ewanc26.github.io/atmospheric-horizon/oauth-client-metadata.json` (#21) — point `oauth_client_id` at that URL
 - `compatibility.json` — the pinned Horizon and horizon-mixins revisions the bundle is built against
 - `CHANGELOG.md` — release notes and the release process (tag `vX.Y.Z`; the release workflow builds the worker archives and mixins bundle)
