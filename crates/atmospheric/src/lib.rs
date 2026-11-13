@@ -11,6 +11,7 @@ pub mod chats;
 pub mod config;
 pub mod error;
 pub mod graph;
+pub mod interactions;
 pub mod labels;
 pub mod lists;
 pub mod notifications;
@@ -124,6 +125,16 @@ pub enum Command {
     /// "follows", "followers", "blocks" or "mutes", and `subject` is a DID
     /// or a handle. Unauthenticated AppView read — works logged out.
     FetchGraph { kind: String, subject: String },
+    /// Reply to a post (M21): publish an `app.bsky.feed.post` whose
+    /// `reply` root/parent strong refs point at the target thread. The
+    /// target is an `at://…/app.bsky.feed.post/<rkey>` URI or a bsky.app
+    /// post URL; its CID is read unauthenticated from the author's PDS.
+    Reply { uri: String, text: String },
+    /// Like a post (M21): publish an `app.bsky.feed.like` strong-ref record.
+    Like { uri: String },
+    /// Repost a post (M21): publish an `app.bsky.feed.repost` strong-ref
+    /// record.
+    Repost { uri: String },
     /// Post the player's death message to Bluesky (only when
     /// `post_death_messages` is enabled).
     PostDeathMessage { text: String },
@@ -347,6 +358,16 @@ mod tests {
             Command::FetchGraph {
                 kind: "follows".into(),
                 subject: "did:plc:z".into(),
+            },
+            Command::Reply {
+                uri: "at://did:plc:z/app.bsky.feed.post/1".into(),
+                text: "nice".into(),
+            },
+            Command::Like {
+                uri: "at://did:plc:z/app.bsky.feed.post/1".into(),
+            },
+            Command::Repost {
+                uri: "at://did:plc:z/app.bsky.feed.post/1".into(),
             },
             Command::PostDeathMessage { text: "t".into() },
             Command::Logout,

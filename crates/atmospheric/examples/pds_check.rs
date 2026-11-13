@@ -27,6 +27,9 @@
 //! ATMOSPHERIC_FETCH_CHAT="did:plc:… | handle" \                 # optional, M16
 //! ATMOSPHERIC_FETCH_SERVER="did:plc:… | handle" \               # optional, M19
 //! ATMOSPHERIC_GRAPH="follows:did:plc:…" \                      # optional, M20
+//! ATMOSPHERIC_LIKE="at://…/app.bsky.feed.post/<rkey>" \        # optional, M21
+//! ATMOSPHERIC_REPOST="at://…/app.bsky.feed.post/<rkey>" \      # optional, M21
+//! ATMOSPHERIC_REPLY="at://…/app.bsky.feed.post/<rkey>|<text>" \ # optional, M21
 //! cargo run -p atmospheric --example pds_check
 //! ```
 //!
@@ -611,6 +614,31 @@ fn main() {
         }
     }
 
+    // Optionally publish interactions (M21): like, repost and reply to a post.
+    if let Some(uri) = env::var("ATMOSPHERIC_LIKE").ok().filter(|s| !s.is_empty()) {
+        run_post(&command_tx, &event_rx, Command::Like { uri }, "like");
+    }
+    if let Some(uri) = env::var("ATMOSPHERIC_REPOST")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        run_post(&command_tx, &event_rx, Command::Repost { uri }, "repost");
+    }
+    if let Some(raw) = env::var("ATMOSPHERIC_REPLY").ok().filter(|s| !s.is_empty()) {
+        let (uri, text) = raw
+            .split_once('|')
+            .expect("ATMOSPHERIC_REPLY is <at-uri>|<text>");
+        run_post(
+            &command_tx,
+            &event_rx,
+            Command::Reply {
+                uri: uri.into(),
+                text: text.into(),
+            },
+            "reply",
+        );
+    }
+
     // Poll notifications once at the end (M4), printing the digest event. A
     // failure here is not fatal to the check: some PDSs reject the seenAt
     // hint, and the timer poll may already have delivered the digest.
@@ -640,6 +668,38 @@ fn main() {
     command_tx.send(Command::Shutdown).expect("send Shutdown");
     handle.join().expect("worker thread joins cleanly");
     println!("worker shut down cleanly");
+}
+
+/// Send one interaction command and wait for its `Posted` or `Failed` event.
+fn run_post(
+    command_tx: &mpsc::Sender<Command>,
+    event_rx: &mpsc::Receiver<Event>,
+    command: Command,
+    label: &str,
+) {
+    command_tx.send(command).expect("send interaction command");
+    loop {
+        match event_rx.recv_timeout(Duration::from_secs(60)) {
+            Ok(event) => {
+                println!("event: {event:?}");
+                match event {
+                    Event::Posted { uri } => {
+                        println!("{label}: {uri}");
+                        return;
+                    }
+                    Event::Failed { message } => {
+                        eprintln!("{label} failed: {message}");
+                        exit(1);
+                    }
+                    _ => {}
+                }
+            }
+            Err(error) => {
+                eprintln!("no event from the worker: {error}");
+                exit(1);
+            }
+        }
+    }
 }
 
 /// Headless wire-format check (M8): resolve the handle, discover the PDS and
