@@ -39,7 +39,8 @@ crates, no game imports. Its only job is channel plumbing:
   line in the bottom-left corner).
 - `drain_events()` is called once per tick to collect worker events, folding
   each into the HUD status line (`status_line()`), bounded so the game
-  thread never stalls.
+  thread never stalls. Colibri message events are also queued for
+  `drain_colibri_chat()`, which the tick hook prints to native chat.
 
 ### The protocol library: `crates/atmospheric`
 
@@ -73,6 +74,8 @@ Everything else, with zero Horizon imports so it builds and tests with plain
 - `presence` — M13 verified reads of other players' `at.atpcraft.player.snapshot`
   records (`com.atproto.repo.listRecords` on the subject's own PDS, highest
   version, Ed25519 endorsement verification)
+- `colibri` — M26 Colibri channel parsing, message/membership record shapes,
+  service-auth minting, event decoding and the worker-owned WebSocket loop
 - `profiles` — M24 Bluesky profile reads (AppView `app.bsky.actor.getProfile`
   plus the direct `app.bsky.actor.profile` record at rkey `self`, with
   atpcraft's direct-record pronoun precedence and whitespace normalisation)
@@ -509,10 +512,10 @@ The game side mirrors it as plain data and the HUD shows the display name,
 stored on disk. The direct profile record is read from the PDS; its avatar is
 a blob reference, so only the AppView's avatar URL is carried in the digest.
 
-atpcraft's remaining server-side surfaces (Colibri bridge, RPG item discovery,
-full aspect capture/restore and labeler issuance) are not implemented yet;
-the README port table records each one. M25 supplies the separate server
-account they need.
+atpcraft's remaining server-side surfaces (RPG item discovery, full aspect
+capture/restore and labeler issuance) are not implemented yet; the README port
+table records each one. M25 supplies the separate server account they need,
+and M26 starts the Colibri bridge on top of it.
 
 Verified: `profiles` unit tests (whitespace normalisation, direct-record
 precedence, clearing on a successful record without pronouns, AppView
@@ -546,8 +549,8 @@ and the mod's persisted Ed25519 endorsement key; `createdAt` is preserved.
 The session file contains a DPoP private key and a refresh token, so it is a
 secret exactly like `session.json`; the README's Network use section records
 it. The account is the foundation, not the whole server-side feature: labeler
-routes, join enforcement, Colibri and aspect sync still need their own
-milestones.
+routes, join enforcement and aspect sync still need their own milestones. M26
+builds the first Colibri surface on this account.
 
 Verified: a worker test runs the full stub OAuth flow for the server account,
 asserts the `ServerAccount` LoggingIn/LoggedIn/LoggedOut events, the handle
@@ -555,6 +558,56 @@ and DID, the separate `server-session.json` (0600 on unix, no password), the
 absence of a player `session.json`, and file deletion on logout. The runtime
 and sidecar wire shapes for the new commands/events are pinned by the
 std-only encode/decode tests.
+
+### M26: Colibri chat bridge core
+
+Colibri is atpcraft's chat layer: a channel lives in a community repo and the
+AppView streams message upserts to members. The bridge needs two identities —
+the server account mints the stream token, while each chat line is written by
+the player who sent it. M26 implements that core without inventing a server
+thread in the client:
+
+1. `ChannelRef::parse` accepts the channel AT-URI, a `https://…/app/c/…` link,
+or the `social.colibri:/channel/…` deep link. It derives the channel URI, the
+   community DID/rkey, and rejects a wrong collection, channel type or rkey.
+2. `/atmospheric colibri start` loads `colibri_channel_uri` and
+   `colibri_appview_url`, requires the M25 server account, refreshes its DPoP
+   token, and calls `com.atproto.server.getServiceAuth` with
+   `aud=<colibri_appview_did>#colibri_appview` and
+   `lxm=social.colibri.sync.subscribeEvents`. The OAuth scope adds the three
+   Colibri grants whenever `colibri_bridge_enabled` is true, so a session
+   created before the bridge was enabled must be authorised again.
+3. The worker spawns `colibri::run_stream`. It opens the WebSocket with the
+   `colibri.auth.bearer` subprotocol, sends a heartbeat every 30 seconds,
+   decodes `message_event` upserts, reconnects with 1–60 second backoff, and
+   reports `Connected`/`Disconnected`/`Message` updates on an mpsc channel.
+4. The worker filters other channels and its own recently written AT-URIs,
+   then emits `Event::ColibriMessage`. The runtime queues the sanitised line
+   and the tick hook sends it to native chat; the same event also feeds the
+   HUD.
+5. `Command::ColibriSend` writes `social.colibri.message` with `text`,
+   `channel` and `createdAt` as the player account. The ordinary chat hook
+   sends the same command automatically, so chat is mirrored only while the
+   bridge is active; an explicit `/atmospheric colibri send` reports errors
+   while the automatic path stays silent.
+
+`colibri_bridge_enabled` arms the bridge automatically after a server login or
+session resume. `/atmospheric colibri stop` aborts the socket task and drops
+the channel; `/atmospheric colibri status` reports active/connected state.
+
+Not in M26: ensuring the server account's community membership, join/leave/
+death/advancement notices, the Colibri profile prompt, and proactive 45-minute
+token rotation. A stream that outlives its one-hour token needs a stop/start
+until rotation lands. The service token is in memory only; no new credential
+is written to disk.
+
+Verified: `colibri` unit tests cover all three channel-link forms, the old
+community-rkey form, record shapes and text caps, audience/stream URL/
+subprotocol construction, event decoding, and a loopback WebSocket server that
+asserts `Connected` plus a delivered message. Worker tests cover start without
+a server account and an explicit send while stopped. The runtime tests pin the
+four command wire shapes, both event shapes, HUD text, the automatic chat fan
+out, and native-chat draining. No live Colibri AppView was contacted.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
