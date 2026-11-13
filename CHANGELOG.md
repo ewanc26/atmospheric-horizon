@@ -72,6 +72,12 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   writes are capped at 20 per rolling 60 seconds, matching atpcraft's
   `ColibriRateLimiter`; server notices are exempt and automatic chat-hook
   sends drop silently at the limit.
+- **M32 — local Colibri player membership (#79).** When the bridge is active,
+  the worker ensures the local player's own `social.colibri.membership` record
+  exists, both on bridge start and after a player login. A new record in an
+  approval-gated community shows atpcraft's pending line in chat and the HUD;
+  existing memberships and failed writes stay quiet. The once-per-bridge guard
+  resets on explicit stop and player logout/login.
 
 ### Changed
 
