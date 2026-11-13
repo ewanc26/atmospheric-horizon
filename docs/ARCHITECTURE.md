@@ -55,6 +55,10 @@ Everything else, with zero Horizon imports so it builds and tests with plain
 - `presence` — M13 verified reads of other players' `at.atpcraft.player.snapshot`
   records (`com.atproto.repo.listRecords` on the subject's own PDS, highest
   version, Ed25519 endorsement verification)
+- `skins` — M14 verified reads of other players' `at.atpcraft.player.skin`
+  records (newest `timestamp`, endorsement verification) plus
+  `com.atproto.sync.getBlob` downloads; `records` carries the shared
+  `EndorsementVerdict`/`verify_endorsements` both reads use
 - `worker` — owns the tokio runtime, the agent, and the files; the **only**
   module that performs network or disk I/O
 - `error` — one error enum, mapped to HUD strings at the edge
@@ -453,6 +457,51 @@ asserted unauthenticated. Real-PDS wire check: `pds_check` with
 `ATMOSPHERIC_FETCH_PLAYER` (and `ATMOSPHERIC_TRUSTED_SERVER_KEYS` for
 trusted-key verification).
 
+### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
+
+`/atmospheric skin-of <did|handle>` sends `Command::FetchPlayerSkin` — the
+read side of atpcraft's skin sync, counterpart to the M9 write:
+
+1. resolve the account and its PDS exactly as the M13 presence read
+   (`presence::resolve_player`), then page `listRecords` for
+   `at.atpcraft.player.skin` unauthenticated against that PDS;
+2. `skins::latest_skin` takes the parseable record with the newest
+   `timestamp` (skin records have no version counter), parsed as
+   `records::SkinRecord` the way atpcraft's `fromJson` does (known model,
+   valid timestamp);
+3. `skins::verify_skin` verifies the endorsements with the shared
+   `records::verify_endorsements` over `skins::skin_payload` — the canonical
+   `{did, skinCid?, capeCid?, model, timestamp, server}` rebuilt from raw
+   JSON, with a unit test asserting parity with the M9 writer's
+   `SkinRecord::signable_payload` (asset keys omitted when absent);
+4. only when the verdict is `Verified`, the worker downloads the skin/cape
+   blobs via unauthenticated `com.atproto.sync.getBlob?did=&cid=` on the
+   subject's PDS (`skins::get_blob`), rejects non-PNG content and anything
+   over the lexicon's 1 MiB cap, and saves the bytes under
+   `<storage>/skins/<cid>.png` (worker owns disk I/O). Unverified records
+   are reported with their verdict but their blobs are never downloaded or
+   persisted.
+
+The worker emits `Event::PlayerSkin { subject, via, skin }` with a
+`skins::SkinDigest` (model, timestamp, verdict, per-blob CID/mime/size and
+the saved path); the game side mirrors it as plain data (boxed) and the HUD
+summarizes it ("atmospheric: did:plc:… skin model slim — skin bafkrei…
+saved to …, cape none — verified by keyid…"). Wire shapes come from the
+lexicons only — no code is copied from atpcraft (its repo carries no
+licence).
+
+Verified: `skins` unit tests (payload parity with the M9 writer, asset-key
+omission, all four verdicts, latest-by-timestamp, garbage rejection,
+digest fields, `getBlob` against a stub returning PNG bytes) and worker
+tests against the stub PDS (which now serves `getBlob` with a binary body):
+a posted skin reads back verified by the persisted key with the blob saved
+under `skins/` and byte-identical, a foreign key trusted via
+`trusted_server_keys` verifies logged out, a tampered record reports
+`BadSignature` and triggers no `getBlob`, a record-URI subject fails before
+any HTTP call, an empty repo reports `None`, and both the `listRecords` and
+`getBlob` requests are asserted unauthenticated. Real-PDS wire check:
+`pds_check` with `ATMOSPHERIC_FETCH_SKIN`.
+
 ### Manual check against a real PDS
 
 `crates/atmospheric/examples/pds_check.rs` spawns the worker exactly as the
@@ -477,6 +526,7 @@ ATMOSPHERIC_LABELER="did:plc:…" \                  # optional, M12 (labeler qu
 ATMOSPHERIC_LABELER_SUBJECT="did:plc:…" \          # optional, M12 (default: own DID)
 ATMOSPHERIC_FETCH_PLAYER="did:plc:… | handle" \     # optional, M13 (presence read)
 ATMOSPHERIC_TRUSTED_SERVER_KEYS="keyId=publicKeyB64,…" \ # optional, M13
+ATMOSPHERIC_FETCH_SKIN="did:plc:… | handle" \       # optional, M14 (skin read)
 cargo run -p atmospheric --example pds_check
 ```
 
