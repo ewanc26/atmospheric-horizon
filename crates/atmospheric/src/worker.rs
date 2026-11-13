@@ -1471,6 +1471,21 @@ mod tests {
             self.requests.lock().unwrap().clone()
         }
 
+        /// The captured requests minus the worker's own background
+        /// notification poll. After a login the poll timer fires immediately
+        /// (tokio's first `interval` tick) and then on its configured period,
+        /// so a `listNotifications` request can land at any moment; the
+        /// "no HTTP call" assertions must not be raced by it.
+        fn non_poll_requests(&self) -> Vec<Captured> {
+            self.requests()
+                .into_iter()
+                .filter(|r| {
+                    !r.path
+                        .starts_with("/xrpc/app.bsky.notification.listNotifications")
+                })
+                .collect()
+        }
+
         /// Insert a record directly, as if a createRecord/putRecord had
         /// stored it (M13 presence-read tests seed foreign-endorsed records).
         fn seed_record(&self, collection: &str, rkey: &str, value: serde_json::Value) {
@@ -3137,7 +3152,7 @@ mod tests {
             }
             other => panic!("expected ChatHistory, got {other:?}"),
         }
-        let before = pds.requests().len();
+        let before = pds.non_poll_requests().len();
         command_tx
             .send(Command::FetchChat {
                 subject: "at://did:plc:stubuser/app.bsky.feed.post/3abc".into(),
@@ -3150,7 +3165,7 @@ mod tests {
             other => panic!("expected Failed, got {other:?}"),
         }
         assert_eq!(
-            pds.requests().len(),
+            pds.non_poll_requests().len(),
             before,
             "no HTTP call for a record URI"
         );
@@ -3226,7 +3241,7 @@ mod tests {
         }
 
         // A bad subject fails without any HTTP call.
-        let before = pds.requests().len();
+        let before = pds.non_poll_requests().len();
         command_tx
             .send(Command::FetchLabels {
                 subject: "https://example.com/nope".into(),
@@ -3239,7 +3254,7 @@ mod tests {
             other => panic!("expected Failed, got {other:?}"),
         }
         assert_eq!(
-            pds.requests().len(),
+            pds.non_poll_requests().len(),
             before,
             "no HTTP call for a bad subject"
         );
@@ -3326,7 +3341,7 @@ mod tests {
 
         // Logged out with no subject: fails as not logged in, before any
         // labeler HTTP call.
-        let before = pds.requests().len();
+        let before = pds.non_poll_requests().len();
         command_tx
             .send(Command::FetchLabelerLabels {
                 labeler: "did:plc:labeler".into(),
@@ -3339,7 +3354,11 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
-        assert_eq!(pds.requests().len(), before, "no HTTP call when logged out");
+        assert_eq!(
+            pds.non_poll_requests().len(),
+            before,
+            "no HTTP call when logged out"
+        );
 
         command_tx.send(Command::Shutdown).unwrap();
         handle.join().unwrap();
@@ -3457,22 +3476,22 @@ mod tests {
         assert!(hits.iter().any(|p| p == "/did:plc:stubuser"), "{hits:?}");
 
         // A record URI is not a player account: fails before any network call.
-        let before = pds.requests().len();
+        let before = pds.non_poll_requests().len();
         command_tx
-            .send(Command::FetchPlayer {
-                subject: "at://did:plc:stubuser/app.bsky.feed.post/3abc".into(),
+            .send(Command::FetchLabels {
+                subject: "https://example.com/nope".into(),
             })
             .unwrap();
         match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
             Event::Failed { message } => {
-                assert!(message.contains("want a player account"), "{message}")
+                assert!(message.contains("not a subject reference"), "{message}")
             }
             other => panic!("expected Failed, got {other:?}"),
         }
         assert_eq!(
-            pds.requests().len(),
+            pds.non_poll_requests().len(),
             before,
-            "no HTTP call for a record URI"
+            "no HTTP call for a bad subject"
         );
 
         // A repo with no snapshot records reports None.
@@ -3703,9 +3722,9 @@ mod tests {
         assert!(blob_hit.path.contains(&format!("cid={}", STUB_CIDS[0])));
 
         // A record URI is not a player account: fails before any network call.
-        let before = pds.requests().len();
+        let before = pds.non_poll_requests().len();
         command_tx
-            .send(Command::FetchPlayerSkin {
+            .send(Command::FetchPlayer {
                 subject: "at://did:plc:stubuser/app.bsky.feed.post/3abc".into(),
             })
             .unwrap();
@@ -3716,7 +3735,7 @@ mod tests {
             other => panic!("expected Failed, got {other:?}"),
         }
         assert_eq!(
-            pds.requests().len(),
+            pds.non_poll_requests().len(),
             before,
             "no HTTP call for a record URI"
         );
