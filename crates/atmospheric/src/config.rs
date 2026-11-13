@@ -13,6 +13,18 @@ fn default_chat_server_id() -> String {
     "horizon-client".into()
 }
 
+/// One trusted atpcraft server endorsement key (M13 presence reads): the
+/// base64 (standard) X.509/SPKI public key, as published in the server's
+/// `at.atpcraft.server.profile` record, plus the key id — derived from the
+/// public key with the same algorithm as the mod's own key when blank
+/// (matching atpcraft's `TrustedServerKeys` entries).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TrustedServerKey {
+    #[serde(default)]
+    pub key_id: String,
+    pub public_key: String,
+}
+
 // `#[serde(default)]` keeps settings files written by older versions (which
 // lack the newer fields) loadable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +76,10 @@ pub struct Config {
     /// The AppView used for public list reads (M11): `app.bsky.graph.getList`
     /// against this base, unauthenticated. atpcraft uses the public AppView.
     pub appview_url: String,
+    /// Trusted atpcraft server endorsement keys (M13 presence reads): when
+    /// reading a player's `at.atpcraft.player.snapshot` record, endorsements
+    /// from these key ids are accepted alongside the mod's own signing key.
+    pub trusted_server_keys: Vec<TrustedServerKey>,
 }
 
 impl Default for Config {
@@ -89,6 +105,7 @@ impl Default for Config {
             server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
             game_version: "26.3".into(),
             appview_url: crate::lists::DEFAULT_APPVIEW.into(),
+            trusted_server_keys: Vec::new(),
         }
     }
 }
@@ -147,6 +164,10 @@ mod tests {
             server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
             game_version: "26.3".into(),
             appview_url: crate::lists::DEFAULT_APPVIEW.into(),
+            trusted_server_keys: vec![TrustedServerKey {
+                key_id: String::new(),
+                public_key: "MCowBQYDK2VwAyEA...".into(),
+            }],
         };
         let raw = config.to_json().unwrap();
         let back = Config::from_json(&raw).unwrap();
@@ -156,6 +177,7 @@ mod tests {
         assert!(back.post_chat_messages);
         assert_eq!(back.chat_server_id, "my-server");
         assert!(back.persist_session);
+        assert_eq!(back.trusted_server_keys, config.trusted_server_keys);
     }
 
     #[test]
@@ -174,6 +196,7 @@ mod tests {
             "chat publishing defaults to off"
         );
         assert_eq!(config.chat_server_id, "horizon-client");
+        assert!(config.trusted_server_keys.is_empty());
     }
 
     #[test]

@@ -11,12 +11,15 @@ use crate::{
     error::AtmosphericError,
     notifications::{self, SeenCursor},
     oauth::{self, DpopState, SharedDpop},
+    presence::{self, PlayerDigest},
     records::{self, SnapshotRecord},
     session::{self, Agent, SessionState, StoredSession},
     signing::{self, SigningKey},
     tid::TidGen,
 };
+use ed25519_dalek::VerifyingKey;
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::mpsc::{Receiver, Sender},
     time::Duration,
@@ -406,6 +409,18 @@ impl Worker {
                         subject,
                         via,
                         labels,
+                    }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::FetchPlayer { subject } => {
+                // A public read against the subject's own PDS: works logged
+                // out, no token refresh.
+                match self.fetch_player(&subject).await {
+                    Ok((subject, via, snapshot)) => self.emit(Event::PlayerSnapshot {
+                        subject,
+                        via,
+                        snapshot,
                     }),
                     Err(error) => self.fail(error.to_string()),
                 }
@@ -844,6 +859,51 @@ impl Worker {
         Ok((pattern, format!("{labeler_did} ({endpoint})"), labels))
     }
 
+    /// Read a player's latest `at.atpcraft.player.snapshot` record from their
+    /// own PDS and verify its endorsement (M13, the atpcraft presence read
+    /// side). Unauthenticated: the subject's PDS serves `listRecords` for
+    /// public repos, so this works logged out.
+    async fn fetch_player(
+        &self,
+        subject: &str,
+    ) -> crate::error::Result<(String, String, Option<PlayerDigest>)> {
+        let config = self.load_config().unwrap_or_default();
+        let (did, pds) = presence::resolve_player(&self.http, &self.resolver, subject).await?;
+        let records =
+            presence::list_records(&self.http, &pds, &did, records::SNAPSHOT_COLLECTION).await?;
+        let keys = self.verification_keys(&config);
+        let snapshot = presence::latest(&records)
+            .map(|(rkey, value)| presence::digest(&did, &rkey, &value, &keys))
+            .transpose()?;
+        Ok((did, pds, snapshot))
+    }
+
+    /// The endorsement verification keys for presence reads (M13): the mod's
+    /// own signing key when one is persisted (not created just for a read),
+    /// plus the `trusted_server_keys` from the settings file. Malformed
+    /// entries are skipped, as atpcraft's `TrustedServerKeys` does — a skipped
+    /// key simply shows up as an unknown endorser in the verdict.
+    fn verification_keys(&self, config: &Config) -> HashMap<String, VerifyingKey> {
+        let mut keys = HashMap::new();
+        if let Ok(raw) = std::fs::read_to_string(self.storage_dir.join(SIGNING_KEY_FILE))
+            && let Ok(file) = serde_json::from_str::<signing::SigningKeyFile>(&raw)
+            && let Ok(key) = signing::from_key_file(&file)
+        {
+            keys.insert(file.key_id, key.verifying_key());
+        }
+        for entry in &config.trusted_server_keys {
+            if let Ok(key) = signing::verifying_key_from_spki_b64(&entry.public_key) {
+                let key_id = if entry.key_id.is_empty() {
+                    signing::key_id_of(&key)
+                } else {
+                    entry.key_id.clone()
+                };
+                keys.insert(key_id, key);
+            }
+        }
+        keys
+    }
+
     /// Load the endorsement key from the storage folder, or generate and
     /// persist a fresh one (worker owns disk I/O).
     fn load_or_create_signing_key(&self) -> crate::error::Result<SigningKey> {
@@ -1196,6 +1256,7 @@ mod tests {
             server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
             game_version: "26.3".into(),
             appview_url: "https://public.api.bsky.app".into(),
+            trusted_server_keys: Vec::new(),
         }
     }
 
@@ -1278,6 +1339,15 @@ mod tests {
 
         fn requests(&self) -> Vec<Captured> {
             self.requests.lock().unwrap().clone()
+        }
+
+        /// Insert a record directly, as if a createRecord/putRecord had
+        /// stored it (M13 presence-read tests seed foreign-endorsed records).
+        fn seed_record(&self, collection: &str, rkey: &str, value: serde_json::Value) {
+            self.records
+                .lock()
+                .unwrap()
+                .insert(format!("{collection}/{rkey}"), value.to_string());
         }
 
         /// The stored putRecord bodies, keyed by `<collection>/<rkey>`.
@@ -1569,6 +1639,16 @@ mod tests {
                     });
                     ("200 OK", doc.to_string())
                 }
+                // A DID whose repo the M13 test leaves empty (no records).
+                "/did:plc:empty" => {
+                    let doc = serde_json::json!({
+                        "id": "did:plc:empty",
+                        "service": [
+                            {"id": "#atproto_pds", "type": "AtprotoPersonalDataServer", "serviceEndpoint": server_url}
+                        ],
+                    });
+                    ("200 OK", doc.to_string())
+                }
                 // The stub doubles as the AppView for the M12 view-label reads.
                 "/xrpc/app.bsky.actor.getProfile" => (
                     "200 OK",
@@ -1600,16 +1680,70 @@ mod tests {
                 }
                 "/xrpc/com.atproto.repo.createRecord" => {
                     if authorized {
-                        (
-                        "200 OK",
-                        r#"{"uri":"at://did:plc:stubuser/app.bsky.feed.post/3jub4stub","cid":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy"}"#.to_string(),
-                    )
+                        // Store the record like a real PDS, so listRecords
+                        // (M13) can serve it back; posts get no rkey, so the
+                        // stub picks the fixed one the older tests assert on.
+                        let body_json: serde_json::Value =
+                            serde_json::from_str(&body_string).unwrap_or_default();
+                        let collection = body_json["collection"].as_str().unwrap_or("");
+                        let rkey = body_json["rkey"].as_str().unwrap_or("3jub4stub").to_string();
+                        records.lock().unwrap().insert(
+                            format!("{collection}/{rkey}"),
+                            body_json["record"].to_string(),
+                        );
+                        let payload = serde_json::json!({
+                            "uri": format!("at://did:plc:stubuser/{collection}/{rkey}"),
+                            "cid": STUB_CIDS[0],
+                        });
+                        ("200 OK", payload.to_string())
                     } else {
                         (
                             "401 Unauthorized",
                             r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
                         )
                     }
+                }
+                // The stub serves listRecords unauthenticated (public repos
+                // do), filtering the stored records by collection (M13).
+                "/xrpc/com.atproto.repo.listRecords" => {
+                    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+                    let param = |name: &str| {
+                        query.split('&').find_map(|pair| {
+                            let (k, v) = pair.split_once('=')?;
+                            (k == name).then(|| v.to_string())
+                        })
+                    };
+                    let collection = param("collection").unwrap_or_default();
+                    // Query values arrive percent-encoded; the repo DID's ':'
+                    // comes as %3A.
+                    let repo = param("repo").unwrap_or_default().replace("%3A", ":");
+                    let prefix = format!("{collection}/");
+                    // The stub hosts one real repo (did:plc:stubuser); other
+                    // repos (e.g. did:plc:empty) have no stored records.
+                    let mut items: Vec<serde_json::Value> = if repo == "did:plc:stubuser" {
+                        records
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .filter_map(|(key, value)| {
+                                key.strip_prefix(&prefix).map(|rkey| {
+                                    serde_json::json!({
+                                        "uri": format!("at://{repo}/{collection}/{rkey}"),
+                                        "cid": STUB_CIDS[0],
+                                        "value": serde_json::from_str::<serde_json::Value>(value)
+                                            .unwrap_or_default(),
+                                    })
+                                })
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    items.sort_by(|a, b| a["uri"].as_str().cmp(&b["uri"].as_str()));
+                    (
+                        "200 OK",
+                        serde_json::json!({ "records": items }).to_string(),
+                    )
                 }
                 _ => (
                     "404 Not Found",
@@ -1841,6 +1975,7 @@ mod tests {
             server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
             game_version: "26.3".into(),
             appview_url: "https://public.api.bsky.app".into(),
+            trusted_server_keys: Vec::new(),
         };
         command_tx
             .send(Command::SaveConfig {
@@ -2052,7 +2187,12 @@ mod tests {
             .unwrap();
         match wait_for(&event_rx, |e| matches!(e, Event::Posted { .. })) {
             Event::Posted { uri } => {
-                assert_eq!(uri, "at://did:plc:stubuser/app.bsky.feed.post/3jub4stub");
+                // The stub now answers createRecord with the real
+                // collection/rkey, so the chat record's URI carries its TID.
+                assert!(
+                    uri.starts_with("at://did:plc:stubuser/at.atpcraft.player.chat/"),
+                    "{uri}"
+                );
             }
             other => panic!("expected Posted, got {other:?}"),
         }
@@ -2843,6 +2983,273 @@ mod tests {
         assert!(queries[0].contains("uriPatterns=did%3Aplc%3Astubuser"));
         assert!(queries[0].contains("limit=100"));
         assert!(queries[1].contains("cursor=2"));
+    }
+
+    /// A resolver pointing handle resolution and the PLC directory at the
+    /// stub (the stub doubles as both, M11/M12/M13 read-side tests).
+    fn stub_resolver(pds_url: &str) -> crate::oauth::Resolver {
+        crate::oauth::Resolver {
+            handle_service: pds_url.to_string(),
+            plc_directory: pds_url.to_string(),
+        }
+    }
+
+    #[test]
+    fn fetch_player_reads_and_verifies_the_latest_snapshot() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("fetch-player");
+        write_config(&dir, &test_config(pds.url.clone()));
+
+        let (command_tx, event_rx, handle) =
+            spawn_worker_with_resolver(dir.clone(), stub_resolver(&pds.url));
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        // Publish a snapshot: the stub stores the createRecord body, so the
+        // read below finds it.
+        command_tx
+            .send(Command::PostSnapshot {
+                summary: test_summary(),
+            })
+            .unwrap();
+        let _ = wait_for(&event_rx, |e| matches!(e, Event::Posted { .. }));
+
+        // Read it back by handle (the stub doubles as the handle service).
+        command_tx
+            .send(Command::FetchPlayer {
+                subject: "stub.test".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::PlayerSnapshot { .. })) {
+            Event::PlayerSnapshot {
+                subject,
+                via,
+                snapshot,
+            } => {
+                assert_eq!(subject, "did:plc:stubuser");
+                assert_eq!(via, pds.url);
+                let d = snapshot.expect("a snapshot record exists");
+                assert_eq!(d.username, "stub.test", "filled from the identifier");
+                assert_eq!(d.version, 1);
+                assert_eq!(d.dimension, "minecraft:overworld");
+                assert_eq!((d.x, d.y, d.z), (-25, 67, -3));
+                // Verified by the mod's own persisted signing key.
+                let key_file: signing::SigningKeyFile = serde_json::from_str(
+                    &std::fs::read_to_string(dir.join(SIGNING_KEY_FILE)).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(d.rkey, key_file.key_id);
+                assert_eq!(
+                    d.verdict,
+                    presence::SnapshotVerdict::Verified {
+                        endorser: key_file.key_id.clone()
+                    }
+                );
+                assert_eq!(
+                    d.at_uri,
+                    format!(
+                        "at://did:plc:stubuser/{}/{}",
+                        records::SNAPSHOT_COLLECTION,
+                        key_file.key_id
+                    )
+                );
+            }
+            other => panic!("expected PlayerSnapshot, got {other:?}"),
+        }
+        // The listRecords call went out unauthenticated against the
+        // subject's own PDS.
+        let list_hit = pds
+            .requests()
+            .into_iter()
+            .find(|r| r.path.starts_with("/xrpc/com.atproto.repo.listRecords"))
+            .expect("listRecords was called");
+        assert!(!list_hit.authorized, "the read is unauthenticated");
+        assert!(list_hit.path.contains("repo=did%3Aplc%3Astubuser"));
+        assert!(
+            list_hit
+                .path
+                .contains("collection=at.atpcraft.player.snapshot")
+        );
+        assert!(list_hit.path.contains("limit=100"));
+        let hits: Vec<String> = pds.requests().into_iter().map(|r| r.path).collect();
+        assert!(
+            hits.iter()
+                .any(|p| p.starts_with("/xrpc/com.atproto.identity.resolveHandle?handle=stub.test")),
+            "{hits:?}"
+        );
+        assert!(hits.iter().any(|p| p == "/did:plc:stubuser"), "{hits:?}");
+
+        // A record URI is not a player account: fails before any network call.
+        let before = pds.requests().len();
+        command_tx
+            .send(Command::FetchPlayer {
+                subject: "at://did:plc:stubuser/app.bsky.feed.post/3abc".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("want a player account"), "{message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            pds.requests().len(),
+            before,
+            "no HTTP call for a record URI"
+        );
+
+        // A repo with no snapshot records reports None.
+        command_tx
+            .send(Command::FetchPlayer {
+                subject: "did:plc:empty".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::PlayerSnapshot { .. })) {
+            Event::PlayerSnapshot {
+                subject, snapshot, ..
+            } => {
+                assert_eq!(subject, "did:plc:empty");
+                assert!(snapshot.is_none());
+            }
+            other => panic!("expected PlayerSnapshot, got {other:?}"),
+        }
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn fetch_player_verifies_against_trusted_server_keys() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("fetch-player-trusted");
+        // A foreign "server" key, trusted via the settings file; the key id
+        // is blank in the entry, so the worker derives it from the key.
+        let foreign = signing::generate();
+        let foreign_id = signing::key_id_of(&foreign.verifying_key());
+        let mut config = test_config(pds.url.clone());
+        config.trusted_server_keys = vec![crate::config::TrustedServerKey {
+            key_id: String::new(),
+            public_key: signing::public_key_spki_b64(&foreign.verifying_key()),
+        }];
+        write_config(&dir, &config);
+
+        // Build a snapshot record signed by `key` (tamper edits it after
+        // signing); returns the record and the endorsing key id (the rkey).
+        let signed_record = |version: i64, key: &signing::SigningKey, tamper: bool| {
+            let key_id = signing::key_id_of(&key.verifying_key());
+            let mut record = serde_json::json!({
+                "$type": records::SNAPSHOT_COLLECTION,
+                "version": version,
+                "issuedAt": "2026-11-12T12:00:00.000Z",
+                "summary": {
+                    "username": "Foreign",
+                    "dimension": "minecraft:the_nether",
+                    "position": {"x": 1, "y": 2, "z": 3},
+                    "health": "20",
+                    "food": 20,
+                    "xpLevel": 0,
+                    "gameMode": "creative",
+                },
+                "aspects": [],
+                "endorsements": [],
+            });
+            let payload = presence::snapshot_payload("did:plc:stubuser", &record, &key_id).unwrap();
+            let sig = signing::sign_b64(key, &payload);
+            if tamper {
+                record["summary"]["food"] = serde_json::json!(0);
+            }
+            record["endorsements"] = serde_json::json!([{
+                "server": key_id,
+                "alg": "ed25519",
+                "sig": {"$bytes": sig},
+            }]);
+            (record, key_id)
+        };
+
+        // Logged out: the read is unauthenticated. The trusted key verifies.
+        pds.seed_record(
+            records::SNAPSHOT_COLLECTION,
+            &foreign_id,
+            signed_record(3, &foreign, false).0,
+        );
+        let (command_tx, event_rx, handle) =
+            spawn_worker_with_resolver(dir.clone(), stub_resolver(&pds.url));
+        command_tx
+            .send(Command::FetchPlayer {
+                subject: "did:plc:stubuser".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::PlayerSnapshot { .. })) {
+            Event::PlayerSnapshot {
+                subject,
+                via,
+                snapshot,
+            } => {
+                assert_eq!(subject, "did:plc:stubuser");
+                assert_eq!(via, pds.url);
+                let d = snapshot.expect("a snapshot record exists");
+                assert_eq!(d.version, 3);
+                assert_eq!(d.username, "Foreign");
+                assert_eq!(d.dimension, "minecraft:the_nether");
+                assert_eq!((d.x, d.y, d.z), (1, 2, 3));
+                assert_eq!(d.rkey, foreign_id);
+                assert_eq!(
+                    d.verdict,
+                    presence::SnapshotVerdict::Verified {
+                        endorser: foreign_id.clone()
+                    }
+                );
+            }
+            other => panic!("expected PlayerSnapshot, got {other:?}"),
+        }
+        let list_hit = pds
+            .requests()
+            .into_iter()
+            .find(|r| r.path.starts_with("/xrpc/com.atproto.repo.listRecords"))
+            .expect("listRecords was called");
+        assert!(!list_hit.authorized, "the read is unauthenticated");
+
+        // The same record edited after signing: known key, bad signature.
+        pds.seed_record(
+            records::SNAPSHOT_COLLECTION,
+            &foreign_id,
+            signed_record(3, &foreign, true).0,
+        );
+        command_tx
+            .send(Command::FetchPlayer {
+                subject: "did:plc:stubuser".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::PlayerSnapshot { .. })) {
+            Event::PlayerSnapshot { snapshot, .. } => assert_eq!(
+                snapshot.unwrap().verdict,
+                presence::SnapshotVerdict::BadSignature
+            ),
+            other => panic!("expected PlayerSnapshot, got {other:?}"),
+        }
+
+        // A higher-version record endorsed by an untrusted key wins as the
+        // latest and reports unknown endorser.
+        let stranger = signing::generate();
+        let (stranger_record, stranger_id) = signed_record(4, &stranger, false);
+        pds.seed_record(records::SNAPSHOT_COLLECTION, &stranger_id, stranger_record);
+        command_tx
+            .send(Command::FetchPlayer {
+                subject: "did:plc:stubuser".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::PlayerSnapshot { .. })) {
+            Event::PlayerSnapshot { snapshot, .. } => {
+                let d = snapshot.unwrap();
+                assert_eq!(d.version, 4);
+                assert_eq!(d.verdict, presence::SnapshotVerdict::UnknownEndorser);
+            }
+            other => panic!("expected PlayerSnapshot, got {other:?}"),
+        }
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
     }
 
     #[test]
