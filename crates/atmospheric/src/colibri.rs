@@ -5,6 +5,7 @@
 //! crosses the runtime boundary.
 
 use crate::{
+    actions,
     error::{AtmosphericError, Result},
     session::Agent,
 };
@@ -39,6 +40,8 @@ const COMMUNITY_SELF: &str = "self";
 const DEEP_LINK_SCHEME: &str = "social.colibri:";
 const HEARTBEAT_SECS: u64 = 30;
 const MAX_BACKOFF_SECS: u64 = 60;
+/// Rotate the one-hour service-auth token before it expires.
+pub const TOKEN_ROTATION_SECS: u64 = 45 * 60;
 
 /// One bridged channel, parsed from an AT-URI or a Colibri app link.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +236,58 @@ pub fn membership_record(community_uri: &str, created_at: &str) -> Value {
     })
 }
 
+/// Ensure the server account has a membership record for the channel's
+/// community. Returns `true` when a record was created.
+///
+/// The AppView only sends events to community members. atpcraft uses
+/// `createRecord` (not `putRecord`) because an OAuth grant for this collection
+/// carries create/delete, not update.
+pub async fn ensure_membership(
+    agent: &Agent,
+    did: &str,
+    channel: &ChannelRef,
+    rkey: &str,
+) -> Result<bool> {
+    use atrium_api::com::atproto::repo::list_records;
+    let community = channel.community_uri();
+    let params = list_records::ParametersData {
+        collection: MEMBERSHIP_COLLECTION.parse().expect("valid NSID"),
+        cursor: None,
+        limit: Some(100.try_into().expect("valid list limit")),
+        repo: did
+            .parse()
+            .map_err(|_| AtmosphericError::Message(format!("invalid DID: {did}")))?,
+        reverse: None,
+    };
+    let page = agent
+        .api
+        .com
+        .atproto
+        .repo
+        .list_records(params.into())
+        .await
+        .map_err(AtmosphericError::protocol)?;
+    let already_member = page.data.records.iter().any(|record| {
+        serde_json::to_value(&record.value)
+            .ok()
+            .and_then(|value| value.get("community")?.as_str().map(str::to_owned))
+            .as_deref()
+            == Some(community.as_str())
+    });
+    if already_member {
+        return Ok(false);
+    }
+    actions::create_record_json(
+        agent,
+        did,
+        MEMBERSHIP_COLLECTION,
+        Some(rkey),
+        membership_record(&community, &now()),
+    )
+    .await?;
+    Ok(true)
+}
+
 /// Mint the inter-service token the AppView accepts for the event stream.
 pub async fn service_auth(agent: &Agent, aud: &str, lxm: &str) -> Result<String> {
     use atrium_api::com::atproto::server::get_service_auth;
@@ -290,6 +345,7 @@ pub struct IncomingMessage {
 pub enum StreamEvent {
     Connected,
     Disconnected(String),
+    Rotate,
     Message(IncomingMessage),
 }
 
@@ -351,7 +407,11 @@ pub async fn run_stream(appview_url: String, token: String, tx: UnboundedSender<
     let mut backoff = 1u64;
     loop {
         match connect_once(&url, &token, &tx).await {
-            Ok(()) => {
+            Ok(true) => {
+                let _ = tx.send(StreamEvent::Rotate);
+                return;
+            }
+            Ok(false) => {
                 backoff = 1;
                 if tx
                     .send(StreamEvent::Disconnected("stream closed".into()))
@@ -375,7 +435,7 @@ async fn connect_once(
     url: &str,
     token: &str,
     tx: &UnboundedSender<StreamEvent>,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<bool, String> {
     let mut request = url
         .into_client_request()
         .map_err(|error| format!("invalid Colibri stream URL: {error}"))?;
@@ -388,12 +448,15 @@ async fn connect_once(
         .await
         .map_err(|error| format!("Colibri stream connection failed: {error}"))?;
     if tx.send(StreamEvent::Connected).is_err() {
-        return Ok(());
+        return Ok(false);
     }
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(HEARTBEAT_SECS));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let rotation = tokio::time::sleep(std::time::Duration::from_secs(TOKEN_ROTATION_SECS));
+    tokio::pin!(rotation);
     loop {
         tokio::select! {
+            _ = &mut rotation => return Ok(true),
             _ = heartbeat.tick() => {
                 socket
                     .send(Message::Text("{\"type\":\"heartbeat\"}".into()))
@@ -410,7 +473,7 @@ async fn connect_once(
                         if let Some(event) = decode_event(&text)
                             && tx.send(event).is_err()
                         {
-                            return Ok(());
+                            return Ok(false);
                         }
                     }
                     Message::Ping(payload) => {
@@ -419,7 +482,7 @@ async fn connect_once(
                             .await
                             .map_err(|error| format!("Colibri pong failed: {error}"))?;
                     }
-                    Message::Close(_) => return Ok(()),
+                    Message::Close(_) => return Ok(false),
                     _ => {}
                 }
             }
