@@ -22,17 +22,21 @@ This exact source is injected by horizon-mixins into the game as
 root package. Both builds must work, so it stays **std-only**: no external
 crates, no game imports. Its only job is channel plumbing:
 
-- `install()` creates the `GameCommand`/`ModEvent` channel pair, keeps the
-  game side in statics, and hands the worker side to whoever spawns the
-  worker at startup.
+- `install()` creates the `GameCommand`/`ModEvent` channel pair in-process,
+  keeps the game side in statics, and hands the worker side to whoever spawns
+  the worker at startup (tests; a future `[[crate]]` glue).
+- `ensure_attached()` (M17, called from the `tick` helper) spawns the
+  `atmospheric-worker` sidecar binary found next to the game executable (or
+  via `ATMOSPHERIC_WORKER_BIN`) and bridges the channel pair to the child's
+  stdio — the shipped in-game attach path, see "M17" below.
 - Hook helpers push `GameCommand`s through the sender — never blocking,
   never panicking if the worker is gone. M2 hooks Horizon's named native
   hook points (`native-hooks.json` at the pinned revision): `mods` (the
   Options > Mods row and its keybind), `key` (the keybind posts the
   player's location), `command` (`/atmospheric login`,
-  `/atmospheric post <text>`), `tick` (drains events once per tick on the
-  window's game) and `hud` (draws the status line in the bottom-left
-  corner).
+  `/atmospheric post <text>`), `tick` (attaches the sidecar once, then drains
+  events once per tick on the window's game) and `hud` (draws the status
+  line in the bottom-left corner).
 - `drain_events()` is called once per tick to collect worker events, folding
   each into the HUD status line (`status_line()`), bounded so the game
   thread never stalls.
@@ -64,29 +68,31 @@ Everything else, with zero Horizon imports so it builds and tests with plain
   `EndorsementVerdict`/`verify_endorsements` both reads use
 - `worker` — owns the tokio runtime, the agent, and the files; the **only**
   module that performs network or disk I/O
+- `src/bin/atmospheric-worker.rs` — the M17 sidecar binary: `worker::spawn`
+  bridged to stdio as newline-delimited JSON (`Command` in, `Event` out)
 - `error` — one error enum, mapped to HUD strings at the edge
 
-### The M2 wiring, and why the worker is not linked into the game yet
+### The M2/M17 wiring: how the worker attaches to the game
 
 The injected module lives inside the game's crate, which does not depend on
-the `atmospheric` crate. The worker therefore consumes the game-side channels
-and owns an `atmospheric`-crate agent inside its own thread — the two crates
-never import each other, they meet only at the channel boundary, and commands
-cross it as plain data (`GameCommand`/`ModEvent` mirror `Command`/`Event`).
+the `atmospheric` crate, so the two never import each other: they meet at
+the channel boundary, and commands cross it as plain data
+(`GameCommand`/`ModEvent` mirror `Command`/`Event`).
 
 horizon-mixins 0.6.0 can stage a bundle's own crate into the game workspace
 (`[[crate]]`), but its registry dependencies are taken only from Horizon's
 existing `Cargo.lock` — the allow list — and the pinned Horizon revision's
 lock has no `atrium-api`/`reqwest` (it does have `serde`, `tokio`,
-`thiserror`). So the bundle stays mixins-only for now: the game-side hooks
-above are real and compiled in, but no in-game consumer is attached to the
-channel yet. When Horizon's lock (or the launcher) allows it, a small glue
-helper calls `install()`, spawns `atmospheric::worker::spawn` with
-`native_data_dir("atmospheric")` as the storage folder, and maps
-`Command`↔`GameCommand`; the boundary stays exactly as it is.
+`thiserror`). So the bundle stays mixins-only, and the shipped attach path is
+the **M17 sidecar** instead (issue #2 option 3): the game-side module spawns
+the `atmospheric-worker` binary next to the game executable and bridges the
+channel pair over the child's stdio. When Horizon's lock (or the launcher)
+allows it, a small glue helper can alternatively call `install()` and spawn
+`atmospheric::worker::spawn` with `native_data_dir("atmospheric")` as the
+storage folder; the boundary stays exactly as it is either way.
 
-Until then, M2's end-to-end proof runs the worker standalone against a real
-PDS — see "Manual check" below.
+M2's standalone end-to-end proof still runs the worker against a real PDS —
+see "Manual check" below.
 
 ### What the worker does with each command (M2)
 
@@ -102,7 +108,7 @@ PDS — see "Manual check" below.
   that owns them (M3 / M4) instead of panicking the thread.
 - `Shutdown`, or the game side dropping the command channel, stops the
   thread cleanly (the blocking channel is bridged into the tokio runtime so
-  the loop can later `select!` a notification timer, M4).
+  the loop can `select!` the notification timer, M4, next to the commands).
 
 ### M3: screenshot posts
 
@@ -564,6 +570,38 @@ unauthenticated; two posted chats then appear ordered after it; an empty
 repo reports zero; a record-URI subject fails before any HTTP call).
 Real-PDS wire check: `pds_check` with `ATMOSPHERIC_FETCH_CHAT`.
 
+### M17: the sidecar worker process (issue #2 option 3, #40)
+
+The bundle cannot stage the worker crate into the game workspace (see
+above), so the game attaches a **worker process** instead:
+
+- `crates/atmospheric/src/bin/atmospheric-worker.rs` wraps the existing
+  `worker::spawn` in a stdio protocol: one JSON `Command` per line on stdin,
+  one JSON `Event` per line on stdout (serde's externally tagged default;
+  the shapes are pinned by unit tests in `lib.rs`). `--data-dir` (or
+  `ATMOSPHERIC_DATA_DIR`) selects the storage folder; `--no-browser` keeps
+  tests headless. Stdin EOF stops the worker — the game exiting closes the
+  pipe — and unparseable lines come back as `Event::Failed`.
+- Game side, `runtime.rs` stays std-only: a hand-rolled minimal JSON
+  parser/writer encodes `GameCommand` and decodes `ModEvent` in exactly that
+  wire format (the `Settings` → `Config` mapping relies on the container-
+  level `#[serde(default)]`; the flat snapshot `x/y/z` map onto the nested
+  `position` object). `ensure_attached()`, called once per tick by the
+  `tick` helper, finds the binary (`ATMOSPHERIC_WORKER_BIN`, else
+  `atmospheric-worker[.exe]` next to the game executable; data dir
+  `ATMOSPHERIC_DATA_DIR`, else `<exe dir>/atmospheric-data`), spawns it with
+  piped stdio, and runs two bridge threads — commands to the child's stdin,
+  the child's stdout lines to the event channel — plus a reaper thread.
+  With no binary found, sends stay no-ops and the HUD stays hidden, exactly
+  as before.
+
+Verified: crate-side `tests/sidecar.rs` spawns the real bin
+(`CARGO_BIN_EXE_…`) and checks the `{"Session":"LoggedOut"}` handshake, a
+config-less `Login` failing without network, a garbage line, `SaveConfig`
+writing `config.json`, and a clean `Shutdown` exit; runtime tests pin the
+encode/decode shapes against the serde-pinned strings and run
+`spawn_sidecar` against a fake worker script proving both directions.
+
 ### Manual check against a real PDS
 
 `crates/atmospheric/examples/pds_check.rs` spawns the worker exactly as the
@@ -674,10 +712,14 @@ and plays. In-game, verified through the control socket: Options > Mods lists
 events reach `native_key` (the keybind hook path) with no panics in the log;
 and a pixel diff of screenshots with the mod OFF vs ON shows the HUD status
 box in the bottom-left corner only when ON — the `hud` hook rendering the
-`status_line()` fed by the `tick` hook's `drain_events()`. The worker side of
-the channel has no in-game consumer yet (see above), so those sends are no-ops
-until the glue lands; the worker itself is proven by the crate tests and the
-`pds_check` example.
+`status_line()` fed by the `tick` hook's `drain_events()`. Since M17 the
+worker side attaches in-game as a sidecar: copy the release
+`atmospheric-worker` binary next to the `horizon-client` executable (or set
+`ATMOSPHERIC_WORKER_BIN`), and the `tick` hook's `ensure_attached()` spawns it
+on the first tick — `/atmospheric login` then reaches the worker over stdio
+and the HUD shows the session events. Without the binary, sends are no-ops
+and the worker is proven standalone by the crate tests, the `sidecar` test,
+and the `pds_check` example.
 
 ## Reviewer notes
 
