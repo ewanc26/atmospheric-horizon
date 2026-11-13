@@ -29,3 +29,16 @@ horizon-player.txt
 saves/
 screenshots/
 .horizon-cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+
+# Local agent/worktree state
+.claude/
+.agents/
+.codex/
