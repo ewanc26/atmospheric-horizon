@@ -57,6 +57,9 @@ Everything else, with zero Horizon imports so it builds and tests with plain
   the M15 join-gate decision (`check_gate`)
 - `chats` — M16 chat-history reads (`at.atpcraft.player.chat` listRecords on
   the subject's own PDS, ordered by `sentAt`)
+- `servers` — M19 server-profile reads (`at.atpcraft.server.profile` listRecords
+  on the subject's own PDS, preferred `self` rkey, `signingKey` trust
+  verification against your own key and `trusted_server_keys`)
 - `labels` — M12 labeler read side (AppView view `labels`, labeler
   `#atproto_labeler` endpoint resolution, `com.atproto.label.queryLabels`)
 - `presence` — M13 verified reads of other players' `at.atpcraft.player.snapshot`
@@ -570,6 +573,40 @@ unauthenticated; two posted chats then appear ordered after it; an empty
 repo reports zero; a record-URI subject fails before any HTTP call).
 Real-PDS wire check: `pds_check` with `ATMOSPHERIC_FETCH_CHAT`.
 
+### M19: server-profile reads (`at.atpcraft.server.profile`)
+
+`/atmospheric server-of <did|handle>` sends `Command::FetchServerProfile` —
+the read side of M10: an account advertises its server descriptor in an
+`at.atpcraft.server.profile` record at rkey `self` (identity fields, versions,
+capabilities, operator info, and a `signingKey` block), and this command reads
+it back.
+
+1. resolve the account and its PDS endpoint exactly as M13/M14/M16, then page
+   `listRecords` unauthenticated for `at.atpcraft.server.profile` against that
+   PDS (`servers::list_records`);
+2. `servers::latest` selects the structurally valid record at rkey `self`
+   (preferred), or falls back to the newest structurally valid record by
+   `updatedAt`; malformed records are skipped rather than fatal;
+3. `servers::verify` verifies the `signingKey` block: because the profile
+   record carries no signature over itself (repo-authenticated), verification
+   means checking whether the published `keyId` is one you trust — the mod's
+   own Ed25519 key or an entry in `trusted_server_keys` — and that its
+   published `publicKey` matches that key. Verdicts are `Trusted { key_id }`,
+   `Unknown`, `KeyMismatch { key_id }`, or `Malformed`;
+4. `servers::digest` builds the `ServerDigest` with identity fields, versions,
+   capabilities, operator handle, and trust verdict.
+
+The worker emits `Event::ServerProfile { subject, via, profile }`; the game
+side mirrors it as plain data and the HUD shows "atmospheric: <name> — MC <version>,
+N capabilit(y/ies), key <id> trusted/unknown/mismatched" (or "atmospheric: no server
+profile for <subject>").
+
+Verified: `servers` unit tests (structural validation, `self` rkey preference,
+newest-record fallback, key trust verdicts, HUD digest) and worker tests against
+the stub PDS (empty repo reports none, seeded record reads back logged out with
+unauthenticated `listRecords`, trusted key verifies, unknown and mismatched
+keys report proper verdicts, record-URI subject fails before HTTP).
+
 ### M17: the sidecar worker process (issue #2 option 3, #40)
 
 The bundle cannot stage the worker crate into the game workspace (see
@@ -630,6 +667,7 @@ ATMOSPHERIC_FETCH_SKIN="did:plc:… | handle" \       # optional, M14 (skin read
 ATMOSPHERIC_GATE="at://…/app.bsky.graph.list/<rkey> | URL" \ # optional, M15
 ATMOSPHERIC_GATE_SUBJECT="did:plc:… | handle" \     # optional, M15 (default: own DID)
 ATMOSPHERIC_FETCH_CHAT="did:plc:… | handle" \       # optional, M16 (chat history)
+ATMOSPHERIC_FETCH_SERVER="did:plc:… | handle" \     # optional, M19 (server profile)
 cargo run -p atmospheric --example pds_check
 ```
 
