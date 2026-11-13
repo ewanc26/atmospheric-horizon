@@ -49,9 +49,15 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   `broadcast_message` hook classifies translation keys and forwards join,
   leave, death and advancement lines to the worker, which writes them into the
   bridged channel as the server account. `colibri_server_events_enabled`
-  defaults to true; ordinary chat and unknown lines are ignored. Notice
-  fallbacks for rewritten lines, approval prompts and the profile prompt
-  remain.
+  defaults to true; ordinary chat and unknown lines are ignored.
+- **M29 — Colibri presence fallback and approval notice (#73).** Server-side
+  `player_logged_in`/`player_logged_out` hooks schedule a fallback notice when
+  a chat mod rewrites or hides the vanilla join/leave line. The worker waits
+  3 seconds and writes only when no matching or blank line arrived within 5
+  seconds; blank lines suppress the fallback. `colibri_server_events_fallback_enabled`
+  defaults to true. After a new membership is created, the worker reads the
+  community's `requiresApprovalToJoin` flag unauthenticated and shows a HUD
+  notice when a moderator must approve the join. The profile prompt remains.
 
 ### Changed
 
