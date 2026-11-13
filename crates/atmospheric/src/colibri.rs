@@ -256,6 +256,44 @@ pub async fn profile_exists(agent: &Agent, did: &str) -> Result<bool> {
     )
 }
 
+/// Whether a linked player has a Colibri actor profile (M37). The record is
+/// public, so the read resolves the DID's PDS and uses an unauthenticated
+/// `getRecord`; a 404 is `Ok(false)` and every other failure is an error.
+pub async fn remote_profile_exists(
+    http: &reqwest::Client,
+    resolver: &oauth::Resolver,
+    did: &str,
+) -> Result<bool> {
+    let did_doc = oauth::resolve_did_document(http, resolver, did).await?;
+    let pds = oauth::pds_endpoint(&did_doc)?;
+    let response = http
+        .get(format!(
+            "{}/xrpc/com.atproto.repo.getRecord",
+            pds.trim_end_matches('/')
+        ))
+        .query(&[
+            ("repo", did),
+            ("collection", ACTOR_PROFILE_COLLECTION),
+            ("rkey", SELF_RKEY),
+        ])
+        .send()
+        .await
+        .map_err(AtmosphericError::protocol)?;
+    let status = response.status();
+    let body = response.text().await.map_err(AtmosphericError::protocol)?;
+    if status == reqwest::StatusCode::NOT_FOUND
+        || (status == reqwest::StatusCode::BAD_REQUEST && body.contains("RecordNotFound"))
+    {
+        return Ok(false);
+    }
+    if status.is_success() {
+        return Ok(true);
+    }
+    Err(AtmosphericError::Message(format!(
+        "getRecord for {ACTOR_PROFILE_COLLECTION} in {did} failed with HTTP {status}: {body}"
+    )))
+}
+
 /// Ensure the server account has a membership record for the channel's
 /// community. Returns `true` when a record was created.
 ///

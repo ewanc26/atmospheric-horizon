@@ -110,7 +110,10 @@ hook = "player_logged_in"
 hook_version = 1
 kind = "HEAD"
 helper = "colibri_join.rs"
-bindings = [{ name = "name", ty = "&str", value = "name" }]
+bindings = [
+  { name = "player", ty = "u128", value = "player" },
+  { name = "name", ty = "&str", value = "name" },
+]
 
 [[injection]]
 id = "colibri-leave"

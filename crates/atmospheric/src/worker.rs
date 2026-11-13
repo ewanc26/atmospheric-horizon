@@ -480,6 +480,13 @@ impl Worker {
             Command::ColibriNotice { text } => self.send_colibri_notice(&text).await,
             Command::ColibriHandled { kind } => self.mark_colibri_handled(kind.as_deref()),
             Command::ColibriPresence { kind, text } => self.schedule_colibri_fallback(&kind, text),
+            Command::ColibriPlayerJoined {
+                player_uuid,
+                player_name,
+            } => {
+                self.check_remote_colibri_profile(&player_uuid, &player_name)
+                    .await
+            }
             Command::ClaimServerLink { code } => self.claim_server_link(&code).await,
             Command::PostText { text } => {
                 self.ensure_oauth_fresh().await;
@@ -2230,6 +2237,40 @@ impl Worker {
         }
     }
 
+    /// Check a linked joining player's Colibri profile (M37). atpcraft checks
+    /// every linked player on join; the UUID comes from the server hook and the
+    /// DID from the M35 map. Every failure is quiet, matching the M30 rule for
+    /// an unavailable profile read.
+    async fn check_remote_colibri_profile(&self, player_uuid: &str, player_name: &str) {
+        if self.colibri_channel.is_none() {
+            return;
+        }
+        let Ok(config) = self.load_config() else {
+            return;
+        };
+        if config.server_api_url.trim().is_empty() {
+            return;
+        }
+        let Ok(Some(link)) =
+            identity::fetch_link(&self.http, &config.server_api_url, player_uuid).await
+        else {
+            return;
+        };
+        if self.did.as_deref() == Some(link.did.as_str()) {
+            return; // M30 already checks the local player.
+        }
+        if matches!(
+            colibri::remote_profile_exists(&self.http, &self.resolver, &link.did).await,
+            Ok(false)
+        ) {
+            self.emit(Event::ColibriRemoteProfileMissing {
+                player_uuid: player_uuid.to_string(),
+                player_name: player_name.to_string(),
+                url: colibri::PROFILE_URL.into(),
+            });
+        }
+    }
+
     /// Disarm the bridge and, unless called from a replace, report it.
     fn stop_colibri(&mut self, announce: bool) {
         if let Some(task) = self.colibri_task.take() {
@@ -2791,6 +2832,16 @@ mod tests {
                 "200 OK",
                 r#"{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex","did":"did:plc:stubuser","handle":"stub.test","linked_at":1760000000}"#.to_string(),
             )
+        } else if path == "/v1/links/00000000-0000-4000-8000-0000000000a1" {
+            (
+                "200 OK",
+                r#"{"player_uuid":"00000000-0000-4000-8000-0000000000a1","player_name":"Remote","did":"did:plc:remote","handle":null,"linked_at":1760000000}"#.to_string(),
+            )
+        } else if path == "/v1/links/00000000-0000-4000-8000-0000000000a2" {
+            (
+                "404 Not Found",
+                r#"{"error":"no link for player"}"#.to_string(),
+            )
         } else {
             match path.split('?').next().unwrap_or(&path) {
                 "/xrpc/com.atproto.server.createSession" => {
@@ -2985,7 +3036,10 @@ mod tests {
                 // The stub doubles as the PLC directory; the DID documents
                 // advertise the stub itself as PDS and (for the labeler DIDs)
                 // labeler service endpoint.
-                "/did:plc:stubuser" | "/did:plc:labeler" | "/did:plc:community" => {
+                "/did:plc:stubuser"
+                | "/did:plc:labeler"
+                | "/did:plc:community"
+                | "/did:plc:remote" => {
                     let doc = serde_json::json!({
                         "@context": ["https://www.w3.org/ns/did/v1"],
                         "id": "did:plc:stubuser",
@@ -3567,6 +3621,59 @@ mod tests {
             event_rx.try_recv().is_err(),
             "an existing profile emits no prompt"
         );
+    }
+
+    #[test]
+    fn colibri_remote_profile_prompt_targets_the_linked_player() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("colibri-remote-profile");
+        let mut config = test_config(pds.url.clone());
+        config.server_api_url = pds.url.clone();
+        write_config(&dir, &config);
+        let (events, event_rx) = std::sync::mpsc::channel();
+        let (oauth_tx, _oauth_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (colibri_tx, _colibri_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut worker = Worker::new(WorkerOptions::new(dir), events, oauth_tx, colibri_tx);
+        worker.resolver = stub_resolver(&pds.url);
+        worker.did = Some("did:plc:stubuser".into());
+        worker.colibri_channel = Some(
+            ChannelRef::parse("at://did:plc:community/social.colibri.channel/3jchannel").unwrap(),
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let uuid = "00000000-0000-4000-8000-0000000000a1";
+
+        runtime.block_on(worker.check_remote_colibri_profile(uuid, "Alex"));
+        match event_rx.try_recv() {
+            Ok(Event::ColibriRemoteProfileMissing {
+                player_uuid,
+                player_name,
+                url,
+            }) => {
+                assert_eq!(player_uuid, uuid);
+                assert_eq!(player_name, "Alex");
+                assert_eq!(url, colibri::PROFILE_URL);
+            }
+            other => panic!("expected the remote profile prompt, got {other:?}"),
+        }
+        let requests = pds.requests();
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.path == format!("/v1/links/{uuid}")),
+            "the worker resolves the join through the public link map"
+        );
+        assert!(
+            requests.iter().any(|request| request
+                .path
+                .starts_with("/xrpc/com.atproto.repo.getRecord")
+                && request.path.contains(colibri::ACTOR_PROFILE_COLLECTION)),
+            "the linked player's actor profile is read over getRecord"
+        );
+
+        runtime.block_on(
+            worker.check_remote_colibri_profile("00000000-0000-4000-8000-0000000000a2", "Unlinked"),
+        );
+        assert!(event_rx.try_recv().is_err(), "an unlinked player is quiet");
     }
 
     #[test]

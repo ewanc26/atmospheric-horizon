@@ -37,12 +37,15 @@ crates, no game imports. Its only job is channel plumbing:
   Options > Mods row and its keybind), `key` (the keybind posts the
   player's location), `command` (`/atmospheric login`,
   `/atmospheric post <text>`), `tick` (attaches the sidecar once, then drains
-  events once per tick on the window's game) and `hud` (draws the status
+  events once per tick on the game or server) and `hud` (draws the status
   line in the bottom-left corner).
 - `drain_events()` is called once per tick to collect worker events, folding
   each into the HUD status line (`status_line()`), bounded so the game
   thread never stalls. Colibri message events are also queued for
-  `drain_colibri_chat()`, which the tick hook prints to native chat.
+  `drain_colibri_chat()`, which the tick hook prints to native chat when a
+  window exists. M37's remote profile prompts use a separate queue and the
+  tick hook sends them with `native_tell`, so a server tick can prompt a
+  joining player without a window.
 - The server-side `broadcast_message` injection (`colibri_notice.rs`) reads
   the line's translation key and forwards only join/leave/death/advancement
   lines to the worker, which writes them as the server account.
@@ -66,8 +69,9 @@ Everything else, with zero Horizon imports so it builds and tests with plain
   `getFollowers`/`getBlocks`/`getMutes` pagination on the public AppView,
   reduced to DID/handle/display name) and M23 writes (`follow`/`block`
   records, their removal, and the expected record shapes)
-- `identity` — M36 claim client for the optional M35 service: URL construction,
-  request/response shapes, DID ownership check and service-error propagation
+- `identity` — M36/M37 client for the optional M35 service: claim URL and
+  request/response shapes, public UUID link lookup, DID ownership check and
+  service-error propagation
 - `interactions` — M21 replies, likes and reposts (unauthenticated
   `com.atproto.repo.getRecord` for the target's strong ref and thread root,
   then `app.bsky.feed.post`/`like`/`repost` records in your own repo)
@@ -523,9 +527,9 @@ a blob reference, so only the AppView's avatar URL is carried in the digest.
 atpcraft's remaining server-side surfaces (RPG item discovery, full aspect
 capture/restore and labeler issuance) are not implemented yet; the README port
 table records each one. M25 supplies the separate server account, M26/M27 run
-the operational Colibri bridge, M35 supplies the shared player-to-DID map and
-M36 claims links from the game; enforcement, issuance and capture remain
-separate milestones.
+the operational Colibri bridge, M35 supplies the shared player-to-DID map,
+M36 claims links from the game and M37 checks linked players on join;
+enforcement, issuance and capture remain separate milestones.
 
 Verified: `profiles` unit tests (whitespace normalisation, direct-record
 precedence, clearing on a successful record without pronouns, AppView
@@ -673,7 +677,7 @@ interrupts the game.
 This observes vanilla broadcast lines only. M29 adds the fallback for lines
 that another mod rewrites or hides, and the pending-approval notice. The hook
 still does not cover a client connected to a remote server that does not run
-the mod, and the server-wide Colibri profile prompt remains.
+the mod; M37 later adds the server-wide Colibri profile prompt.
 
 Verified: the runtime classifier test covers all accepted and rejected keys;
 the runtime forwarding test asserts the `ColibriNotice` command and the codec
@@ -687,7 +691,8 @@ The connection hooks `player_logged_in` and `player_logged_out`
 (`hook_version = 1`, server side) call `colibri_join.rs` and
 `colibri_leave.rs`. Each localises the join/leave line through
 `Text::translate`, then sends `GameCommand::ColibriPresence { kind, text }`.
-The worker waits **3 seconds** (`COLIBRI_PRESENCE_WAIT`) and asks whether a
+The join helper also sends M37's `GameCommand::ColibriPlayerJoined` with the
+player's UUID. The worker waits **3 seconds** (`COLIBRI_PRESENCE_WAIT`) and asks whether a
 matching line arrived within **5 seconds** before or after the event
 (`COLIBRI_PRESENCE_WINDOW`), the same window atpcraft uses.
 
@@ -735,7 +740,7 @@ same missing-profile message into the HUD.
 
 The check resets on an explicit bridge stop and on player logout, so a new
 session or account is checked again. A 45-minute token rotation does not repeat
-the prompt. Other players are not checked; M35 now supplies the server-side identity mapping, but the client-side profile check is still local-only.
+the prompt. M37 extends the same check to other linked players when they join.
 
 Verified: a worker test logs an agent into the stub PDS, points the worker at a
 channel, and calls the check with no profile (asserting the
@@ -871,8 +876,8 @@ write therefore leaves both copies unchanged. UUIDs, DIDs, handles, player names
 validated before they reach the store. The service is designed for one process
 per data directory, not for multiple replicas sharing a volume.
 
-M36 wires one consumer: the explicit `/atmospheric link <code>` claim. The
-service is still the foundation for server-wide Colibri profile checks,
+M36 wires the explicit `/atmospheric link <code>` claim and M37 wires the
+public join-time link lookup. The service is still the foundation for
 join-gate enforcement, labeler issuance and RPG/player-data work; those
 consumers remain separate and must not be described as delivered.
 
@@ -910,6 +915,40 @@ URLs; a worker test logs in against the stub PDS, claims a code against the
 same stub's identity route, and asserts the DID, handle and status line; the
 sidecar test covers a claim while logged out; the runtime test pins the command
 wire shape.
+
+### M37: server-wide Colibri profile checks
+
+M30 could only inspect the local player because it had no UUID-to-DID map.
+M37 uses the map M35 built and the claim path M36 added: the server-side
+`player_logged_in` hook now binds `player: u128` alongside `name`, and
+`colibri_join.rs` sends `GameCommand::ColibriPlayerJoined` with the canonical
+hyphenated UUID and the joining name. The presence fallback is unchanged.
+
+While the bridge is active, the worker reads `server_api_url` and resolves
+`<server_api_url>/v1/links/{uuid}` with an unauthenticated GET. A 404 means the
+player has not linked an account and is quiet; a service error is also quiet,
+matching atpcraft's unavailable-result behaviour. The worker skips the local
+player's DID because M30 already checks it. For another DID it resolves the DID
+document, takes the `#atproto_pds` endpoint, and reads
+`social.colibri.actor.profile` at rkey `self` with an unauthenticated
+`getRecord`. A 200 means the profile exists; a 404 or the PDS's
+`RecordNotFound` 400 means it is missing; every other result is quiet.
+
+A missing profile emits `Event::ColibriRemoteProfileMissing { player_uuid,
+player_name, url }`. The runtime queues atpcraft's two-line setup prompt in a
+targeted queue. The tick hook drains that queue and calls `native_tell(uuid,
+Text::literal(line))`, so the prompt reaches the joining player rather than the
+local HUD. Server ticks now attach the sidecar and drain events too; a client
+window is no longer required to receive worker events. The sidecar and its data
+folder still have to be installed on the machine running the server.
+
+Verified: eight `identity` tests cover the exact claim body and public link
+lookup, 404-as-unlinked, service errors and UUID validation; the worker test
+links `did:plc:remote` through the stub service, reads its missing profile over
+`getRecord`, asserts the targeted event, then checks that an unlinked UUID is
+quiet. Runtime tests pin the join command, event decoder, HUD line, prompt
+lines and UUID round-trip; the injected hook itself is not compiled by
+`cargo test`. No live identity service, PDS or Colibri AppView was contacted.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
