@@ -17,6 +17,10 @@ pub enum ApiError {
     PairingUnavailable,
     #[error("admin API is disabled; set ATMOSPHERIC_SERVER_TOKEN")]
     AdminDisabled,
+    #[error(
+        "browser linking is disabled; set ATMOSPHERIC_SERVER_PUBLIC_URL and ATMOSPHERIC_SERVER_LINK_TOKEN"
+    )]
+    BrowserDisabled,
     #[error("missing or invalid admin bearer token")]
     Unauthorized,
     #[error("internal server error")]
@@ -36,7 +40,7 @@ impl ApiError {
         match self {
             Self::Invalid(_) => StatusCode::BAD_REQUEST,
             Self::NotFound(_) | Self::PairingUnavailable => StatusCode::NOT_FOUND,
-            Self::AdminDisabled => StatusCode::SERVICE_UNAVAILABLE,
+            Self::AdminDisabled | Self::BrowserDisabled => StatusCode::SERVICE_UNAVAILABLE,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Internal | Self::Io(_) | Self::Json(_) | Self::Join(_) | Self::Corrupt(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR

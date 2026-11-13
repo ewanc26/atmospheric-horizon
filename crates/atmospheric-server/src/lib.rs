@@ -6,8 +6,10 @@
 //! player can claim a link without being handed the admin token.
 
 pub mod api;
+pub mod browser;
 pub mod error;
 pub mod model;
+pub mod oauth;
 pub mod store;
 
-pub use api::app;
+pub use api::{ServerConfig, app};

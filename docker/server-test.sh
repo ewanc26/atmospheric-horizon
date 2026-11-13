@@ -6,6 +6,8 @@ IMAGE="atmospheric-server:test-$$"
 CONTAINER="atmospheric-server-test-$$"
 VOLUME="atmospheric-server-test-$$"
 TOKEN="test-admin-$$-$(date +%s)"
+LINK_TOKEN="test-link-$$-$(date +%s)"
+PUBLIC_URL="https://links.test"
 TMP="$(mktemp -d)"
 BODY="$TMP/body"
 STATUS=""
@@ -30,6 +32,8 @@ start_container() {
     docker run -d \
         --name "$CONTAINER" \
         -e "ATMOSPHERIC_SERVER_TOKEN=$TOKEN" \
+        -e "ATMOSPHERIC_SERVER_LINK_TOKEN=$LINK_TOKEN" \
+        -e "ATMOSPHERIC_SERVER_PUBLIC_URL=$PUBLIC_URL" \
         -e ATMOSPHERIC_SERVER_ADDR=0.0.0.0:8787 \
         -v "$VOLUME:/data" \
         -p 127.0.0.1::8787 \
@@ -141,6 +145,24 @@ request POST /v1/pairings/claim "{\"code\":\"$CODE\",\"did\":\"not-a-did\"}"
 assert_status 400 "invalid DID claim"
 request POST /v1/pairings/claim "{\"code\":\"$CODE\",\"did\":\"$DID_3\"}"
 assert_status 200 "claim after validation failure"
+
+request POST /v1/browser/pairings "{\"player_uuid\":\"$UUID_1\",\"player_name\":\"Alex\"}"
+assert_status 401 "browser link without link token"
+request POST /v1/browser/pairings "{\"player_uuid\":\"$UUID_1\",\"player_name\":\"Alex\"}" "$LINK_TOKEN"
+assert_status 201 "browser link creation"
+BROWSER_URL="$(json_get url)"
+case "$BROWSER_URL" in
+    "$PUBLIC_URL/link/"*) ;;
+    *) echo "FAIL: browser URL $BROWSER_URL is not under $PUBLIC_URL/link/" >&2; exit 1 ;;
+esac
+BROWSER_PATH="/link/${BROWSER_URL##*/}"
+PAGE_STATUS="$(curl -sS -o "$BODY" -w '%{http_code}' "http://127.0.0.1:$PORT$BROWSER_PATH")"
+[ "$PAGE_STATUS" = "200" ] || { echo "FAIL: browser page HTTP $PAGE_STATUS" >&2; cat "$BODY" >&2; exit 1; }
+grep -q 'Alex' "$BODY"
+
+request GET /oauth-client-metadata.json
+assert_status 200 "OAuth client metadata"
+[ "$(json_get client_id)" = "$PUBLIC_URL/oauth-client-metadata.json" ]
 
 docker rm -f "$CONTAINER" >/dev/null
 start_container
