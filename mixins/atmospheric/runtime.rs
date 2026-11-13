@@ -86,6 +86,8 @@ pub enum GameCommand {
     PostChat { message: String, automatic: bool },
     /// Start the Colibri bridge as the server account (M26).
     ColibriStart,
+    /// Reconnect the Colibri event stream with a fresh token (M31).
+    ColibriReconnect,
     /// Stop the Colibri bridge (M26).
     ColibriStop,
     /// Report the Colibri bridge state (M26).
@@ -1017,6 +1019,11 @@ pub fn colibri_start() {
     send(GameCommand::ColibriStart);
 }
 
+/// Reconnect the Colibri event stream with a fresh service token (M31).
+pub fn colibri_reconnect() {
+    send(GameCommand::ColibriReconnect);
+}
+
 /// Disarm the Colibri bridge (M26).
 pub fn colibri_stop() {
     send(GameCommand::ColibriStop);
@@ -1773,6 +1780,7 @@ fn encode_command(command: &GameCommand) -> String {
             ]),
         )]),
         GameCommand::ColibriStart => jstr("ColibriStart"),
+        GameCommand::ColibriReconnect => jstr("ColibriReconnect"),
         GameCommand::ColibriStop => jstr("ColibriStop"),
         GameCommand::ColibriStatus => jstr("ColibriStatus"),
         GameCommand::ColibriSend { text, automatic } => jobj(vec![(
@@ -2290,6 +2298,7 @@ mod tests {
         post_text("hello from the game");
         post_chat("a chat line", true);
         colibri_start();
+        colibri_reconnect();
         colibri_status();
         colibri_stop();
         colibri_send("hello colibri");
@@ -2373,6 +2382,10 @@ mod tests {
         assert!(matches!(
             command_rx.recv_timeout(std::time::Duration::from_secs(5)),
             Ok(GameCommand::ColibriStart)
+        ));
+        assert!(matches!(
+            command_rx.recv_timeout(std::time::Duration::from_secs(5)),
+            Ok(GameCommand::ColibriReconnect)
         ));
         assert!(matches!(
             command_rx.recv_timeout(std::time::Duration::from_secs(5)),
@@ -3027,6 +3040,10 @@ mod tests {
         assert_eq!(
             encode_command(&GameCommand::ColibriStart),
             r#""ColibriStart""#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::ColibriReconnect),
+            r#""ColibriReconnect""#
         );
         assert_eq!(
             encode_command(&GameCommand::ColibriStop),

@@ -48,6 +48,12 @@ pub const SKINS_DIR: &str = "skins";
 /// How long the presence fallback waits for the game or a chat mod to emit a
 /// join/leave line (M29), matching atpcraft's 3-second wait.
 const COLIBRI_PRESENCE_WAIT: Duration = Duration::from_secs(3);
+
+/// atpcraft's player message limit: at most this many player-authored writes
+/// in a rolling window.
+const COLIBRI_SEND_LIMIT: usize = 20;
+/// The rolling window for [`COLIBRI_SEND_LIMIT`].
+const COLIBRI_SEND_WINDOW: Duration = Duration::from_secs(60);
 /// How far around the connection event the fallback looks for a handled line
 /// (M29), matching atpcraft's 5-second window.
 const COLIBRI_PRESENCE_WINDOW: Duration = Duration::from_secs(5);
@@ -299,6 +305,10 @@ struct Worker {
     /// Whether the local player's Colibri profile was checked for this bridge
     /// session (M30).
     colibri_profile_checked: bool,
+    /// Player-authored Colibri messages inside the rolling send window (M31).
+    colibri_send_times: VecDeque<Instant>,
+    /// The DID the current `colibri_send_times` window belongs to.
+    colibri_rate_did: Option<String>,
 }
 
 /// Whether a due connection-event fallback still needs a notice. Only the last
@@ -321,6 +331,23 @@ fn presence_notice_needed(
         })
     };
     !within(last_kind) && !within(last_blank)
+}
+
+/// Whether one more player-authored Colibri write fits in the rolling window.
+/// Expired timestamps are dropped first, so a send at exactly 60 seconds is
+/// allowed. This mirrors atpcraft's `ColibriRateLimiter`.
+fn colibri_send_allowed(hits: &mut VecDeque<Instant>, now: Instant) -> bool {
+    while hits
+        .front()
+        .is_some_and(|hit| now.duration_since(*hit) >= COLIBRI_SEND_WINDOW)
+    {
+        hits.pop_front();
+    }
+    if hits.len() >= COLIBRI_SEND_LIMIT {
+        return false;
+    }
+    hits.push_back(now);
+    true
 }
 
 impl Worker {
@@ -391,6 +418,8 @@ impl Worker {
             colibri_last_blank: None,
             colibri_started_at: None,
             colibri_profile_checked: false,
+            colibri_send_times: VecDeque::new(),
+            colibri_rate_did: None,
         }
     }
 
@@ -440,6 +469,7 @@ impl Worker {
             Command::ServerAccountStatus => self.emit_server_account_status(),
             Command::LogoutServerAccount => self.logout_server_account(),
             Command::ColibriStart => self.start_colibri().await,
+            Command::ColibriReconnect => self.reconnect_colibri().await,
             Command::ColibriStop => self.stop_colibri(true),
             Command::ColibriStatus => self.emit_colibri(None),
             Command::ColibriSend { text, automatic } => self.send_colibri(&text, automatic).await,
@@ -2034,13 +2064,63 @@ impl Worker {
         self.colibri_connected = false;
         self.colibri_sent.clear();
         self.colibri_started_at = Some(Instant::now());
+        self.spawn_colibri_stream(config.colibri_appview_url.clone(), token);
+        self.emit_colibri(None);
+        self.check_colibri_profile().await;
+    }
+
+    /// Replace the stream task while keeping the bridge state. Used by both
+    /// token rotation and the explicit reconnect command.
+    fn spawn_colibri_stream(&mut self, appview: String, token: String) {
+        if let Some(task) = self.colibri_task.take() {
+            task.abort();
+        }
         let tx = self.colibri_tx.clone();
-        let appview = config.colibri_appview_url.clone();
         self.colibri_task = Some(tokio::spawn(async move {
             colibri::run_stream(appview, token, tx).await;
         }));
+    }
+
+    /// Reconnect only the event stream (M31), mirroring atpcraft's
+    /// `/atpcraft colibri reconnect`: keep the channel, echo guard, presence
+    /// generation and profile-check state, re-mint the service token as the
+    /// server account, and open a new socket. Membership is not repaired and
+    /// the profile is not checked again.
+    async fn reconnect_colibri(&mut self) {
+        if self.colibri_channel.is_none() {
+            self.fail("the Colibri bridge is not running");
+            return;
+        }
+        if self.server_agent.is_none() || self.server_did.is_none() {
+            self.fail("the server account is not logged in");
+            return;
+        }
+        let config = match self.load_config() {
+            Ok(config) => config,
+            Err(error) => {
+                self.fail(format!("could not read the settings file: {error}"));
+                return;
+            }
+        };
+        self.ensure_server_oauth_fresh().await;
+        let aud = colibri::appview_service_ref(&config.colibri_appview_did);
+        let token = {
+            let Some(agent) = self.server_agent.as_ref() else {
+                self.fail("the server account is not logged in");
+                return;
+            };
+            colibri::service_auth(agent, &aud, colibri::SUBSCRIBE_EVENTS_LXM).await
+        };
+        let token = match token {
+            Ok(token) => token,
+            Err(error) => {
+                self.fail(format!("could not mint the Colibri stream token: {error}"));
+                return;
+            }
+        };
+        self.colibri_connected = false;
+        self.spawn_colibri_stream(config.colibri_appview_url.clone(), token);
         self.emit_colibri(None);
-        self.check_colibri_profile().await;
     }
 
     /// Check the local player's Colibri actor profile once per bridge session
@@ -2150,6 +2230,12 @@ impl Worker {
             }
             return;
         }
+        if !self.allow_colibri_send() {
+            if !automatic {
+                self.fail("Colibri send rate limit reached (20 messages per minute)");
+            }
+            return;
+        }
         self.ensure_oauth_fresh().await;
         let rkey = self.tid.next_tid();
         let record = colibri::message_record(text, &channel.channel_uri, &colibri::now());
@@ -2176,6 +2262,17 @@ impl Worker {
             Err(error) if !automatic => self.fail(error.to_string()),
             Err(_) => {}
         }
+    }
+
+    /// Count one player-authored send, resetting the window when the account
+    /// changes. Server notices and stream messages do not pass through here.
+    fn allow_colibri_send(&mut self) -> bool {
+        let did = self.did.clone().unwrap_or_default();
+        if self.colibri_rate_did.as_deref() != Some(did.as_str()) {
+            self.colibri_rate_did = Some(did);
+            self.colibri_send_times.clear();
+        }
+        colibri_send_allowed(&mut self.colibri_send_times, Instant::now())
     }
 
     /// Record a join/leave (or blank/hidden) line for the M29 fallback. This
@@ -2625,6 +2722,19 @@ mod tests {
                             "400 Bad Request",
                             r#"{"error":"ExpiredToken","message":"refresh token expired"}"#
                                 .to_string(),
+                        )
+                    }
+                }
+                "/xrpc/com.atproto.server.getServiceAuth" => {
+                    if authorized {
+                        (
+                            "200 OK",
+                            r#"{"token":"stub-service-token"}"#.to_string(),
+                        )
+                    } else {
+                        (
+                            "401 Unauthorized",
+                            r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
                         )
                     }
                 }
@@ -3308,6 +3418,161 @@ mod tests {
             event_rx.try_recv().is_err(),
             "an existing profile emits no prompt"
         );
+    }
+
+    #[test]
+    fn colibri_send_limit_allows_the_sixty_second_boundary() {
+        let start = Instant::now();
+        let mut hits = VecDeque::new();
+        for offset in 0..COLIBRI_SEND_LIMIT {
+            assert!(colibri_send_allowed(
+                &mut hits,
+                start + Duration::from_millis(offset as u64)
+            ));
+        }
+        assert!(!colibri_send_allowed(
+            &mut hits,
+            start + Duration::from_secs(59)
+        ));
+        assert!(
+            colibri_send_allowed(&mut hits, start + Duration::from_secs(60)),
+            "the oldest hit expires at the 60-second boundary"
+        );
+        assert!(!colibri_send_allowed(
+            &mut hits,
+            start + Duration::from_secs(60)
+        ));
+    }
+
+    #[test]
+    fn colibri_explicit_send_reports_the_rate_limit() {
+        let dir = temp_dir("colibri-rate-limit");
+        let (events, event_rx) = std::sync::mpsc::channel();
+        let (oauth_tx, _oauth_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (colibri_tx, _colibri_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut worker = Worker::new(WorkerOptions::new(dir), events, oauth_tx, colibri_tx);
+        worker.did = Some("did:plc:stubuser".into());
+        worker.colibri_rate_did = worker.did.clone();
+        worker.colibri_channel = Some(
+            ChannelRef::parse("at://did:plc:community/social.colibri.channel/3jchannel").unwrap(),
+        );
+        for _ in 0..COLIBRI_SEND_LIMIT {
+            worker.colibri_send_times.push_back(Instant::now());
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(worker.send_colibri("blocked", false));
+        match event_rx.try_recv() {
+            Ok(Event::Failed { message }) => assert!(message.contains("rate limit"), "{message}"),
+            other => panic!("expected the rate-limit failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn colibri_reconnect_without_a_bridge_fails_cleanly() {
+        let dir = temp_dir("colibri-reconnect-off");
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::ColibriReconnect).unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => assert!(message.contains("not running")),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    // The tungstenite handshake callback owns its fixed Response error type;
+    // boxing it is not possible without changing the server API.
+    #[allow(clippy::result_large_err)]
+    #[test]
+    fn colibri_reconnect_remints_without_repairing_membership() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::http::{HeaderValue, header::SEC_WEBSOCKET_PROTOCOL};
+
+        let pds = StubPds::start(false);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let listener = runtime
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let appview = runtime.spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_hdr_async(
+                socket,
+                |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    assert_eq!(
+                        request
+                            .headers()
+                            .get(SEC_WEBSOCKET_PROTOCOL)
+                            .and_then(|value| value.to_str().ok()),
+                        Some("colibri.auth.bearer, stub-service-token")
+                    );
+                    response.headers_mut().insert(
+                        SEC_WEBSOCKET_PROTOCOL,
+                        HeaderValue::from_static("colibri.auth.bearer"),
+                    );
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            let _ = socket.next().await;
+        });
+
+        let dir = temp_dir("colibri-reconnect");
+        let mut config = test_config(pds.url.clone());
+        config.colibri_appview_url = format!("http://{addr}");
+        write_config(&dir, &config);
+        let (agent, _) = runtime
+            .block_on(session::login(&config, oauth::new_shared_dpop()))
+            .unwrap();
+        let (events, event_rx) = std::sync::mpsc::channel();
+        let (oauth_tx, _oauth_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (colibri_tx, mut colibri_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut worker = Worker::new(WorkerOptions::new(dir), events, oauth_tx, colibri_tx);
+        worker.server_agent = Some(agent);
+        worker.server_did = Some("did:plc:stubuser".into());
+        worker.colibri_channel = Some(
+            ChannelRef::parse("at://did:plc:community/social.colibri.channel/3jchannel").unwrap(),
+        );
+        worker.colibri_profile_checked = true;
+
+        runtime.block_on(async {
+            worker.reconnect_colibri().await;
+            let connected = tokio::time::timeout(Duration::from_secs(5), colibri_rx.recv())
+                .await
+                .expect("the reconnected stream connects")
+                .expect("a connection event");
+            assert_eq!(connected, StreamEvent::Connected);
+        });
+        match event_rx.try_recv() {
+            Ok(Event::Colibri {
+                active: true,
+                connected: false,
+                channel,
+                error: None,
+            }) => assert_eq!(
+                channel,
+                "at://did:plc:community/social.colibri.channel/3jchannel"
+            ),
+            other => panic!("expected the reconnected bridge status, got {other:?}"),
+        }
+        let requests = pds.requests();
+        assert!(
+            requests.iter().any(|request| request
+                .path
+                .starts_with("/xrpc/com.atproto.server.getServiceAuth")),
+            "reconnect mints a fresh service-auth token"
+        );
+        assert!(
+            !requests.iter().any(|request| {
+                request.body.contains(colibri::MEMBERSHIP_COLLECTION)
+                    || request.path.contains(colibri::MEMBERSHIP_COLLECTION)
+            }),
+            "reconnect does not repair membership"
+        );
+        worker.colibri_task.take().unwrap().abort();
+        appview.abort();
     }
 
     #[test]
