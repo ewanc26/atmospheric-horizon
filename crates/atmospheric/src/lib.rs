@@ -91,6 +91,12 @@ pub enum Command {
     /// unauthenticated `com.atproto.repo.listRecords` against the subject's
     /// PDS.
     FetchPlayer { subject: String },
+    /// Read a player's latest `at.atpcraft.player.skin` record from their own
+    /// PDS, verify its endorsement, and — only when it verifies — download
+    /// the skin/cape blobs into the mod's storage folder (M14, the atpcraft
+    /// skin-sync read side). The subject is a DID or a handle; the reads are
+    /// unauthenticated, so this works logged out.
+    FetchPlayerSkin { subject: String },
     /// Post the player's death message to Bluesky (only when
     /// `post_death_messages` is enabled).
     PostDeathMessage { text: String },
@@ -136,5 +142,15 @@ pub enum Event {
         via: String,
         // Boxed: PlayerDigest is the enum's largest variant.
         snapshot: Box<Option<presence::PlayerDigest>>,
+    },
+    /// The latest skin record of a player (M14, skin-sync read side): the DID
+    /// (`subject`), the PDS it was read from (`via`), and the digest with its
+    /// endorsement verdict and any downloaded blobs (`None` when the repo has
+    /// no skin records).
+    PlayerSkin {
+        subject: String,
+        via: String,
+        // Boxed: SkinDigest is one of the event enum's largest variants.
+        skin: Box<Option<skins::SkinDigest>>,
     },
 }
