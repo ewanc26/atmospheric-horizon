@@ -93,9 +93,15 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   writes create, replace and delete them; one-time pairing codes let players
   claim a link without the admin credential. Links and pending codes persist
   atomically in `links.json`, and the image has a Docker end-to-end test for
-  authentication, validation, pairing, deletion and restart persistence. The
-  game client does not consume the API yet; join enforcement, label issuance,
-  RPG discovery and aspect capture remain unimplemented.
+  authentication, validation, pairing, deletion and restart persistence. M36
+  adds the in-game claim; join enforcement, label issuance, RPG discovery and
+  aspect capture remain unimplemented.
+- **M36 — in-game identity link claim (#87).** `/atmospheric link <code>`
+  claims an operator-issued M35 pairing code as the logged-in player. The
+  worker posts only the code, DID and optional handle to the configured
+  `server_api_url`, rejects a response for a different DID, and reports the
+  linked player name and UUID in the HUD. No request is made unless the command
+  is used; no admin token, session token or game state is sent.
 
 ### Changed
 

@@ -19,9 +19,9 @@ This is the successor to [jollywhoppers-socialsync](https://github.com/ewanc26/j
 
 Shipped in v0.2.0: OAuth and app-password login, text and screenshot posts, notifications, atpcraft-compatible chat, signed snapshots and skins, a server profile, read sides for lists, labels, presence, skins, chat history and server profiles, social-graph reads, and reply/like/repost.
 
-On `main` for the next release: social-graph writes — follow/unfollow, block/unblock and mute/unmute (`M23`) — Bluesky profile reads with atpcraft's pronoun precedence (`M24`), a separate, persisted server account with its own OAuth session and server-profile publishing (`M25`), the Colibri chat-bridge core (`M26`), its membership/rotation repair (`M27`), server event notices (`M28`), the presence fallback/pending-approval notice (`M29`), the local Colibri profile prompt (`M30`), Colibri reconnect/send throttling (`M31`), local player Colibri membership (`M32`), Colibri incoming chat hygiene (`M33`), Colibri status detail (`M34`) and the optional server-side identity service (`M35`).
+On `main` for the next release: social-graph writes — follow/unfollow, block/unblock and mute/unmute (`M23`) — Bluesky profile reads with atpcraft's pronoun precedence (`M24`), a separate, persisted server account with its own OAuth session and server-profile publishing (`M25`), the Colibri chat-bridge core (`M26`), its membership/rotation repair (`M27`), server event notices (`M28`), the presence fallback/pending-approval notice (`M29`), the local Colibri profile prompt (`M30`), Colibri reconnect/send throttling (`M31`), local player Colibri membership (`M32`), Colibri incoming chat hygiene (`M33`), Colibri status detail (`M34`), the optional server-side identity service (`M35`) and the in-game link claim (`M36`).
 
-Not yet: launcher registry distribution, which waits on third-party native-mod support upstream ([#28](https://github.com/ewanc26/atmospheric-horizon/issues/28)); label issuance, join-gate enforcement, server-wide Colibri profile prompts (M30 covers the local player), RPG item discovery and full player-data aspect capture/restore. M25 supplies the server account, M26/M27 run the Colibri bridge, and M35 supplies the shared UUID-to-DID map; enforcement, issuance and capture remain separate server-side milestones.
+Not yet: launcher registry distribution, which waits on third-party native-mod support upstream ([#28](https://github.com/ewanc26/atmospheric-horizon/issues/28)); label issuance, join-gate enforcement, server-wide Colibri profile prompts (M30 covers the local player), RPG item discovery and full player-data aspect capture/restore. M25 supplies the server account, M26/M27 run the Colibri bridge, M35 supplies the shared UUID-to-DID map, and M36 lets a player claim a link in game; enforcement, issuance, capture, server-wide profile checks and RPG discovery remain separate milestones.
 
 ## Features
 
@@ -33,10 +33,10 @@ Not yet: launcher registry distribution, which waits on third-party native-mod s
 - **Shape your social graph.** Follow, unfollow, block, unblock, mute or unmute an account from its DID or handle.
 - **Sign in properly.** OAuth in the system browser (PAR + PKCE + DPoP, loopback redirect), with app passwords as the fallback.
 - **Run a server account.** `/atmospheric server-account login <handle>` gives the server its own persisted OAuth identity, separate from the player, and can publish the server descriptor from that account.
-- **Link players across the server.** The optional `atmospheric-server` process maps canonical Minecraft UUIDs to ATProto DIDs, with public reads, admin-token writes and short-lived one-time pairing codes. Links survive restarts in a local JSON document; the service makes no outbound requests.
+- **Link players across the server.** The optional `atmospheric-server` process maps canonical Minecraft UUIDs to ATProto DIDs, with public reads, admin-token writes and short-lived one-time pairing codes. A player claims a server-issued code with `/atmospheric link <code>` after `server_api_url` is configured. Links survive restarts in a local JSON document; the service makes no outbound requests.
 - **Bridge a Colibri channel.** With `colibri_bridge_enabled`, the server account declares its community membership, opens the Colibri event stream and rotates its token before expiry; channel messages appear in game chat, game chat is published into the channel as your player account, and join/leave/death/advancement lines go out as the server account. Hidden or rewritten join/leave lines fall back to the connection event, and a new membership that needs moderator approval gets a HUD notice. The stream can be reconnected without dropping the bridge, and player messages are capped at 20 per rolling minute. The local player's own community membership is repaired when the bridge starts or they log in, and a new gated join gets atpcraft's pending-approval line.
 - **Never block the game.** All network and disk I/O lives on one worker thread; the game thread only exchanges JSON lines with it.
-- **No surprises.** Writes go to your own PDS, public reads go to the configured AppView or the subject's PDS, and nothing is sent anywhere else.
+- **No surprises.** Writes go to your own PDS and public reads go to the configured AppView or the subject's PDS. The only other request is an identity link claim to the server URL you configure.
 
 ## Requirements
 
@@ -99,6 +99,7 @@ All commands are under `/atmospheric`:
 | `server` | Publish or refresh the server profile from the player account |
 | `server-account login <handle>\|status\|logout\|publish` | Manage the separate server account and publish the server profile from it |
 | `colibri start\|stop\|reconnect\|status\|send <text>` | Start, stop, reconnect, inspect or write to the Colibri chat bridge |
+| `link <code>` | Claim a server identity pairing code as the logged-in player |
 | `server-of <did\|handle>` | Read and verify a server profile |
 | `profile <did\|handle>` | Read a Bluesky profile and its pronouns |
 | `list <at-uri\|bsky.app URL>` | List the members of a Bluesky list |
@@ -124,6 +125,7 @@ All commands are under `/atmospheric`:
 | --- | --- | --- |
 | `pds_url` | `https://bsky.social` | PDS to read from and write to |
 | `appview_url` | `https://public.api.bsky.app` | AppView for public reads |
+| `server_api_url` | empty | Base URL of the optional M35 identity service for `/atmospheric link` |
 | `identifier` | empty | Handle, email or DID for app-password login |
 | `app_password` | empty | App password — never an account password |
 | `poll_interval_secs` | `60` | Seconds between notification polls |
@@ -149,7 +151,7 @@ The app password is the only secret in `config.json`; OAuth sessions never store
 
 ## Server-side identity service
 
-The optional `atmospheric-server` process supplies the shared Minecraft UUID → ATProto DID map that a client cannot build on its own. It is a separate HTTP service, not part of the game process, and makes no outbound requests.
+The optional `atmospheric-server` process supplies the shared Minecraft UUID → ATProto DID map that a client cannot build on its own. It is a separate HTTP service, not part of the game process, and makes no outbound requests. Set `server_api_url` to its base URL and a player can claim an operator-issued code with `/atmospheric link <code>`.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -190,13 +192,13 @@ curl -X POST http://127.0.0.1:8787/v1/pairings/claim \
   -d '{"code":"ABCD-EFGH","did":"did:plc:...","handle":"alex.example"}'
 ```
 
-Codes are one-time, default to ten minutes and accept 60–3600 seconds. Reissuing a code for the same UUID invalidates the previous one. Links and pending codes are written through an owner-only temporary file and an atomic rename on Unix (the Docker target) to `links.json`; a failed write leaves the old state in memory and on disk. Run the service in Docker with `docker compose -f docker/compose.yaml up --build` after setting `ATMOSPHERIC_SERVER_TOKEN`, or run the end-to-end test with `bash docker/server-test.sh`.
+In game, run `/atmospheric link ABCD-EFGH` after setting `server_api_url` to the service base. Codes are one-time, default to ten minutes and accept 60–3600 seconds. Reissuing a code for the same UUID invalidates the previous one. Links and pending codes are written through an owner-only temporary file and an atomic rename on Unix (the Docker target) to `links.json`; a failed write leaves the old state in memory and on disk. Run the service in Docker with `docker compose -f docker/compose.yaml up --build` after setting `ATMOSPHERIC_SERVER_TOKEN`, or run the end-to-end test with `bash docker/server-test.sh`.
 
-M35 is the mapping foundation only. Join-gate enforcement, labeler issuance, RPG inventory scanning and aspect capture/restore are not implemented, and the game client does not consume this API yet.
+M35 supplies the mapping and M36 lets a player claim a link in game. Join-gate enforcement, labeler issuance, RPG inventory scanning, aspect capture/restore and server-wide Colibri profile checks are not implemented; the client does not use the map for other players yet.
 
 ## Roadmap
 
-M1–M21 are shipped, through v0.1.0 and v0.2.0, and M23 (social-graph writes), M24 (profile reads), M25 (server account), M26 (Colibri bridge core), M27 (Colibri membership/rotation), M28 (server event notices), M29 (presence fallback/pending-approval notice), M30 (local Colibri profile prompt), M31 (Colibri reconnect/send throttle), M32 (local Colibri player membership), M33 (Colibri chat hygiene), M34 (Colibri status detail) and M35 (server-side identity service) are on `main` for the next release; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, enforcement/issuance/capture on top of the server-side map, and the next read/write surfaces.
+M1–M21 are shipped, through v0.1.0 and v0.2.0, and M23 (social-graph writes), M24 (profile reads), M25 (server account), M26 (Colibri bridge core), M27 (Colibri membership/rotation), M28 (server event notices), M29 (presence fallback/pending-approval notice), M30 (local Colibri profile prompt), M31 (Colibri reconnect/send throttle), M32 (local Colibri player membership), M33 (Colibri chat hygiene), M34 (Colibri status detail), M35 (server-side identity service) and M36 (in-game link claim) are on `main` for the next release; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, enforcement/issuance/capture on top of the server-side map, and the next read/write surfaces.
 
 ### Porting atpcraft
 
@@ -217,13 +219,13 @@ atpcraft is a server-side Fabric mod, while Horizon native mods can hook the ser
 | RPG item discovery (`equipment.rpg.*`) | not implemented yet: discovery scans the server-side inventory and writes provider attestations from the server account, which **M25** now supplies |
 | Full player-data aspect sync | **M13** reads and verifies snapshots, including their aspect list, but does not capture or restore inventory/advancements/stats. Capture and restore are server-side and remain to be implemented; the aspect payloads are opaque NBT/JSON blobs |
 | Server account | **M25**: `/atmospheric server-account login <handle>` runs a separate localhost OAuth flow and keeps the result in `server-session.json`; `status`, `logout` and `publish` manage it. The server profile can then be published as that account (`/atmospheric server-account publish`), as atpcraft's server does. It is the identity foundation for the remaining server-side work |
-| Server-wide player identity map | **M35**: optional `atmospheric-server` process with public UUID reads, admin-token writes, one-time pairing claims and atomic persistence. It is the shared mapping the server-wide profile, gate and player-data surfaces need; those consumers are not implemented yet |
+| Server-wide player identity map | **M35/M36**: optional `atmospheric-server` process with public UUID reads, admin-token writes, one-time pairing claims and atomic persistence. `/atmospheric link <code>` claims a code as the logged-in player; the shared mapping is ready, but server-wide profile, gate and player-data consumers are not implemented yet |
 | Labeler issuance | **M12** covers reads only; issuance still needs the labeler service record, signed labels, an HTTP endpoint and a PLC identity update, so it is not implemented yet |
 | Web server for login pages / lexicons | not implemented yet; OAuth sign-in remains the alternative for players |
 
 ## Network use
 
-This mod talks to the network **by design**: the AT Protocol services needed to reach and authenticate with your account's PDS, plus the public AppView and labelers — nothing else. All network I/O happens in the spawned local `atmospheric-worker` process, never in the game; the game and the worker exchange plain JSON commands and events over a local pipe only.
+This mod talks to the network **by design**: the AT Protocol services needed to reach and authenticate with your account's PDS, plus the public AppView, labelers, and the optional identity service you configure for link claims — nothing else. All network I/O happens in the spawned local `atmospheric-worker` process, never in the game; the game and the worker exchange plain JSON commands and events over a local pipe only.
 
 ### Identity and login
 
@@ -272,7 +274,7 @@ All of these are unauthenticated, and the query carries only the subject's DID o
 
 Everything lives in the worker's own data folder — never in a world save. In sidecar mode that is `<game exe dir>/atmospheric-data/`; under Horizon's native storage API it is `horizon-mods/.horizon-mod-data/atmospheric/`.
 
-- `config.json` holds the settings above, including the PDS URL, identifier, app password, poll interval, post flags, chat server id, skin/cape paths and model, server-profile fields, game version, AppView URL and trusted endorsement keys.
+- `config.json` holds the settings above, including the PDS URL, identifier, app password, poll interval, post flags, chat server id, skin/cape paths and model, server-profile fields, game version, AppView URL, identity-service URL and trusted endorsement keys.
 - `signing-key.json` holds the Ed25519 seed for snapshot and skin endorsements, generated once.
 - `session.json` holds the player's refresh token used to resume across restarts. For OAuth sessions it also holds the DPoP private key (JWK) and token endpoint; app passwords are never stored in it. Delete it or use `/atmospheric logout` to revoke a session.
 - `server-session.json` holds the same OAuth material for the separate server account (M25), written owner-only. It is independent of the player session and is deleted by `/atmospheric server-account logout`.
@@ -281,9 +283,9 @@ Everything lives in the worker's own data folder — never in a world save. In s
 
 The files that hold secrets are written with owner-only permissions (0600 on unix; the OS file ACLs apply on Windows and macOS). The image you post is read from the game's `screenshots/` folder only when you press the post-screenshot keybind; otherwise the latest path stays in memory. Skin/cape PNGs are read from the path you pass (or `skin_path`/`cape_path`) only at that moment; nothing else is read. The login session is held in memory for the running game; the refresh token is persisted so restarts resume automatically unless `persist_session` is off.
 
-### Server-side identity service (M35)
+### Server-side identity service (M35/M36)
 
-The optional `atmospheric-server` process listens only on `ATMOSPHERIC_SERVER_ADDR` and makes no outbound requests. `GET /healthz` and `GET /v1/links/{uuid}` are public; listing, direct link writes, deletion and pairing creation require `Authorization: Bearer $ATMOSPHERIC_SERVER_TOKEN`. Claiming a pairing code is public because the one-time code is the credential. The service stores `links.json` in its own data folder: canonical player UUIDs, player names, DIDs, optional handles, first-link timestamps and pending codes with their expiry. It has no telemetry. The game client does not call this API yet; M35 adds the service and its Docker test only.
+The optional `atmospheric-server` process listens only on `ATMOSPHERIC_SERVER_ADDR` and makes no outbound requests. `GET /healthz` and `GET /v1/links/{uuid}` are public; listing, direct link writes, deletion and pairing creation require `Authorization: Bearer $ATMOSPHERIC_SERVER_TOKEN`. Claiming a pairing code is public because the one-time code is the credential. The service stores `links.json` in its own data folder: canonical player UUIDs, player names, DIDs, optional handles, first-link timestamps and pending codes with their expiry. It has no telemetry. M36's `/atmospheric link <code>` posts the code, the player's DID and optional handle to `<server_api_url>/v1/pairings/claim`; it does not send a session token or game data. The client does not use the service for anything else yet.
 
 ### Nothing else
 
@@ -292,7 +294,7 @@ No telemetry, no analytics, no other endpoints. The optional identity service ab
 ## Layout
 
 - `mixins/atmospheric/` — horizon-mixins declarations: the injected std-only `runtime.rs` (which also spawns and bridges the sidecar), its placeholder hook, and `horizon-mixin.toml`.
-- `crates/atmospheric/` — the protocol library: `config`, `session`, `oauth` (M8), `actions`, `notifications`, `lists` (M11/M15), `labels` (M12), `presence` (M13), `profiles` (M24), `skins` (M14), `chats` (M16), `servers` (M19), `graph` (M20 reads/M23 writes), `interactions` (M21), `records` (atpcraft lexicon types), `tid`, `signing` (Ed25519 endorsements) and `worker`, plus the `atmospheric-worker` bin and its end-to-end test (`tests/sidecar.rs`).
+- `crates/atmospheric/` — the protocol library: `config`, `session`, `oauth` (M8), `actions`, `notifications`, `lists` (M11/M15), `labels` (M12), `presence` (M13), `profiles` (M24), `skins` (M14), `chats` (M16), `servers` (M19), `graph` (M20 reads/M23 writes), `identity` (M36), `interactions` (M21), `records` (atpcraft lexicon types), `tid`, `signing` (Ed25519 endorsements) and `worker`, plus the `atmospheric-worker` bin and its end-to-end test (`tests/sidecar.rs`).
 - `crates/atmospheric-server/` — the optional HTTP identity service: link model and validation, atomically persisted store, admin-auth router and integration tests.
 - `docker/` — the server image, compose file and end-to-end Docker test.
 - `oauth-client-metadata.json` — the OAuth client metadata document to host when an authorization server does not support the loopback client ([#21](https://github.com/ewanc26/atmospheric-horizon/issues/21)).

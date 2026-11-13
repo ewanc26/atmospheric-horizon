@@ -76,6 +76,9 @@ pub struct Config {
     /// The AppView used for public list reads (M11): `app.bsky.graph.getList`
     /// against this base, unauthenticated. atpcraft uses the public AppView.
     pub appview_url: String,
+    /// Base URL of the optional M35 identity service (M36). Empty disables
+    /// `/atmospheric link`; no request is made unless that command is used.
+    pub server_api_url: String,
     /// Trusted atpcraft server endorsement keys (M13 presence reads): when
     /// reading a player's `at.atpcraft.player.snapshot` record, endorsements
     /// from these key ids are accepted alongside the mod's own signing key.
@@ -121,6 +124,7 @@ impl Default for Config {
             server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
             game_version: "26.3".into(),
             appview_url: crate::lists::DEFAULT_APPVIEW.into(),
+            server_api_url: String::new(),
             trusted_server_keys: Vec::new(),
             colibri_bridge_enabled: false,
             colibri_channel_uri: String::new(),
@@ -186,6 +190,7 @@ mod tests {
             server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
             game_version: "26.3".into(),
             appview_url: crate::lists::DEFAULT_APPVIEW.into(),
+            server_api_url: "https://identity.example".into(),
             trusted_server_keys: vec![TrustedServerKey {
                 key_id: String::new(),
                 public_key: "MCowBQYDK2VwAyEA...".into(),
@@ -209,6 +214,7 @@ mod tests {
         assert!(back.colibri_bridge_enabled);
         assert_eq!(back.colibri_channel_uri, config.colibri_channel_uri);
         assert_eq!(back.colibri_appview_url, "https://appview.example");
+        assert_eq!(back.server_api_url, "https://identity.example");
         assert!(!back.colibri_server_events_enabled);
         assert!(!back.colibri_server_events_fallback_enabled);
     }
@@ -233,6 +239,7 @@ mod tests {
         assert!(!config.colibri_bridge_enabled);
         assert!(config.colibri_channel_uri.is_empty());
         assert_eq!(config.colibri_appview_url, "https://api.colibri.social");
+        assert!(config.server_api_url.is_empty());
         assert!(config.colibri_server_events_fallback_enabled);
     }
 

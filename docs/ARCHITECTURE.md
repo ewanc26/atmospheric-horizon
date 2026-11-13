@@ -66,6 +66,8 @@ Everything else, with zero Horizon imports so it builds and tests with plain
   `getFollowers`/`getBlocks`/`getMutes` pagination on the public AppView,
   reduced to DID/handle/display name) and M23 writes (`follow`/`block`
   records, their removal, and the expected record shapes)
+- `identity` — M36 claim client for the optional M35 service: URL construction,
+  request/response shapes, DID ownership check and service-error propagation
 - `interactions` — M21 replies, likes and reposts (unauthenticated
   `com.atproto.repo.getRecord` for the target's strong ref and thread root,
   then `app.bsky.feed.post`/`like`/`repost` records in your own repo)
@@ -521,8 +523,9 @@ a blob reference, so only the AppView's avatar URL is carried in the digest.
 atpcraft's remaining server-side surfaces (RPG item discovery, full aspect
 capture/restore and labeler issuance) are not implemented yet; the README port
 table records each one. M25 supplies the separate server account, M26/M27 run
-the operational Colibri bridge, and M35 supplies the shared player-to-DID map;
-enforcement, issuance and capture remain separate milestones.
+the operational Colibri bridge, M35 supplies the shared player-to-DID map and
+M36 claims links from the game; enforcement, issuance and capture remain
+separate milestones.
 
 Verified: `profiles` unit tests (whitespace normalisation, direct-record
 precedence, clearing on a successful record without pronouns, AppView
@@ -868,10 +871,10 @@ write therefore leaves both copies unchanged. UUIDs, DIDs, handles, player names
 validated before they reach the store. The service is designed for one process
 per data directory, not for multiple replicas sharing a volume.
 
-No player-to-DID resolution is wired into the game worker yet. M35 is the
-foundation for server-wide Colibri profile checks, join-gate enforcement,
-labeler issuance and RPG/player-data work; those consumers remain separate and
-must not be described as delivered.
+M36 wires one consumer: the explicit `/atmospheric link <code>` claim. The
+service is still the foundation for server-wide Colibri profile checks,
+join-gate enforcement, labeler issuance and RPG/player-data work; those
+consumers remain separate and must not be described as delivered.
 
 Verified: `model` unit tests cover UUID, name, DID, handle, code and TTL
 validation; store tests cover reopen persistence, `linked_at` preservation,
@@ -881,6 +884,32 @@ survives a store reopen. `docker/server-test.sh` builds the image, runs the
 container against a named volume, exercises the API including an invalid DID,
 restarts the container and checks links still resolve. No network service
 outside the container is contacted.
+
+### M36: claiming a server identity link in game
+
+M35 left the service without a client path. M36 adds `server_api_url` to
+`config.json` (empty by default) and `/atmospheric link <code>`. The command
+sends `Command::ClaimServerLink`; the worker requires a logged-in player, loads
+the settings, and calls `identity::claim`. The request is a JSON
+`POST <server_api_url>/v1/pairings/claim` with `{code, did, handle?}`, using the
+stored player handle when one exists. It carries no admin token, access token,
+app password or game state.
+
+A successful claim returns the UUID, player name, DID and handle the service
+bound. The worker rejects a response naming a different DID or missing required
+fields, then emits a plain `Event::Status` line with the player name, UUID and
+DID. A service error is parsed from `{"error": "..."}` and shown through
+`Event::Failed`; an empty `server_api_url`, a missing login and an unreadable
+settings file fail before any request. The runtime encodes the new command and
+adds it to the usage text. No new server route was needed: the M35 endpoint is
+the contract.
+
+Verified: four `identity` tests cover the exact path/body, optional-handle
+omission, service-error propagation, DID mismatch rejection and non-HTTP base
+URLs; a worker test logs in against the stub PDS, claims a code against the
+same stub's identity route, and asserts the DID, handle and status line; the
+sidecar test covers a claim while logged out; the runtime test pins the command
+wire shape.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 

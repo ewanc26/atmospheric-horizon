@@ -21,7 +21,7 @@ atrium-xrpc = "0.12"
 # TLS: the xrpc client's `reqwest` feature brings reqwest with no TLS backend
 # at all, so rustls is enabled here by feature unification. WebPKI roots keep
 # the build free of system TLS libraries on every platform.
-reqwest = { version = "0.12", default-features = false, features = ["gzip", "rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["gzip", "json", "rustls-tls-webpki-roots"] }
 
 # Async runtime: only the worker thread ever builds one.
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
