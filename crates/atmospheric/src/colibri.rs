@@ -7,6 +7,7 @@
 use crate::{
     actions,
     error::{AtmosphericError, Result},
+    oauth,
     session::Agent,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -288,6 +289,43 @@ pub async fn ensure_membership(
     Ok(true)
 }
 
+/// Read `requiresApprovalToJoin` from the community record (M29). The record
+/// is public, so the read needs no authorization. `None` means the read or
+/// parse failed, matching atpcraft's nullable result.
+pub async fn requires_approval(
+    http: &reqwest::Client,
+    resolver: &oauth::Resolver,
+    community_did: &str,
+) -> Option<bool> {
+    let did_doc = oauth::resolve_did_document(http, resolver, community_did)
+        .await
+        .ok()?;
+    let pds = oauth::pds_endpoint(&did_doc).ok()?;
+    let response = http
+        .get(format!(
+            "{}/xrpc/com.atproto.repo.getRecord",
+            pds.trim_end_matches('/')
+        ))
+        .query(&[
+            ("repo", community_did),
+            ("collection", COMMUNITY_COLLECTION),
+            ("rkey", COMMUNITY_SELF),
+        ])
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: Value = serde_json::from_str(&response.text().await.ok()?).ok()?;
+    community_requires_approval(&body)
+}
+
+/// The pure part of [`requires_approval`], exposed for tests.
+pub fn community_requires_approval(body: &Value) -> Option<bool> {
+    body.get("value")?.get("requiresApprovalToJoin")?.as_bool()
+}
+
 /// Mint the inter-service token the AppView accepts for the event stream.
 pub async fn service_auth(agent: &Agent, aud: &str, lxm: &str) -> Result<String> {
     use atrium_api::com::atproto::server::get_service_auth;
@@ -347,6 +385,13 @@ pub enum StreamEvent {
     Disconnected(String),
     Rotate,
     Message(IncomingMessage),
+    /// A presence fallback timer expired (M29). The worker checks whether a
+    /// join/leave line arrived before writing `text`.
+    FallbackDue {
+        kind: String,
+        text: String,
+        at: std::time::Instant,
+    },
 }
 
 /// Decode one text frame. Unknown and malformed frames are ignored.
@@ -536,6 +581,20 @@ mod tests {
             "wss://api.colibri.social/xrpc/social.colibri.sync.subscribeEvents"
         );
         assert_eq!(subprotocol_header("tok"), "colibri.auth.bearer, tok");
+    }
+
+    #[test]
+    fn community_approval_flag_is_read_from_the_record_value() {
+        assert_eq!(
+            community_requires_approval(&json!({"value": {"requiresApprovalToJoin": true}})),
+            Some(true)
+        );
+        assert_eq!(
+            community_requires_approval(&json!({"value": {"requiresApprovalToJoin": false}})),
+            Some(false)
+        );
+        assert_eq!(community_requires_approval(&json!({"value": {}})), None);
+        assert_eq!(community_requires_approval(&json!({})), None);
     }
 
     #[test]

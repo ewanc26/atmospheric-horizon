@@ -93,6 +93,9 @@ pub struct Config {
     /// Relay server join/leave/death/advancement broadcasts into the bridged
     /// channel as the server account (M28). Default on, matching atpcraft.
     pub colibri_server_events_enabled: bool,
+    /// When a chat mod rewrites or hides the vanilla join/leave line, use the
+    /// connection event as a fallback after a short wait (M29). Default on.
+    pub colibri_server_events_fallback_enabled: bool,
 }
 
 impl Default for Config {
@@ -124,6 +127,7 @@ impl Default for Config {
             colibri_appview_url: "https://api.colibri.social".into(),
             colibri_appview_did: "did:web:api.colibri.social".into(),
             colibri_server_events_enabled: true,
+            colibri_server_events_fallback_enabled: true,
         }
     }
 }
@@ -191,6 +195,7 @@ mod tests {
             colibri_appview_url: "https://appview.example".into(),
             colibri_appview_did: "did:web:appview.example".into(),
             colibri_server_events_enabled: false,
+            colibri_server_events_fallback_enabled: false,
         };
         let raw = config.to_json().unwrap();
         let back = Config::from_json(&raw).unwrap();
@@ -205,6 +210,7 @@ mod tests {
         assert_eq!(back.colibri_channel_uri, config.colibri_channel_uri);
         assert_eq!(back.colibri_appview_url, "https://appview.example");
         assert!(!back.colibri_server_events_enabled);
+        assert!(!back.colibri_server_events_fallback_enabled);
     }
 
     #[test]
@@ -227,6 +233,7 @@ mod tests {
         assert!(!config.colibri_bridge_enabled);
         assert!(config.colibri_channel_uri.is_empty());
         assert_eq!(config.colibri_appview_url, "https://api.colibri.social");
+        assert!(config.colibri_server_events_fallback_enabled);
     }
 
     #[test]

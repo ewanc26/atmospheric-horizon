@@ -95,6 +95,11 @@ pub enum GameCommand {
     ColibriSend { text: String, automatic: bool },
     /// Relay a server broadcast line as the server account (M28).
     ColibriNotice { text: String },
+    /// Mark a line as handled for the presence fallback (M29). `kind` is
+    /// `join` or `leave`, or `None` for a blank/hidden line.
+    ColibriHandled { kind: Option<String> },
+    /// A join/leave connection event for the presence fallback (M29).
+    ColibriPresence { kind: String, text: String },
     /// Publish the player's state as an `at.atpcraft.player.snapshot` record
     /// (M6, atpcraft port).
     PostSnapshot { summary: SnapshotSummary },
@@ -1014,18 +1019,40 @@ pub fn post_colibri_notice(text: &str) {
     send(GameCommand::ColibriNotice { text: text.into() });
 }
 
+/// Mark a join/leave line, or a blank/hidden line, handled for the M29
+/// presence fallback.
+pub fn post_colibri_handled(kind: Option<&str>) {
+    send(GameCommand::ColibriHandled {
+        kind: kind.map(str::to_string),
+    });
+}
+
+/// Schedule a join/leave fallback after a connection event (M29).
+pub fn post_colibri_presence(kind: &str, text: &str) {
+    send(GameCommand::ColibriPresence {
+        kind: kind.into(),
+        text: text.into(),
+    });
+}
+
+/// The fallback kind for a server broadcast translation key (M29), or `None`
+/// for ordinary chat and unknown lines.
+pub fn colibri_notice_kind(key: &str) -> Option<&'static str> {
+    match key {
+        "multiplayer.player.joined" | "multiplayer.player.joined.renamed" => Some("join"),
+        "multiplayer.player.left" => Some("leave"),
+        "chat.type.advancement.task"
+        | "chat.type.advancement.goal"
+        | "chat.type.advancement.challenge" => Some("advancement"),
+        _ if key.starts_with("death.") => Some("death"),
+        _ => None,
+    }
+}
+
 /// The server broadcast translation keys atpcraft relays. Ordinary chat,
 /// command output and unknown server lines are deliberately excluded.
 pub fn is_colibri_notice(key: &str) -> bool {
-    matches!(
-        key,
-        "multiplayer.player.joined"
-            | "multiplayer.player.joined.renamed"
-            | "multiplayer.player.left"
-            | "chat.type.advancement.task"
-            | "chat.type.advancement.goal"
-            | "chat.type.advancement.challenge"
-    ) || key.starts_with("death.")
+    colibri_notice_kind(key).is_some()
 }
 
 /// Ask the worker to publish a player-state snapshot record (M6).
@@ -1734,6 +1761,14 @@ fn encode_command(command: &GameCommand) -> String {
         GameCommand::ColibriNotice { text } => {
             jobj(vec![("ColibriNotice", jobj(vec![("text", jstr(text))]))])
         }
+        GameCommand::ColibriHandled { kind } => jobj(vec![(
+            "ColibriHandled",
+            jobj(vec![("kind", jopt_str(kind))]),
+        )]),
+        GameCommand::ColibriPresence { kind, text } => jobj(vec![(
+            "ColibriPresence",
+            jobj(vec![("kind", jstr(kind)), ("text", jstr(text))]),
+        )]),
         GameCommand::PostSnapshot { summary } => jobj(vec![(
             "PostSnapshot",
             jobj(vec![(
@@ -2041,6 +2076,7 @@ fn decode_event(line: &str) -> Option<ModEvent> {
     let (tag, payload) = top.first()?;
     let payload_obj = || as_obj(payload);
     match tag.as_str() {
+        "Status" => as_str(payload).map(|text| ModEvent::Status(text.to_string())),
         "Session" => decode_session(payload).map(ModEvent::Session),
         "ServerAccount" => {
             let obj = as_obj(payload)?;
@@ -2231,6 +2267,8 @@ mod tests {
         colibri_stop();
         colibri_send("hello colibri");
         post_colibri_notice("Alex joined the game");
+        post_colibri_handled(Some("join"));
+        post_colibri_presence("join", "Alex joined the game");
         post_snapshot(snapshot_from_player(
             "",
             "minecraft:overworld",
@@ -2329,6 +2367,19 @@ mod tests {
                 assert_eq!(text, "Alex joined the game")
             }
             other => panic!("expected ColibriNotice, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::ColibriHandled { kind }) => {
+                assert_eq!(kind.as_deref(), Some("join"));
+            }
+            other => panic!("expected ColibriHandled, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::ColibriPresence { kind, text }) => {
+                assert_eq!(kind, "join");
+                assert_eq!(text, "Alex joined the game");
+            }
+            other => panic!("expected ColibriPresence, got {:?}", other),
         }
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::PostSnapshot { summary }) => {
@@ -2956,6 +3007,23 @@ mod tests {
             }),
             r#"{"ColibriNotice":{"text":"Alex joined the game"}}"#
         );
+        assert_eq!(
+            encode_command(&GameCommand::ColibriHandled {
+                kind: Some("join".into())
+            }),
+            r#"{"ColibriHandled":{"kind":"join"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::ColibriHandled { kind: None }),
+            r#"{"ColibriHandled":{"kind":null}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::ColibriPresence {
+                kind: "leave".into(),
+                text: "Alex left the game".into(),
+            }),
+            r#"{"ColibriPresence":{"kind":"leave","text":"Alex left the game"}}"#
+        );
         // The flat game-side x/y/z map onto the nested `position` object.
         assert_eq!(
             encode_command(&GameCommand::PostSnapshot {
@@ -3163,6 +3231,10 @@ mod tests {
                 handle: "a.test".into(),
                 text: "hi".into(),
             })
+        );
+        assert_eq!(
+            decode_event(r#"{"Status":"pending approval"}"#),
+            Some(ModEvent::Status("pending approval".into()))
         );
         assert_eq!(
             decode_event(r#"{"Failed":{"message":"m"}}"#),
