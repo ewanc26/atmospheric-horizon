@@ -62,6 +62,12 @@ pub enum GameCommand {
     /// the browser at the authorization server, and completes the loopback
     /// redirect.
     LoginOAuth { handle: String },
+    /// Log in the separate server account with localhost OAuth (M25).
+    LoginServerOAuth { handle: String },
+    /// Report the server account's session state (M25).
+    ServerAccountStatus,
+    /// Drop the server account session and delete its persisted token (M25).
+    LogoutServerAccount,
     /// Replace the settings file with these settings.
     SaveConfig { settings: Settings },
     /// Post plain text to Bluesky.
@@ -92,6 +98,9 @@ pub enum GameCommand {
     /// Publish/refresh the account's server profile record
     /// (`at.atpcraft.server.profile` at rkey `self`, M9-era atpcraft port).
     PostServerProfile,
+    /// Publish/refresh the server profile from the separate server account
+    /// (M25), as atpcraft's server account owns it.
+    PostServerProfileAsServer,
     /// Fetch a public Bluesky list's member DIDs (M11, join-gate read side):
     /// an `at://…app.bsky.graph.list/<rkey>` URI or a bsky.app list URL.
     FetchList { reference: String },
@@ -365,6 +374,13 @@ pub enum ModEvent {
     Status(String),
     /// Session health.
     Session(SessionState),
+    /// The separate server account's session (M25): its state plus the
+    /// handle/DID the worker knows.
+    ServerAccount {
+        state: SessionState,
+        handle: Option<String>,
+        did: Option<String>,
+    },
     /// A record was written; carries its `at://` URI.
     Posted { uri: String },
     /// Something failed; carries a HUD-friendly message.
@@ -471,6 +487,21 @@ pub fn status_text(event: &ModEvent) -> String {
         ModEvent::Session(SessionState::Failed { message }) => {
             format!("atmospheric: login failed: {message}")
         }
+        ModEvent::ServerAccount { state, handle, did } => match state {
+            SessionState::LoggedOut => "atmospheric: server account logged out".into(),
+            SessionState::LoggingIn => "atmospheric: logging in the server account…".into(),
+            SessionState::LoggedIn { .. } => {
+                let account = handle
+                    .as_ref()
+                    .map(|h| format!("@{h}"))
+                    .or_else(|| did.clone())
+                    .unwrap_or_else(|| "server account".into());
+                format!("atmospheric: server account {account} logged in")
+            }
+            SessionState::Failed { message } => {
+                format!("atmospheric: server account login failed: {message}")
+            }
+        },
         ModEvent::Posted { uri } => format!("atmospheric: posted {uri}"),
         ModEvent::Failed { message } => format!("atmospheric: {message}"),
         ModEvent::OAuthAuthorize { url } => format!("atmospheric: finish login at {url}"),
@@ -890,6 +921,28 @@ pub fn post_skin(skin_path: Option<String>, cape_path: Option<String>, model: &s
 /// Ask the worker to publish/refresh the server profile record (M10).
 pub fn post_server_profile() {
     send(GameCommand::PostServerProfile);
+}
+
+/// Start OAuth login for the separate server account (M25).
+pub fn login_server_oauth(handle: &str) {
+    send(GameCommand::LoginServerOAuth {
+        handle: handle.into(),
+    });
+}
+
+/// Ask the worker to report the server account's session state (M25).
+pub fn server_account_status() {
+    send(GameCommand::ServerAccountStatus);
+}
+
+/// Ask the worker to drop the server-account session (M25).
+pub fn logout_server_account() {
+    send(GameCommand::LogoutServerAccount);
+}
+
+/// Ask the worker to publish the server profile from the server account (M25).
+pub fn post_server_profile_as_server() {
+    send(GameCommand::PostServerProfileAsServer);
 }
 
 /// Ask the worker to fetch a public Bluesky list's members (M11).
@@ -1502,6 +1555,12 @@ fn encode_command(command: &GameCommand) -> String {
         GameCommand::LoginOAuth { handle } => {
             jobj(vec![("LoginOAuth", jobj(vec![("handle", jstr(handle))]))])
         }
+        GameCommand::LoginServerOAuth { handle } => jobj(vec![(
+            "LoginServerOAuth",
+            jobj(vec![("handle", jstr(handle))]),
+        )]),
+        GameCommand::ServerAccountStatus => jstr("ServerAccountStatus"),
+        GameCommand::LogoutServerAccount => jstr("LogoutServerAccount"),
         GameCommand::SaveConfig { settings } => jobj(vec![(
             "SaveConfig",
             jobj(vec![(
@@ -1575,6 +1634,7 @@ fn encode_command(command: &GameCommand) -> String {
             ]),
         )]),
         GameCommand::PostServerProfile => jstr("PostServerProfile"),
+        GameCommand::PostServerProfileAsServer => jstr("PostServerProfileAsServer"),
         GameCommand::FetchList { reference } => jobj(vec![(
             "FetchList",
             jobj(vec![("reference", jstr(reference))]),
@@ -1847,6 +1907,14 @@ fn decode_event(line: &str) -> Option<ModEvent> {
     let payload_obj = || as_obj(payload);
     match tag.as_str() {
         "Session" => decode_session(payload).map(ModEvent::Session),
+        "ServerAccount" => {
+            let obj = as_obj(payload)?;
+            Some(ModEvent::ServerAccount {
+                state: decode_session(jget(obj, "state")?)?,
+                handle: jget(obj, "handle").and_then(as_opt_str).flatten(),
+                did: jget(obj, "did").and_then(as_opt_str).flatten(),
+            })
+        }
         "Posted" => Some(ModEvent::Posted {
             uri: req_str(payload_obj()?, "uri")?,
         }),
@@ -2562,6 +2630,28 @@ mod tests {
     }
 
     #[test]
+    fn server_account_status_text() {
+        assert_eq!(
+            status_text(&ModEvent::ServerAccount {
+                state: SessionState::LoggedOut,
+                handle: None,
+                did: None,
+            }),
+            "atmospheric: server account logged out"
+        );
+        assert_eq!(
+            status_text(&ModEvent::ServerAccount {
+                state: SessionState::LoggedIn {
+                    did: "did:plc:server".into(),
+                },
+                handle: Some("server.test".into()),
+                did: Some("did:plc:server".into()),
+            }),
+            "atmospheric: server account @server.test logged in"
+        );
+    }
+
+    #[test]
     fn encode_command_wire_shapes() {
         assert_eq!(encode_command(&GameCommand::Login), r#""Login""#);
         assert_eq!(
@@ -2569,6 +2659,20 @@ mod tests {
                 handle: "a.test".into()
             }),
             r#"{"LoginOAuth":{"handle":"a.test"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::LoginServerOAuth {
+                handle: "server.test".into()
+            }),
+            r#"{"LoginServerOAuth":{"handle":"server.test"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::ServerAccountStatus),
+            r#""ServerAccountStatus""#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::LogoutServerAccount),
+            r#""LogoutServerAccount""#
         );
         assert_eq!(
             encode_command(&GameCommand::SaveConfig {
@@ -2620,6 +2724,10 @@ mod tests {
         assert_eq!(
             encode_command(&GameCommand::PostServerProfile),
             r#""PostServerProfile""#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::PostServerProfileAsServer),
+            r#""PostServerProfileAsServer""#
         );
         assert_eq!(
             encode_command(&GameCommand::FetchList {
@@ -2761,6 +2869,26 @@ mod tests {
             Some(ModEvent::Session(SessionState::Failed {
                 message: "m".into()
             }))
+        );
+        assert_eq!(
+            decode_event(
+                r#"{"ServerAccount":{"state":{"LoggedIn":{"did":"did:plc:server"}},"handle":"server.test","did":"did:plc:server"}}"#
+            ),
+            Some(ModEvent::ServerAccount {
+                state: SessionState::LoggedIn {
+                    did: "did:plc:server".into()
+                },
+                handle: Some("server.test".into()),
+                did: Some("did:plc:server".into()),
+            })
+        );
+        assert_eq!(
+            decode_event(r#"{"ServerAccount":{"state":"LoggedOut","handle":null,"did":null}}"#),
+            Some(ModEvent::ServerAccount {
+                state: SessionState::LoggedOut,
+                handle: None,
+                did: None,
+            })
         );
         assert_eq!(
             decode_event(r#"{"Posted":{"uri":"at://u"}}"#),

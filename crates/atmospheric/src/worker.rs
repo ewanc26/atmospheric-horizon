@@ -39,6 +39,8 @@ pub const SIGNING_KEY_FILE: &str = "signing-key.json";
 pub const SNAPSHOT_STATE_FILE: &str = "snapshot-state.json";
 /// The persisted refresh token, same folder (session resume across restarts).
 pub const SESSION_FILE: &str = "session.json";
+/// The separate server account's persisted session (M25), same folder.
+pub const SERVER_SESSION_FILE: &str = "server-session.json";
 /// Where verified skin/cape blobs downloaded by M14 reads are saved.
 pub const SKINS_DIR: &str = "skins";
 
@@ -117,9 +119,10 @@ pub fn spawn(
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
                 // Results of spawned OAuth logins (M8) come back here, so the
                 // loop stays responsive while the browser is open.
-                let (oauth_tx, mut oauth_rx) = tokio::sync::mpsc::unbounded_channel::<
+                let (oauth_tx, mut oauth_rx) = tokio::sync::mpsc::unbounded_channel::<(
+                    OAuthTarget,
                     crate::error::Result<oauth::OAuthLogin>,
-                >();
+                )>();
                 let bridge = std::thread::Builder::new()
                     .name("atmospheric-commands".into())
                     .spawn(move || {
@@ -138,8 +141,10 @@ pub fn spawn(
 
                 let mut worker = Worker::new(options, events, oauth_tx);
                 worker.emit(Event::Session(SessionState::LoggedOut));
-                // Resume a persisted session (refresh token) if there is one.
+                // Resume persisted player and server sessions (refresh
+                // tokens) if there are any.
                 worker.try_resume().await;
+                worker.try_resume_server().await;
                 // The notification poll timer (M4): ticks at the configured
                 // interval once logged in; before that the ticks are no-ops.
                 let mut poll =
@@ -166,8 +171,8 @@ pub fn spawn(
                         }
                         result = oauth_rx.recv() => {
                             match result {
-                                Some(Ok(login)) => {
-                                    worker.finish_login_oauth(login).await;
+                                Some((target, Ok(login))) => {
+                                    worker.finish_login_oauth(target, login).await;
                                     if worker.is_logged_in() {
                                         poll = tokio::time::interval(Duration::from_secs(
                                             worker.poll_interval_secs,
@@ -177,11 +182,18 @@ pub fn spawn(
                                         );
                                     }
                                 }
-                                Some(Err(error)) => worker.emit(Event::Session(
-                                    SessionState::Failed {
-                                        message: error.to_string(),
-                                    },
-                                )),
+                                Some((target, Err(error))) => match target {
+                                    OAuthTarget::Player => worker.emit(Event::Session(
+                                        SessionState::Failed {
+                                            message: error.to_string(),
+                                        },
+                                    )),
+                                    OAuthTarget::Server => worker.emit_server_account(
+                                        SessionState::Failed {
+                                            message: error.to_string(),
+                                        },
+                                    ),
+                                },
                                 None => {}
                             }
                         }
@@ -201,6 +213,13 @@ struct SnapshotState {
     version: i64,
 }
 
+/// Which session a finished OAuth login belongs to (M25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OAuthTarget {
+    Player,
+    Server,
+}
+
 /// The worker's state: the agent and DID once logged in, plus its files.
 struct Worker {
     storage_dir: PathBuf,
@@ -218,6 +237,14 @@ struct Worker {
     persist_session: bool,
     /// The persisted session, if any, for resuming across restarts.
     stored_session: Option<StoredSession>,
+    /// The separate server account's agent, DID and handle (M25).
+    server_agent: Option<Agent>,
+    server_did: Option<String>,
+    server_handle: Option<String>,
+    /// The persisted server-account session, if any.
+    server_stored_session: Option<StoredSession>,
+    /// DPoP state for the server account, separate from the player's.
+    server_dpop: SharedDpop,
     /// `chat_server_id` from the settings file, refreshed at login.
     chat_server_id: String,
     /// The login identifier, kept so snapshots can default the username.
@@ -235,8 +262,9 @@ struct Worker {
     resolver: oauth::Resolver,
     /// Whether OAuth logins may spawn the system browser.
     launch_browser: bool,
-    /// Where spawned OAuth logins report their result.
-    oauth_tx: tokio::sync::mpsc::UnboundedSender<crate::error::Result<oauth::OAuthLogin>>,
+    /// Where spawned OAuth logins report their result and target.
+    oauth_tx:
+        tokio::sync::mpsc::UnboundedSender<(OAuthTarget, crate::error::Result<oauth::OAuthLogin>)>,
     events: Sender<Event>,
 }
 
@@ -244,7 +272,10 @@ impl Worker {
     fn new(
         options: WorkerOptions,
         events: Sender<Event>,
-        oauth_tx: tokio::sync::mpsc::UnboundedSender<crate::error::Result<oauth::OAuthLogin>>,
+        oauth_tx: tokio::sync::mpsc::UnboundedSender<(
+            OAuthTarget,
+            crate::error::Result<oauth::OAuthLogin>,
+        )>,
     ) -> Self {
         // The seen-cursor persists across restarts, so old notifications are
         // not re-shown; a missing file just means "everything is new".
@@ -261,6 +292,10 @@ impl Worker {
         let stored_session = std::fs::read_to_string(options.storage_dir.join(SESSION_FILE))
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok());
+        let server_stored_session =
+            std::fs::read_to_string(options.storage_dir.join(SERVER_SESSION_FILE))
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok());
         Self {
             storage_dir: options.storage_dir,
             agent: None,
@@ -272,6 +307,11 @@ impl Worker {
             post_death_messages: false,
             persist_session: true,
             stored_session,
+            server_agent: None,
+            server_did: None,
+            server_handle: None,
+            server_stored_session,
+            server_dpop: oauth::new_shared_dpop(),
             chat_server_id: Config::default().chat_server_id,
             identifier: String::new(),
             signing_key: None,
@@ -330,6 +370,9 @@ impl Worker {
             }
             Command::Login => self.login().await,
             Command::LoginOAuth { handle } => self.start_login_oauth(handle),
+            Command::LoginServerOAuth { handle } => self.start_server_login_oauth(handle),
+            Command::ServerAccountStatus => self.emit_server_account_status(),
+            Command::LogoutServerAccount => self.logout_server_account(),
             Command::PostText { text } => {
                 self.ensure_oauth_fresh().await;
                 let result = match (&self.agent, &self.did) {
@@ -381,6 +424,12 @@ impl Worker {
             Command::PostServerProfile => {
                 self.ensure_oauth_fresh().await;
                 match self.post_server_profile().await {
+                    Ok(uri) => self.emit(Event::Posted { uri }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::PostServerProfileAsServer => {
+                match self.post_server_profile_as_server().await {
                     Ok(uri) => self.emit(Event::Posted { uri }),
                     Err(error) => self.fail(error.to_string()),
                 }
@@ -813,24 +862,57 @@ impl Worker {
         .await
     }
 
-    /// Publish/refresh the account's server profile
-    /// (`at.atpcraft.server.profile` at rkey `self`, M10, atpcraft port).
-    /// Identity fields and capabilities come from the settings file; the
-    /// `signingKey` block is the mod's persisted Ed25519 key; `createdAt` is
-    /// preserved from the existing record.
-    async fn post_server_profile(&mut self) -> crate::error::Result<String> {
-        let (Some(agent), Some(did)) = (&self.agent, &self.did) else {
-            return Err(AtmosphericError::NotLoggedIn);
-        };
-        let config = self.load_config().unwrap_or_default();
-        let key = match &self.signing_key {
-            Some(key) => key.clone(),
+    /// The Ed25519 endorsement key, loaded or created once for this worker.
+    fn endorsement_key(&mut self) -> crate::error::Result<SigningKey> {
+        match &self.signing_key {
+            Some(key) => Ok(key.clone()),
             None => {
                 let key = self.load_or_create_signing_key()?;
                 self.signing_key = Some(key.clone());
-                key
+                Ok(key)
             }
+        }
+    }
+
+    /// Publish/refresh the player account's server profile
+    /// (`at.atpcraft.server.profile` at rkey `self`, M10, atpcraft port).
+    async fn post_server_profile(&mut self) -> crate::error::Result<String> {
+        let key = self.endorsement_key()?;
+        let config = self.load_config().unwrap_or_default();
+        let (Some(agent), Some(did)) = (&self.agent, &self.did) else {
+            return Err(AtmosphericError::NotLoggedIn);
         };
+        let handle = self.identifier.clone();
+        Self::write_server_profile(agent, did, &handle, &key, &config).await
+    }
+
+    /// Publish/refresh the server profile from the separate server account
+    /// (M25), as atpcraft's server owns its descriptor.
+    async fn post_server_profile_as_server(&mut self) -> crate::error::Result<String> {
+        self.ensure_server_oauth_fresh().await;
+        let key = self.endorsement_key()?;
+        let config = self.load_config().unwrap_or_default();
+        let (Some(agent), Some(did), Some(handle)) =
+            (&self.server_agent, &self.server_did, &self.server_handle)
+        else {
+            return Err(AtmosphericError::Message(
+                "no server account is logged in — run /atmospheric server-account login <handle>"
+                    .into(),
+            ));
+        };
+        Self::write_server_profile(agent, did, handle, &key, &config).await
+    }
+
+    /// Shared server-profile writer. Identity fields and capabilities come
+    /// from the settings file; the `signingKey` block is the mod's persisted
+    /// Ed25519 key; `createdAt` is preserved from the existing record.
+    async fn write_server_profile(
+        agent: &Agent,
+        did: &str,
+        account_handle: &str,
+        key: &SigningKey,
+        config: &Config,
+    ) -> crate::error::Result<String> {
         let key_id = signing::key_id_of(&key.verifying_key());
         // Preserve createdAt across re-publishes (atpcraft's writer does the
         // same via getRecord).
@@ -845,7 +927,7 @@ impl Worker {
         .and_then(|value| serde_json::from_value::<records::ServerProfileRecord>(value).ok())
         .and_then(|existing| existing.created_at);
         let name = if config.server_name.is_empty() {
-            self.identifier.clone()
+            account_handle.to_string()
         } else {
             config.server_name.clone()
         };
@@ -869,8 +951,8 @@ impl Worker {
             },
             config.server_capabilities.clone(),
             Some(records::ProfileOperator {
-                did: did.clone(),
-                handle: self.identifier.clone(),
+                did: did.to_string(),
+                handle: account_handle.to_string(),
                 website: config.server_website.clone(),
                 contact: config.server_contact.clone(),
             }),
@@ -1377,11 +1459,28 @@ impl Worker {
         }
     }
 
-    /// Start a localhost OAuth login (M8). The browser flow runs on a spawned
-    /// task so the command loop stays responsive (Shutdown works while the
-    /// browser is open); its result arrives on the oauth channel.
+    /// Start a localhost OAuth login for the player (M8).
     fn start_login_oauth(&mut self, handle: String) {
-        self.emit(Event::Session(SessionState::LoggingIn));
+        self.start_oauth(handle, OAuthTarget::Player);
+    }
+
+    /// Start a localhost OAuth login for the separate server account (M25).
+    fn start_server_login_oauth(&mut self, handle: String) {
+        self.start_oauth(handle, OAuthTarget::Server);
+    }
+
+    /// Start a localhost OAuth login (M8/M25). The browser flow runs on a
+    /// spawned task so the command loop stays responsive (Shutdown works while
+    /// the browser is open); its result arrives on the oauth channel tagged
+    /// with the target session.
+    fn start_oauth(&mut self, handle: String, target: OAuthTarget) {
+        match target {
+            OAuthTarget::Player => self.emit(Event::Session(SessionState::LoggingIn)),
+            OAuthTarget::Server => {
+                self.server_handle = Some(handle.clone());
+                self.emit_server_account(SessionState::LoggingIn);
+            }
+        }
         // The client_id comes from the settings file when set (hosted client
         // metadata URL); otherwise the loopback default.
         let client_id = self
@@ -1405,13 +1504,22 @@ impl Worker {
                 events: &events,
             })
             .await;
-            let _ = oauth_tx.send(result);
+            let _ = oauth_tx.send((target, result));
         });
     }
 
-    /// Apply a finished OAuth login: build the DPoP-signed agent, validate the
-    /// session, persist the refresh token and DPoP key, report LoggedIn.
-    async fn finish_login_oauth(&mut self, login: oauth::OAuthLogin) {
+    /// Apply a finished OAuth login to the session it belongs to.
+    async fn finish_login_oauth(&mut self, target: OAuthTarget, login: oauth::OAuthLogin) {
+        match target {
+            OAuthTarget::Player => self.finish_player_oauth(login).await,
+            OAuthTarget::Server => self.finish_server_oauth(login).await,
+        }
+    }
+
+    /// Apply a finished player OAuth login: build the DPoP-signed agent,
+    /// validate the session, persist the refresh token and DPoP key, report
+    /// LoggedIn.
+    async fn finish_player_oauth(&mut self, login: oauth::OAuthLogin) {
         let oauth::OAuthLogin {
             tokens,
             key,
@@ -1464,6 +1572,91 @@ impl Worker {
         }
     }
 
+    /// Apply a finished server-account OAuth login (M25). The server session is
+    /// independent of the player session and always persisted: its purpose is
+    /// to act when no player is logged in.
+    async fn finish_server_oauth(&mut self, login: oauth::OAuthLogin) {
+        let oauth::OAuthLogin {
+            tokens,
+            key,
+            pds_url,
+            did,
+            handle,
+            token_endpoint,
+            issuer,
+            client_id,
+            scope,
+        } = login;
+        match session::agent_for_oauth(&pds_url, &did, &handle, &tokens, key.clone()).await {
+            Ok((agent, dpop)) => {
+                self.server_agent = Some(agent);
+                self.server_did = Some(did.clone());
+                self.server_handle = Some(handle.clone());
+                self.server_dpop = dpop;
+                let stored = StoredSession {
+                    pds_url,
+                    did: did.clone(),
+                    handle,
+                    refresh_jwt: tokens.refresh_token.clone().unwrap_or_default(),
+                    oauth: Some(session::StoredOAuth {
+                        dpop_jwk: key.to_jwk_json(),
+                        token_endpoint,
+                        issuer,
+                        client_id,
+                        scope,
+                    }),
+                };
+                self.server_stored_session = Some(stored.clone());
+                if let Err(error) = self.save_server_session(&stored) {
+                    self.fail(format!(
+                        "could not persist the server-account session file: {error}"
+                    ));
+                }
+                self.emit_server_account(SessionState::LoggedIn { did });
+            }
+            Err(error) => self.emit_server_account(SessionState::Failed {
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    /// Report a server-account event with the handle and DID the worker knows.
+    fn emit_server_account(&self, state: SessionState) {
+        self.emit(Event::ServerAccount {
+            state,
+            handle: self.server_handle.clone(),
+            did: self.server_did.clone(),
+        });
+    }
+
+    /// Report the current server-account state on demand (M25).
+    fn emit_server_account_status(&self) {
+        let state = match &self.server_did {
+            Some(did) => SessionState::LoggedIn { did: did.clone() },
+            None => SessionState::LoggedOut,
+        };
+        self.emit_server_account(state);
+    }
+
+    /// Drop the server-account session and delete its persisted refresh token.
+    fn logout_server_account(&mut self) {
+        self.server_agent = None;
+        self.server_did = None;
+        self.server_handle = None;
+        self.server_stored_session = None;
+        self.server_dpop = oauth::new_shared_dpop();
+        let path = self.storage_dir.join(SERVER_SESSION_FILE);
+        if let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            self.fail(format!(
+                "could not delete the server-account session file: {error}"
+            ));
+            return;
+        }
+        self.emit_server_account(SessionState::LoggedOut);
+    }
+
     /// Refresh the OAuth access token when it is close to expiry. The agent's
     /// own ExpiredToken auto-refresh only knows the app-password
     /// `refreshSession` endpoint, which an OAuth session cannot use, so the
@@ -1507,6 +1700,53 @@ impl Worker {
                 }
             }
             Err(error) => self.fail(format!("could not refresh the OAuth session: {error}")),
+        }
+    }
+
+    /// Refresh the server account's DPoP-bound access token when it is close
+    /// to expiry (M25), independently of the player session.
+    async fn ensure_server_oauth_fresh(&mut self) {
+        let needs_refresh = self
+            .server_dpop
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|state| state.expires_within(60));
+        if !needs_refresh {
+            return;
+        }
+        let (Some(state), Some(mut stored)) = (
+            self.server_dpop.lock().unwrap().clone(),
+            self.server_stored_session.clone(),
+        ) else {
+            return;
+        };
+        let Some(oauth) = stored.oauth.clone() else {
+            return;
+        };
+        match oauth::refresh(
+            &self.http,
+            &oauth.token_endpoint,
+            &oauth.client_id,
+            &state.refresh_token,
+            &state.key,
+        )
+        .await
+        {
+            Ok(tokens) => {
+                *self.server_dpop.lock().unwrap() =
+                    Some(DpopState::from_tokens(state.key, &tokens));
+                stored.refresh_jwt = tokens.refresh_token.clone().unwrap_or(stored.refresh_jwt);
+                self.server_stored_session = Some(stored.clone());
+                if let Err(error) = self.save_server_session(&stored) {
+                    self.fail(format!(
+                        "could not persist the server-account session file: {error}"
+                    ));
+                }
+            }
+            Err(error) => self.emit_server_account(SessionState::Failed {
+                message: format!("could not refresh the server-account session: {error}"),
+            }),
         }
     }
 
@@ -1588,13 +1828,60 @@ impl Worker {
         }
     }
 
-    /// Persist the session's refresh token (worker owns disk I/O). For OAuth
+    /// Resume the persisted server-account session (M25). The server session
+    /// is OAuth-only, so it resumes through the authorization server's DPoP
+    /// refresh grant, never the player session file.
+    async fn try_resume_server(&mut self) {
+        let Some(stored) = self.server_stored_session.clone() else {
+            return;
+        };
+        let Some(oauth) = &stored.oauth else {
+            return;
+        };
+        match session::resume_oauth(&self.http, &stored, oauth).await {
+            Ok((agent, dpop, rotated)) => {
+                let did = rotated.did.clone();
+                self.server_agent = Some(agent);
+                self.server_did = Some(did.clone());
+                self.server_handle = Some(rotated.handle.clone());
+                self.server_dpop = dpop;
+                self.server_stored_session = Some(rotated.clone());
+                if let Err(error) = self.save_server_session(&rotated) {
+                    self.fail(format!(
+                        "could not persist the server-account session file: {error}"
+                    ));
+                }
+                self.emit_server_account(SessionState::LoggedIn { did });
+            }
+            Err(error) => {
+                self.server_stored_session = None;
+                self.emit_server_account(SessionState::Failed {
+                    message: format!(
+                        "could not resume the server-account session ({error}) — log in again with /atmospheric server-account login <handle>"
+                    ),
+                });
+            }
+        }
+    }
+
+    /// Persist a session's refresh token (worker owns disk I/O). For OAuth
     /// sessions the file also holds the DPoP private key, so it is written
     /// owner-only (0600 on unix).
     fn save_session(&self, stored: &StoredSession) -> crate::error::Result<()> {
         std::fs::create_dir_all(&self.storage_dir)?;
         write_private(
             &self.storage_dir.join(SESSION_FILE),
+            serde_json::to_string_pretty(stored)?,
+        )?;
+        Ok(())
+    }
+
+    /// Persist the server account's session separately from the player's
+    /// (M25). It holds the DPoP private key, so it is owner-only.
+    fn save_server_session(&self, stored: &StoredSession) -> crate::error::Result<()> {
+        std::fs::create_dir_all(&self.storage_dir)?;
+        write_private(
+            &self.storage_dir.join(SERVER_SESSION_FILE),
             serde_json::to_string_pretty(stored)?,
         )?;
         Ok(())
@@ -4808,6 +5095,123 @@ mod tests {
         write_private(&path, b"{\"a\":1}").unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn server_account_oauth_is_separate_and_logs_out() {
+        let stub = StubAuthServer::start(false);
+        let dir = temp_dir("server-account");
+        let (command_tx, event_rx, handle) = spawn_worker_at(dir.clone(), &stub);
+
+        command_tx
+            .send(Command::LoginServerOAuth {
+                handle: "stub.test".into(),
+            })
+            .unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(
+                e,
+                Event::ServerAccount {
+                    state: SessionState::LoggingIn,
+                    ..
+                }
+            )
+        });
+        let authorize_url = simulate_browser(&event_rx);
+        assert!(authorize_url.starts_with(&format!("{}/authorize?", stub.url)));
+        match wait_for(&event_rx, |e| {
+            matches!(
+                e,
+                Event::ServerAccount {
+                    state: SessionState::LoggedIn { .. },
+                    ..
+                }
+            )
+        }) {
+            Event::ServerAccount {
+                state: SessionState::LoggedIn { did },
+                handle,
+                ..
+            } => {
+                assert_eq!(did, "did:plc:stubuser");
+                assert_eq!(handle.as_deref(), Some("stub.test"));
+            }
+            other => panic!("expected ServerAccount(LoggedIn), got {other:?}"),
+        }
+
+        // The server session is persisted on its own; the player session is
+        // untouched and no app password is written.
+        assert!(dir.join(SERVER_SESSION_FILE).is_file());
+        assert!(!dir.join(SESSION_FILE).exists());
+        let raw = std::fs::read_to_string(dir.join(SERVER_SESSION_FILE)).unwrap();
+        assert!(!raw.contains("password"));
+        let stored: session::StoredSession = serde_json::from_str(&raw).unwrap();
+        assert_eq!(stored.refresh_jwt, "stub-oauth-refresh-1");
+        assert!(stored.oauth.is_some());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join(SERVER_SESSION_FILE))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "server-session.json must be 0600");
+        }
+
+        command_tx.send(Command::ServerAccountStatus).unwrap();
+        assert!(matches!(
+            wait_for(&event_rx, |e| matches!(e, Event::ServerAccount { .. })),
+            Event::ServerAccount {
+                state: SessionState::LoggedIn { .. },
+                ..
+            }
+        ));
+
+        // The server account owns the descriptor publish; the shared writer
+        // reads the existing record and upserts at rkey `self`.
+        command_tx.send(Command::PostServerProfileAsServer).unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Posted { .. })) {
+            Event::Posted { uri } => {
+                assert_eq!(uri, "at://did:plc:stubuser/at.atpcraft.server.profile/self")
+            }
+            other => panic!("expected Posted, got {other:?}"),
+        }
+        let puts: Vec<_> = stub
+            .requests()
+            .into_iter()
+            .filter(|r| r.path == "/xrpc/com.atproto.repo.putRecord")
+            .collect();
+        assert_eq!(puts.len(), 1, "one server-profile upsert");
+        assert_eq!(
+            puts[0].authorization.as_deref(),
+            Some("DPoP stub-oauth-access-1")
+        );
+        let put: serde_json::Value = serde_json::from_str(&puts[0].body).unwrap();
+        assert_eq!(put["collection"], "at.atpcraft.server.profile");
+        assert_eq!(put["rkey"], "self");
+        assert_eq!(put["record"]["$type"], "at.atpcraft.server.profile");
+
+        command_tx.send(Command::LogoutServerAccount).unwrap();
+        match wait_for(&event_rx, |e| {
+            matches!(
+                e,
+                Event::ServerAccount {
+                    state: SessionState::LoggedOut,
+                    ..
+                }
+            )
+        }) {
+            Event::ServerAccount { did, handle, .. } => {
+                assert!(did.is_none());
+                assert!(handle.is_none());
+            }
+            other => panic!("expected ServerAccount(LoggedOut), got {other:?}"),
+        }
+        assert!(!dir.join(SERVER_SESSION_FILE).exists());
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
     }
 
     #[test]
