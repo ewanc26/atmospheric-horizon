@@ -84,6 +84,13 @@ pub enum Command {
     /// account (M28). The hook has already classified it; the worker silently
     /// ignores it when the bridge or server notices are off.
     ColibriNotice { text: String },
+    /// Mark a server line as handled by the Colibri presence fallback (M29):
+    /// `kind` is `join` or `leave`, or `None` for a blank/hidden line.
+    ColibriHandled { kind: Option<String> },
+    /// A join or leave connection event for the presence fallback (M29). The
+    /// game side has already localized `text`; the worker waits 3 seconds and
+    /// writes it only when no matching broadcast line arrived.
+    ColibriPresence { kind: String, text: String },
     /// Publish the player's state as an `at.atpcraft.player.snapshot` record,
     /// endorsed with the mod's own Ed25519 key (atpcraft port, M6). An empty
     /// `summary.username` is filled from the configured identifier.
@@ -188,6 +195,9 @@ pub enum Command {
 // Serde: same sidecar wire format as [`Command`] (M17).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
+    /// A free-form HUD status line (M29 uses it for the pending-approval
+    /// notice after a new Colibri membership is created).
+    Status(String),
     /// Session health, mirrored on the HUD.
     Session(session::SessionState),
     /// The separate server account's session (M25). `handle` and `did` are
@@ -343,6 +353,21 @@ mod tests {
             .unwrap(),
             r#"{"FetchLabelerLabels":{"labeler":"did:plc:x","subject":null}}"#
         );
+        assert_eq!(
+            serde_json::to_string(&Command::ColibriHandled {
+                kind: Some("join".into())
+            })
+            .unwrap(),
+            r#"{"ColibriHandled":{"kind":"join"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::ColibriPresence {
+                kind: "join".into(),
+                text: "Alex joined the game".into(),
+            })
+            .unwrap(),
+            r#"{"ColibriPresence":{"kind":"join","text":"Alex joined the game"}}"#
+        );
         // SaveConfig carries the full Config; the game side sends the Settings
         // subset and container-level serde(default) fills the rest.
         let json = serde_json::to_string(&Command::SaveConfig {
@@ -456,6 +481,10 @@ mod tests {
 
     #[test]
     fn event_wire_shapes() {
+        assert_eq!(
+            serde_json::to_string(&Event::Status("pending approval".into())).unwrap(),
+            r#"{"Status":"pending approval"}"#
+        );
         assert_eq!(
             serde_json::to_string(&Event::Session(session::SessionState::LoggedOut)).unwrap(),
             r#"{"Session":"LoggedOut"}"#

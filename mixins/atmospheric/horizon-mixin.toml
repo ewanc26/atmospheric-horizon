@@ -101,6 +101,25 @@ bindings = [
   { name = "line", ty = "&horizon_client::text::Text", value = "&*line" },
 ]
 
+# If another mod rewrites or hides the vanilla join/leave line, the connection
+# event schedules a fallback notice. The worker waits three seconds and writes
+# it only when no matching broadcast line arrived within five seconds.
+[[injection]]
+id = "colibri-join"
+hook = "player_logged_in"
+hook_version = 1
+kind = "HEAD"
+helper = "colibri_join.rs"
+bindings = [{ name = "name", ty = "&str", value = "name" }]
+
+[[injection]]
+id = "colibri-leave"
+hook = "player_logged_out"
+hook_version = 1
+kind = "HEAD"
+helper = "colibri_leave.rs"
+bindings = [{ name = "name", ty = "&str", value = "name" }]
+
 # Once a tick: drain the worker's events into the HUD status line.
 [[injection]]
 id = "tick"

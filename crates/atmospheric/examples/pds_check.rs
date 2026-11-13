@@ -116,6 +116,7 @@ fn main() {
         colibri_appview_url: "https://api.colibri.social".into(),
         colibri_appview_did: "did:web:api.colibri.social".into(),
         colibri_server_events_enabled: true,
+        colibri_server_events_fallback_enabled: true,
         trusted_server_keys: env::var("ATMOSPHERIC_TRUSTED_SERVER_KEYS")
             .ok()
             .filter(|s| !s.trim().is_empty())

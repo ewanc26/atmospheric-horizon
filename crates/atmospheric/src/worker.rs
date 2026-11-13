@@ -27,7 +27,7 @@ use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::mpsc::{Receiver, Sender},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// The settings file's name inside the mod's storage folder.
@@ -44,6 +44,13 @@ pub const SESSION_FILE: &str = "session.json";
 pub const SERVER_SESSION_FILE: &str = "server-session.json";
 /// Where verified skin/cape blobs downloaded by M14 reads are saved.
 pub const SKINS_DIR: &str = "skins";
+
+/// How long the presence fallback waits for the game or a chat mod to emit a
+/// join/leave line (M29), matching atpcraft's 3-second wait.
+const COLIBRI_PRESENCE_WAIT: Duration = Duration::from_secs(3);
+/// How far around the connection event the fallback looks for a handled line
+/// (M29), matching atpcraft's 5-second window.
+const COLIBRI_PRESENCE_WINDOW: Duration = Duration::from_secs(5);
 
 /// Write a file that holds secrets (app password in `config.json`, the
 /// session/refresh token and DPoP private key in `session.json`, the Ed25519
@@ -281,6 +288,36 @@ struct Worker {
     colibri_task: Option<tokio::task::JoinHandle<()>>,
     /// AT-URIs this worker wrote, so the stream echo does not repeat them.
     colibri_sent: VecDeque<String>,
+    /// The last join, leave and blank/hidden lines used by the M29 presence
+    /// fallback, with the same 5-second window semantics as atpcraft.
+    colibri_last_join: Option<Instant>,
+    colibri_last_leave: Option<Instant>,
+    colibri_last_blank: Option<Instant>,
+    /// When the current bridge generation started. A fallback scheduled before
+    /// a restart must not write into the new channel.
+    colibri_started_at: Option<Instant>,
+}
+
+/// Whether a due connection-event fallback still needs a notice. Only the last
+/// line of each kind matters; a blank line counts for both join and leave.
+fn presence_notice_needed(
+    last_join: Option<Instant>,
+    last_leave: Option<Instant>,
+    last_blank: Option<Instant>,
+    kind: &str,
+    at: Instant,
+) -> bool {
+    let last_kind = match kind {
+        "join" => last_join,
+        "leave" => last_leave,
+        _ => return false,
+    };
+    let within = |time: Option<Instant>| {
+        time.is_some_and(|time| {
+            time <= at + COLIBRI_PRESENCE_WINDOW && at <= time + COLIBRI_PRESENCE_WINDOW
+        })
+    };
+    !within(last_kind) && !within(last_blank)
 }
 
 impl Worker {
@@ -346,6 +383,10 @@ impl Worker {
             colibri_connected: false,
             colibri_task: None,
             colibri_sent: VecDeque::new(),
+            colibri_last_join: None,
+            colibri_last_leave: None,
+            colibri_last_blank: None,
+            colibri_started_at: None,
         }
     }
 
@@ -399,6 +440,8 @@ impl Worker {
             Command::ColibriStatus => self.emit_colibri(None),
             Command::ColibriSend { text, automatic } => self.send_colibri(&text, automatic).await,
             Command::ColibriNotice { text } => self.send_colibri_notice(&text).await,
+            Command::ColibriHandled { kind } => self.mark_colibri_handled(kind.as_deref()),
+            Command::ColibriPresence { kind, text } => self.schedule_colibri_fallback(&kind, text),
             Command::PostText { text } => {
                 self.ensure_oauth_fresh().await;
                 let result = match (&self.agent, &self.did) {
@@ -1946,11 +1989,28 @@ impl Worker {
             return;
         };
         let membership_rkey = self.tid.next_tid();
-        if let Err(error) =
-            colibri::ensure_membership(agent, &server_did, &channel, &membership_rkey).await
+        let created = match colibri::ensure_membership(
+            agent,
+            &server_did,
+            &channel,
+            &membership_rkey,
+        )
+        .await
         {
-            self.fail(format!("could not declare Colibri membership: {error}"));
-            return;
+            Ok(created) => created,
+            Err(error) => {
+                self.fail(format!("could not declare Colibri membership: {error}"));
+                return;
+            }
+        };
+        if created
+            && colibri::requires_approval(&self.http, &self.resolver, &channel.community_did).await
+                == Some(true)
+        {
+            self.emit(Event::Status(
+                "Colibri membership is pending; a moderator must approve it before messages appear."
+                    .into(),
+            ));
         }
         let aud = colibri::appview_service_ref(&config.colibri_appview_did);
         let token = match colibri::service_auth(agent, &aud, colibri::SUBSCRIBE_EVENTS_LXM).await {
@@ -1964,6 +2024,7 @@ impl Worker {
         self.colibri_channel = Some(channel);
         self.colibri_connected = false;
         self.colibri_sent.clear();
+        self.colibri_started_at = Some(Instant::now());
         let tx = self.colibri_tx.clone();
         let appview = config.colibri_appview_url.clone();
         self.colibri_task = Some(tokio::spawn(async move {
@@ -1980,6 +2041,10 @@ impl Worker {
         self.colibri_channel = None;
         self.colibri_connected = false;
         self.colibri_sent.clear();
+        self.colibri_last_join = None;
+        self.colibri_last_leave = None;
+        self.colibri_last_blank = None;
+        self.colibri_started_at = None;
         if announce {
             self.emit_colibri(None);
         }
@@ -2011,6 +2076,11 @@ impl Worker {
                 self.emit_colibri(Some(error));
             }
             StreamEvent::Rotate => self.start_colibri().await,
+            StreamEvent::FallbackDue { kind, text, at } => {
+                if self.colibri_presence_needed(&kind, at) {
+                    self.send_colibri_notice(&text).await;
+                }
+            }
             StreamEvent::Message(message) => {
                 let Some(channel) = &self.colibri_channel else {
                     return;
@@ -2071,6 +2141,75 @@ impl Worker {
             Err(error) if !automatic => self.fail(error.to_string()),
             Err(_) => {}
         }
+    }
+
+    /// Record a join/leave (or blank/hidden) line for the M29 fallback. This
+    /// mirrors atpcraft's `ColibriPresenceFallback`: only the latest time per
+    /// kind matters, and a blank line counts for both join and leave.
+    fn mark_colibri_handled(&mut self, kind: Option<&str>) {
+        if self.colibri_channel.is_none() {
+            return;
+        }
+        let Ok(config) = self.load_config() else {
+            return;
+        };
+        if !config.colibri_server_events_enabled {
+            return;
+        }
+        let now = Instant::now();
+        match kind {
+            Some("join") => self.colibri_last_join = Some(now),
+            Some("leave") => self.colibri_last_leave = Some(now),
+            Some(_) => {}
+            None => self.colibri_last_blank = Some(now),
+        }
+    }
+
+    /// Schedule the presence fallback for a connection event (M29). The timer
+    /// runs off-thread and comes back through the Colibri event channel, so the
+    /// command loop stays responsive.
+    fn schedule_colibri_fallback(&self, kind: &str, text: String) {
+        if self.colibri_channel.is_none() || text.trim().is_empty() {
+            return;
+        }
+        let Ok(config) = self.load_config() else {
+            return;
+        };
+        if !config.colibri_server_events_enabled || !config.colibri_server_events_fallback_enabled {
+            return;
+        }
+        let at = Instant::now();
+        let tx = self.colibri_tx.clone();
+        let kind = kind.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(COLIBRI_PRESENCE_WAIT).await;
+            let _ = tx.send(StreamEvent::FallbackDue { kind, text, at });
+        });
+    }
+
+    /// Whether a due fallback still needs to write. The event must belong to
+    /// the current bridge generation, both switches must still be on, and no
+    /// join/leave or blank line may have arrived within the window.
+    fn colibri_presence_needed(&self, kind: &str, at: Instant) -> bool {
+        if self.colibri_channel.is_none() {
+            return false;
+        }
+        if self.colibri_started_at.is_none_or(|started| at < started) {
+            return false;
+        }
+        let Ok(config) = self.load_config() else {
+            return false;
+        };
+        if !config.colibri_server_events_enabled || !config.colibri_server_events_fallback_enabled {
+            return false;
+        }
+        presence_notice_needed(
+            self.colibri_last_join,
+            self.colibri_last_leave,
+            self.colibri_last_blank,
+            kind,
+            at,
+        )
     }
 
     /// Relay one classified server broadcast as the server account (M28).
@@ -2200,6 +2339,7 @@ mod tests {
             colibri_appview_url: "https://api.colibri.social".into(),
             colibri_appview_did: "did:web:api.colibri.social".into(),
             colibri_server_events_enabled: true,
+            colibri_server_events_fallback_enabled: true,
         }
     }
 
@@ -2605,7 +2745,7 @@ mod tests {
                 // The stub doubles as the PLC directory; the DID documents
                 // advertise the stub itself as PDS and (for the labeler DIDs)
                 // labeler service endpoint.
-                "/did:plc:stubuser" | "/did:plc:labeler" => {
+                "/did:plc:stubuser" | "/did:plc:labeler" | "/did:plc:community" => {
                     let doc = serde_json::json!({
                         "@context": ["https://www.w3.org/ns/did/v1"],
                         "id": "did:plc:stubuser",
@@ -3020,6 +3160,32 @@ mod tests {
     }
 
     #[test]
+    fn colibri_requires_approval_reads_the_community_record() {
+        let pds = StubPds::start(false);
+        pds.seed_record(
+            colibri::COMMUNITY_COLLECTION,
+            "self",
+            serde_json::json!({
+                "$type": colibri::COMMUNITY_COLLECTION,
+                "requiresApprovalToJoin": true
+            }),
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(colibri::requires_approval(
+            &reqwest::Client::new(),
+            &stub_resolver(&pds.url),
+            "did:plc:community",
+        ));
+        assert_eq!(result, Some(true));
+        assert!(
+            pds.requests()
+                .iter()
+                .any(|request| request.path.starts_with("/xrpc/com.atproto.repo.getRecord")),
+            "the community record is read over getRecord"
+        );
+    }
+
+    #[test]
     fn colibri_membership_is_created_once() {
         let pds = StubPds::start(false);
         let config = test_config(pds.url.clone());
@@ -3126,6 +3292,7 @@ mod tests {
             colibri_appview_url: "https://api.colibri.social".into(),
             colibri_appview_did: "did:web:api.colibri.social".into(),
             colibri_server_events_enabled: true,
+            colibri_server_events_fallback_enabled: true,
         };
         command_tx
             .send(Command::SaveConfig {
@@ -4352,6 +4519,35 @@ mod tests {
         assert!(queries[0].contains("uriPatterns=did%3Aplc%3Astubuser"));
         assert!(queries[0].contains("limit=100"));
         assert!(queries[1].contains("cursor=2"));
+    }
+
+    #[test]
+    fn presence_fallback_uses_the_five_second_window() {
+        let at = Instant::now();
+        assert!(presence_notice_needed(None, None, None, "join", at));
+        assert!(!presence_notice_needed(
+            Some(at + COLIBRI_PRESENCE_WINDOW),
+            None,
+            None,
+            "join",
+            at
+        ));
+        assert!(presence_notice_needed(
+            Some(at + COLIBRI_PRESENCE_WINDOW + Duration::from_nanos(1)),
+            None,
+            None,
+            "join",
+            at
+        ));
+        assert!(!presence_notice_needed(
+            None,
+            None,
+            Some(at + Duration::from_secs(4)),
+            "leave",
+            at
+        ));
+        assert!(presence_notice_needed(None, Some(at), None, "join", at));
+        assert!(!presence_notice_needed(None, None, None, "death", at));
     }
 
     /// A resolver pointing handle resolution and the PLC directory at the
