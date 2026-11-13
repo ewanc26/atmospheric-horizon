@@ -113,6 +113,13 @@ pub enum GameCommand {
     },
     /// Claim a server identity pairing code as the logged-in player (M36).
     ClaimServerLink { code: String },
+    /// Ask the identity service for a one-time browser link URL (M39). The
+    /// game passes the acting player's UUID and name; the browser cannot
+    /// choose or change the UUID.
+    StartBrowserLink {
+        player_uuid: String,
+        player_name: String,
+    },
     /// Publish the player's state as an `at.atpcraft.player.snapshot` record
     /// (M6, atpcraft port).
     PostSnapshot { summary: SnapshotSummary },
@@ -530,6 +537,13 @@ pub enum ModEvent {
     },
     /// A new local-player Colibri membership needs approval (M32).
     ColibriMembershipPending { message: String },
+    /// A one-time browser link URL (M39); only the requesting player should
+    /// see it.
+    BrowserLink {
+        player_uuid: String,
+        url: String,
+        expires_at: u64,
+    },
 }
 
 /// The HUD wording for an endorsement verdict (M13/M14).
@@ -771,6 +785,9 @@ pub fn status_text(event: &ModEvent) -> String {
         ModEvent::ColibriMembershipPending { message } => {
             format!("[Colibri] {}", clean_remote(message, COLIBRI_MAX_TEXT))
         }
+        ModEvent::BrowserLink { url, .. } => {
+            format!("atmospheric: link your Bluesky account at {url}")
+        }
         ModEvent::SocialGraph {
             kind,
             subject,
@@ -956,6 +973,25 @@ pub fn drain_events(max: usize) -> Vec<ModEvent> {
             prompts.remove(0);
         }
     }
+    if let Ok(mut links) = REMOTE_BROWSER_LINKS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+    {
+        for event in &drained {
+            if let ModEvent::BrowserLink {
+                player_uuid, url, ..
+            } = event
+            {
+                links.push(RemoteBrowserLink {
+                    player_uuid: player_uuid.clone(),
+                    url: url.clone(),
+                });
+            }
+        }
+        while links.len() > 32 {
+            links.remove(0);
+        }
+    }
     if let Ok(mut status) = status_slot().lock() {
         let now = std::time::Instant::now();
         prune_expired(&mut status, now);
@@ -1041,12 +1077,30 @@ fn remote_prompt_lines(url: &str) -> Vec<String> {
     ]
 }
 
+/// A one-time browser URL queued for one player (M39).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteBrowserLink {
+    pub player_uuid: String,
+    pub url: String,
+}
+
+static REMOTE_BROWSER_LINKS: OnceLock<Mutex<Vec<RemoteBrowserLink>>> = OnceLock::new();
+
 /// Take the targeted player prompts queued for server-side delivery (M37).
 pub fn drain_colibri_prompts() -> Vec<RemoteColibriPrompt> {
     REMOTE_COLIBRI_PROMPTS
         .get_or_init(|| Mutex::new(Vec::new()))
         .lock()
         .map(|mut prompts| std::mem::take(&mut *prompts))
+        .unwrap_or_default()
+}
+
+/// Take the one-time browser links queued for targeted delivery (M39).
+pub fn drain_browser_links() -> Vec<RemoteBrowserLink> {
+    REMOTE_BROWSER_LINKS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .map(|mut links| std::mem::take(&mut *links))
         .unwrap_or_default()
 }
 
@@ -1220,6 +1274,14 @@ pub fn post_colibri_presence(kind: &str, text: &str) {
     send(GameCommand::ColibriPresence {
         kind: kind.into(),
         text: text.into(),
+    });
+}
+
+/// Start a one-time browser link for an online player (M39).
+pub fn start_browser_link(player_uuid: String, player_name: &str) {
+    send(GameCommand::StartBrowserLink {
+        player_uuid,
+        player_name: player_name.into(),
     });
 }
 
@@ -2063,6 +2125,16 @@ fn encode_command(command: &GameCommand) -> String {
         GameCommand::ClaimServerLink { code } => {
             jobj(vec![("ClaimServerLink", jobj(vec![("code", jstr(code))]))])
         }
+        GameCommand::StartBrowserLink {
+            player_uuid,
+            player_name,
+        } => jobj(vec![(
+            "StartBrowserLink",
+            jobj(vec![
+                ("player_uuid", jstr(player_uuid)),
+                ("player_name", jstr(player_name)),
+            ]),
+        )]),
         GameCommand::PostSnapshot { summary } => jobj(vec![(
             "PostSnapshot",
             jobj(vec![(
@@ -2565,6 +2637,14 @@ fn decode_event(line: &str) -> Option<ModEvent> {
             let obj = payload_obj()?;
             Some(ModEvent::ColibriMembershipPending {
                 message: req_str(obj, "message")?,
+            })
+        }
+        "BrowserLink" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::BrowserLink {
+                player_uuid: req_str(obj, "player_uuid")?,
+                url: req_str(obj, "url")?,
+                expires_at: req_int(obj, "expires_at")? as u64,
             })
         }
         _ => None,
@@ -3555,6 +3635,13 @@ mod tests {
             }),
             r#"{"ClaimServerLink":{"code":"ABCD-EFGH"}}"#
         );
+        assert_eq!(
+            encode_command(&GameCommand::StartBrowserLink {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
+            }),
+            r#"{"StartBrowserLink":{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}}"#
+        );
         // The flat game-side x/y/z map onto the nested `position` object.
         assert_eq!(
             encode_command(&GameCommand::PostSnapshot {
@@ -3681,6 +3768,13 @@ mod tests {
             r#"{"ClaimServerLink":{"code":"ABCD-EFGH"}}"#
         );
         assert_eq!(
+            encode_command(&GameCommand::StartBrowserLink {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
+            }),
+            r#"{"StartBrowserLink":{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}}"#
+        );
+        assert_eq!(
             encode_command(&GameCommand::PostDeathMessage { text: "t".into() }),
             r#"{"PostDeathMessage":{"text":"t"}}"#
         );
@@ -3799,6 +3893,16 @@ mod tests {
             ),
             Some(ModEvent::ColibriMembershipPending {
                 message: "Your join is pending. A moderator must approve it.".into(),
+            })
+        );
+        assert_eq!(
+            decode_event(
+                r#"{"BrowserLink":{"player_uuid":"00000000-0000-4000-8000-000000000001","url":"https://links.example/link/token","expires_at":1800}}"#
+            ),
+            Some(ModEvent::BrowserLink {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                url: "https://links.example/link/token".into(),
+                expires_at: 1800,
             })
         );
         assert_eq!(

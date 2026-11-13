@@ -79,6 +79,10 @@ pub struct Config {
     /// Base URL of the optional M35 identity service (M36). Empty disables
     /// `/atmospheric link`; no request is made unless that command is used.
     pub server_api_url: String,
+    /// Shared secret the game server sends to `POST /v1/browser/pairings` when
+    /// a player starts a browser link (M39). Empty disables the browser flow;
+    /// it is a server-only secret and should never be published.
+    pub server_link_token: String,
     /// Enforce the join gate at the server login phase (M38). A joining
     /// player's UUID must resolve through `server_api_url` to a linked DID on
     /// `join_gate_list`. Off by default. When on, an empty list or an
@@ -133,6 +137,7 @@ impl Default for Config {
             game_version: "26.3".into(),
             appview_url: crate::lists::DEFAULT_APPVIEW.into(),
             server_api_url: String::new(),
+            server_link_token: String::new(),
             join_gate_enabled: false,
             join_gate_list: String::new(),
             trusted_server_keys: Vec::new(),
@@ -201,6 +206,7 @@ mod tests {
             game_version: "26.3".into(),
             appview_url: crate::lists::DEFAULT_APPVIEW.into(),
             server_api_url: "https://identity.example".into(),
+            server_link_token: "server-link-secret".into(),
             join_gate_enabled: true,
             join_gate_list: "at://did:plc:owner/app.bsky.graph.list/3gate".into(),
             trusted_server_keys: vec![TrustedServerKey {
@@ -227,6 +233,7 @@ mod tests {
         assert_eq!(back.colibri_channel_uri, config.colibri_channel_uri);
         assert_eq!(back.colibri_appview_url, "https://appview.example");
         assert_eq!(back.server_api_url, "https://identity.example");
+        assert_eq!(back.server_link_token, "server-link-secret");
         assert!(back.join_gate_enabled);
         assert_eq!(
             back.join_gate_list,

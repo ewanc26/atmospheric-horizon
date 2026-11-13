@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 const CLAIM_PATH: &str = "/v1/pairings/claim";
 const LINKS_PATH: &str = "/v1/links";
+const BROWSER_LINK_PATH: &str = "/v1/browser/pairings";
 
 #[derive(Debug, Serialize)]
 struct ClaimRequest<'a> {
@@ -18,6 +19,19 @@ struct ClaimRequest<'a> {
     did: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     handle: Option<&'a str>,
+}
+
+/// The one-time browser URL returned for an online player (M39).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct BrowserLink {
+    pub url: String,
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct BrowserLinkRequest<'a> {
+    player_uuid: &'a str,
+    player_name: &'a str,
 }
 
 /// The link returned by the identity service after a successful claim.
@@ -117,6 +131,60 @@ pub async fn fetch_link(
         ));
     }
     Ok(Some(link))
+}
+
+/// Ask the identity service for a one-time browser link URL (M39). The game
+/// server authenticates with its shared link token; the returned URL is shown
+/// only to that player. The UUID is not sent by the browser and cannot be
+/// chosen by it.
+pub async fn start_browser_link(
+    http: &reqwest::Client,
+    base: &str,
+    link_token: &str,
+    player_uuid: &str,
+    player_name: &str,
+) -> Result<BrowserLink> {
+    if link_token.trim().is_empty() {
+        return Err(AtmosphericError::Message(
+            "server_link_token is not configured".into(),
+        ));
+    }
+    if !valid_uuid(player_uuid) {
+        return Err(AtmosphericError::Message(
+            "player_uuid must be a canonical hyphenated Minecraft UUID".into(),
+        ));
+    }
+    if player_name.trim().is_empty() {
+        return Err(AtmosphericError::Message("player_name is empty".into()));
+    }
+    let url = service_url(base, BROWSER_LINK_PATH)?;
+    let response = http
+        .post(url)
+        .bearer_auth(link_token.trim())
+        .json(&BrowserLinkRequest {
+            player_uuid,
+            player_name: player_name.trim(),
+        })
+        .send()
+        .await
+        .map_err(AtmosphericError::protocol)?;
+    let status = response.status();
+    let text = response.text().await.map_err(AtmosphericError::protocol)?;
+    if !status.is_success() {
+        return Err(AtmosphericError::Message(format!(
+            "server identity service: {}",
+            service_error(status, &text)
+        )));
+    }
+    let link: BrowserLink = serde_json::from_str(&text)?;
+    if !(link.url.starts_with("http://") || link.url.starts_with("https://"))
+        || link.expires_at == 0
+    {
+        return Err(AtmosphericError::Message(
+            "server identity service returned an invalid browser link".into(),
+        ));
+    }
+    Ok(link)
 }
 
 /// Claim a pairing code as `did`. The service owns the code-to-UUID binding,
@@ -320,6 +388,45 @@ mod tests {
     fn claim_rejects_a_non_http_base() {
         let error = claim_url("file:///tmp/identity").unwrap_err();
         assert!(error.to_string().contains("server_api_url"));
+    }
+
+    #[test]
+    fn browser_link_posts_the_uuid_and_name() {
+        let stub = start(
+            "201 Created",
+            r#"{"url":"https://links.example/link/token","expires_at":1800}"#,
+        );
+        let link = runtime()
+            .block_on(start_browser_link(
+                &reqwest::Client::new(),
+                &format!("{}/", stub.url),
+                "server-link-secret",
+                "00000000-0000-4000-8000-000000000001",
+                "Alex",
+            ))
+            .unwrap();
+        assert_eq!(link.url, "https://links.example/link/token");
+        assert_eq!(link.expires_at, 1800);
+        let requests = stub.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, "/v1/browser/pairings");
+        let body: serde_json::Value = serde_json::from_str(&requests[0].1).unwrap();
+        assert_eq!(body["player_uuid"], "00000000-0000-4000-8000-000000000001");
+        assert_eq!(body["player_name"], "Alex");
+    }
+
+    #[test]
+    fn browser_link_requires_its_shared_token() {
+        let error = runtime()
+            .block_on(start_browser_link(
+                &reqwest::Client::new(),
+                "https://links.example",
+                "",
+                "00000000-0000-4000-8000-000000000001",
+                "Alex",
+            ))
+            .unwrap_err();
+        assert!(error.to_string().contains("server_link_token"));
     }
 
     #[test]
