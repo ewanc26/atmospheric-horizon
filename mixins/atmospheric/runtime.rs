@@ -1555,6 +1555,18 @@ fn decode_event(line: &str) -> Option<ModEvent> {
 mod tests {
     use super::*;
 
+    /// `VERSION` is shown in Options > Mods and names the release, while the
+    /// package version drives the worker binary and the tag. Pin them together
+    /// so a release bump cannot leave the mod row behind. When horizon-mixins
+    /// injects this module into the game crate, `CARGO_PKG_NAME` is Horizon's,
+    /// so the check only applies to the standalone library package.
+    #[test]
+    fn version_matches_the_package() {
+        if env!("CARGO_PKG_NAME") == "atmospheric-horizon" {
+            assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
+        }
+    }
+
     // The channel endpoints live in statics, so the tests share one entry
     // point instead of racing over them in parallel.
     #[test]
