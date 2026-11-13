@@ -17,9 +17,11 @@ This is the successor to [jollywhoppers-socialsync](https://github.com/ewanc26/j
 
 **v0.2.0** (13 November 2026) is the current release. The mod is usable in-game today through the `atmospheric-worker` sidecar: the injected runtime is std-only, and every network or disk operation happens in the worker. Public reads work signed out; posting and record writes need a Bluesky account.
 
-Shipped so far: OAuth and app-password login, text and screenshot posts, notifications, atpcraft-compatible chat, signed snapshots and skins, a server profile, read sides for lists, labels, presence, skins, chat history and server profiles, social-graph reads, and reply/like/repost.
+Shipped in v0.2.0: OAuth and app-password login, text and screenshot posts, notifications, atpcraft-compatible chat, signed snapshots and skins, a server profile, read sides for lists, labels, presence, skins, chat history and server profiles, social-graph reads, and reply/like/repost.
 
-Not yet: launcher registry distribution, which waits on third-party native-mod support upstream ([#28](https://github.com/ewanc26/atmospheric-horizon/issues/28)); label issuance and join-gate enforcement, which stay server-side; and writing follows, blocks or mutes.
+On `main` for the next release: social-graph writes — follow/unfollow, block/unblock and mute/unmute (`M23`).
+
+Not yet: launcher registry distribution, which waits on third-party native-mod support upstream ([#28](https://github.com/ewanc26/atmospheric-horizon/issues/28)); and label issuance and join-gate enforcement, which stay server-side.
 
 ## Features
 
@@ -28,6 +30,7 @@ Not yet: launcher registry distribution, which waits on third-party native-mod s
 - **Notifications in the HUD.** A digest line, a poll timer and a cursor that survives restarts.
 - **atpcraft-compatible records.** Chat messages, Ed25519-endorsed snapshots and skins with blob uploads, and a server descriptor at rkey `self`.
 - **Read the public side.** List membership (with a fail-closed gate decision), labels and labeler queries, player presence, skins, chat history, server profiles, and follows/followers/blocks/mutes.
+- **Shape your social graph.** Follow, unfollow, block, unblock, mute or unmute an account from its DID or handle.
 - **Sign in properly.** OAuth in the system browser (PAR + PKCE + DPoP, loopback redirect), with app passwords as the fallback.
 - **Never block the game.** All network and disk I/O lives on one worker thread; the game thread only exchanges JSON lines with it.
 - **No surprises.** Writes go to your own PDS, public reads go to the configured AppView or the subject's PDS, and nothing is sent anywhere else.
@@ -98,6 +101,7 @@ All commands are under `/atmospheric`:
 | `skin-of <did\|handle>` | Read a verified skin and download its blobs |
 | `chat-of <did\|handle>` | Read a player's mirrored chat history |
 | `follows\|followers\|blocks\|mutes <did\|handle>` | Read a public social graph |
+| `follow\|unfollow\|block\|unblock\|mute\|unmute <did\|handle>` | Write one relationship |
 | `reply <at-uri> <text>` | Reply to a post |
 | `like <at-uri>` | Like a post |
 | `repost <at-uri>` | Repost a post |
@@ -131,7 +135,7 @@ The app password is the only secret in `config.json`; OAuth sessions never store
 
 ## Roadmap
 
-M1–M21 are shipped, through v0.1.0 and v0.2.0; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, the server-side halves a client mod cannot host, and the next read/write surfaces.
+M1–M21 are shipped, through v0.1.0 and v0.2.0, and M23 (social-graph writes) is on `main` for the next release; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, the server-side halves a client mod cannot host, and the next read/write surfaces.
 
 ### Porting atpcraft
 
@@ -171,6 +175,7 @@ All of these are unauthenticated, and the query carries only the subject's DID o
 - **Chat history (M16):** `com.atproto.repo.listRecords` for `at.atpcraft.player.chat` against the subject's own PDS for `/atmospheric chat-of`. Chat records are unsigned by design, so nothing is verified.
 - **Server profiles (M19):** `com.atproto.repo.listRecords` for `at.atpcraft.server.profile` against the subject's own PDS for `/atmospheric server-of`.
 - **Social graphs (M20):** `app.bsky.graph.getFollows`, `getFollowers`, `getBlocks` and `getMutes` (paged, limit 100) against `appview_url` for `/atmospheric follows|followers|blocks|mutes`. The member list comes back to you; nothing about you goes out.
+- **Social-graph write lookups (M23):** undoing a follow or block uses `com.atproto.repo.listRecords` for `app.bsky.graph.follow`/`block` against your own PDS (public, unauthenticated) to find records whose `subject` is the target DID. The create/delete/mute calls themselves are in the writes section below.
 - **Interaction targets (M21):** `com.atproto.repo.getRecord` from the target author's PDS (query: their DID, collection `app.bsky.feed.post`, and record key) to obtain the post's CID and, for replies, its thread root.
 
 ### Writes to your PDS
@@ -182,6 +187,10 @@ All of these are unauthenticated, and the query carries only the subject's DID o
 - Skins use `com.atproto.repo.uploadBlob` for each PNG, `com.atproto.repo.getRecord` to keep other servers' endorsements, then `com.atproto.repo.putRecord` in `at.atpcraft.player.skin` at the endorsing key id.
 - The server profile uses `com.atproto.repo.getRecord` to preserve `createdAt`, then `com.atproto.repo.putRecord` in `at.atpcraft.server.profile` at rkey `self`.
 - Interactions use `com.atproto.repo.createRecord`: `app.bsky.feed.like` or `app.bsky.feed.repost` with a `subject` strong ref `{uri, cid}`, or an `app.bsky.feed.post` with `text`, `createdAt` and `reply: {root, parent}` strong refs.
+- Social-graph writes (M23) resolve the subject to a DID, then:
+  - `/atmospheric follow` and `/atmospheric block` write `app.bsky.graph.follow` / `app.bsky.graph.block` with `subject` and `createdAt`, keyed by a fresh TID.
+  - `/atmospheric unfollow` and `/atmospheric unblock` find matching records in your own repo (the `listRecords` read above) and delete each with `com.atproto.repo.deleteRecord`.
+  - `/atmospheric mute` and `/atmospheric unmute` call `app.bsky.graph.muteActor` / `unmuteActor` on the AppView. Mutes are private and create no record. No new data is stored locally.
 
 ### Stored on disk
 
@@ -202,7 +211,7 @@ No telemetry, no analytics, no other endpoints.
 ## Layout
 
 - `mixins/atmospheric/` — horizon-mixins declarations: the injected std-only `runtime.rs` (which also spawns and bridges the sidecar), its placeholder hook, and `horizon-mixin.toml`.
-- `crates/atmospheric/` — the protocol library: `config`, `session`, `oauth` (M8), `actions`, `notifications`, `lists` (M11/M15), `labels` (M12), `presence` (M13), `skins` (M14), `chats` (M16), `servers` (M19), `graph` (M20), `interactions` (M21), `records` (atpcraft lexicon types), `tid`, `signing` (Ed25519 endorsements) and `worker`, plus the `atmospheric-worker` bin and its end-to-end test (`tests/sidecar.rs`).
+- `crates/atmospheric/` — the protocol library: `config`, `session`, `oauth` (M8), `actions`, `notifications`, `lists` (M11/M15), `labels` (M12), `presence` (M13), `skins` (M14), `chats` (M16), `servers` (M19), `graph` (M20 reads/M23 writes), `interactions` (M21), `records` (atpcraft lexicon types), `tid`, `signing` (Ed25519 endorsements) and `worker`, plus the `atmospheric-worker` bin and its end-to-end test (`tests/sidecar.rs`).
 - `oauth-client-metadata.json` — the OAuth client metadata document to host when an authorization server does not support the loopback client ([#21](https://github.com/ewanc26/atmospheric-horizon/issues/21)).
 - `compatibility.json` — the pinned Horizon and horizon-mixins revisions the bundle is built against.
 - `CHANGELOG.md` — release notes and the release process.

@@ -49,15 +49,17 @@ Everything else, with zero Horizon imports so it builds and tests with plain
 - `config` — settings, stored under the mod's own folder
 - `session` — `AtpAgent` construction and app-password login
 - `actions` — `create_record` posts (text, and image posts with an
-  `app.bsky.embed.images` embed after `uploadBlob`); MIME sniffing and PNG
-  dimensions are pure helpers here
+  `app.bsky.embed.images` embed after `uploadBlob`), plus the M23 record
+  delete and mute/unmute calls; MIME sniffing and PNG dimensions are pure
+  helpers here
 - `notifications` — polling with a persisted seen-cursor (dedup across
   restarts, the pattern bsky-bot-sdk uses)
 - `lists` — M11 public list reads (`app.bsky.graph.getList` pagination) and
   the M15 join-gate decision (`check_gate`)
 - `graph` — M20 social-graph reads (`app.bsky.graph.getFollows`/
   `getFollowers`/`getBlocks`/`getMutes` pagination on the public AppView,
-  reduced to DID/handle/display name)
+  reduced to DID/handle/display name) and M23 writes (`follow`/`block`
+  records, their removal, and the expected record shapes)
 - `interactions` — M21 replies, likes and reposts (unauthenticated
   `com.atproto.repo.getRecord` for the target's strong ref and thread root,
   then `app.bsky.feed.post`/`like`/`repost` records in your own repo)
@@ -671,6 +673,40 @@ a worker test against the stub PDS (login, then like/repost/reply create the
 right records with the right strong refs; target reads are unauthenticated; a
 non-post target writes nothing). Manual check: `pds_check` with
 `ATMOSPHERIC_LIKE`, `ATMOSPHERIC_REPOST` or `ATMOSPHERIC_REPLY`.
+
+### M23: social-graph writes (`app.bsky.graph.*`)
+
+`/atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>` sends
+`Command::GraphWrite { action, subject }`. Every action needs a session and
+resolves the subject to a DID before it writes:
+
+1. `graph::GraphAction::from_key` rejects an unknown action, and the worker
+   refuses a target equal to the logged-in DID before any HTTP call.
+2. `follow` and `block` create a TID-keyed `app.bsky.graph.follow` / `block`
+   record with `subject` and `createdAt` via `com.atproto.repo.createRecord`.
+3. `unfollow` and `unblock` page `com.atproto.repo.listRecords` for the
+   matching collection on your own PDS (public repos serve it without auth),
+   select the records whose `subject` is the target DID, and delete each with
+   `com.atproto.repo.deleteRecord`. No matching record is a `Failed` event
+   ("you are not following/blocking …").
+4. `mute` and `unmute` call the AppView's `app.bsky.graph.muteActor` /
+   `unmuteActor`. Mutes are private state, not repo records.
+
+The worker emits `Event::GraphChanged { action, subject }`; the game side
+mirrors it as plain data and the HUD shows "atmospheric: followed
+did:plc:…" (or the matching past tense). The sidecar wire shapes are pinned
+in `lib.rs` and the runtime encode/decode tests.
+
+README "Network use" documents the new endpoints and fields, including the
+unauthenticated own-repo `listRecords` lookup. No new data is stored on disk.
+
+Verified: `graph` unit tests (action round-trip, record shapes, subject
+matching) and a worker test against the stub PDS (all six actions, follow and
+block creation with the target DID, old and new records deleted, mute calls
+authenticated, a missing relationship failing with its reason, and a
+self-action failing before any HTTP request). Native staging compiles the
+mixin command parser; the network calls themselves were not re-run against a
+real PDS in this change.
 
 ### M17: the sidecar worker process (issue #2 option 3, #40)
 

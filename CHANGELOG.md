@@ -12,6 +12,15 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+### Added
+
+- **M23 — social-graph writes (#60).** `/atmospheric follow`, `unfollow`,
+  `block`, `unblock`, `mute` and `unmute` take a DID or handle. Follows and
+  blocks are TID-keyed `app.bsky.graph.follow` / `block` records in your own
+  repo; undoing them lists the matching record and deletes it. Mutes use
+  `app.bsky.graph.muteActor` / `unmuteActor`. Self-actions are refused, and
+  success reports a `GraphChanged` HUD line.
+
 ### Changed
 
 - **Horizon compatibility bump (#8).** The pinned Horizon revision moves from
