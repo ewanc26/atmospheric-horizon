@@ -131,6 +131,13 @@ pub enum GameCommand {
     /// "follows", "followers", "blocks" or "mutes", and `subject` is a DID
     /// or a handle. Works logged out.
     FetchGraph { kind: String, subject: String },
+    /// Reply to a post (M21): publish an `app.bsky.feed.post` with
+    /// `reply: { root, parent }` strong refs after reading the target's CID.
+    Reply { uri: String, text: String },
+    /// Like a post (M21): publish an `app.bsky.feed.like` strong-ref record.
+    Like { uri: String },
+    /// Repost a post (M21): publish an `app.bsky.feed.repost` strong-ref record.
+    Repost { uri: String },
     /// Post the player's death message (only when `post_death_messages` is on).
     PostDeathMessage { text: String },
     /// Log out: drop the session and delete the persisted refresh token.
@@ -890,6 +897,25 @@ pub fn fetch_graph(kind: &str, subject: &str) {
     });
 }
 
+/// Ask the worker to reply to a post (M21). `uri` is an
+/// `at://…/app.bsky.feed.post/<rkey>` URI or a bsky.app post URL.
+pub fn reply(uri: &str, text: &str) {
+    send(GameCommand::Reply {
+        uri: uri.into(),
+        text: text.into(),
+    });
+}
+
+/// Ask the worker to like a post (M21).
+pub fn like(uri: &str) {
+    send(GameCommand::Like { uri: uri.into() });
+}
+
+/// Ask the worker to repost a post (M21).
+pub fn repost(uri: &str) {
+    send(GameCommand::Repost { uri: uri.into() });
+}
+
 /// Ask the worker to post a death message (published only when the settings
 /// enable `post_death_messages`).
 pub fn post_death_message(text: &str) {
@@ -1472,6 +1498,12 @@ fn encode_command(command: &GameCommand) -> String {
             "FetchGraph",
             jobj(vec![("kind", jstr(kind)), ("subject", jstr(subject))]),
         )]),
+        GameCommand::Reply { uri, text } => jobj(vec![(
+            "Reply",
+            jobj(vec![("uri", jstr(uri)), ("text", jstr(text))]),
+        )]),
+        GameCommand::Like { uri } => jobj(vec![("Like", jobj(vec![("uri", jstr(uri))]))]),
+        GameCommand::Repost { uri } => jobj(vec![("Repost", jobj(vec![("uri", jstr(uri))]))]),
         GameCommand::PostDeathMessage { text } => {
             jobj(vec![("PostDeathMessage", jobj(vec![("text", jstr(text))]))])
         }
@@ -1840,6 +1872,9 @@ mod tests {
         fetch_player_skin("someone.example");
         fetch_server_profile("someone.example");
         fetch_graph("follows", "someone.example");
+        reply("at://did:plc:example/app.bsky.feed.post/3abc", "nice");
+        like("at://did:plc:example/app.bsky.feed.post/3abc");
+        repost("at://did:plc:example/app.bsky.feed.post/3abc");
         check_gate(
             "at://did:plc:example/app.bsky.graph.list/3abc",
             "did:plc:example",
@@ -1933,6 +1968,21 @@ mod tests {
             }
             other => panic!("expected FetchGraph, got {:?}", other),
         }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::Reply { uri, text }) => {
+                assert_eq!(uri, "at://did:plc:example/app.bsky.feed.post/3abc");
+                assert_eq!(text, "nice");
+            }
+            other => panic!("expected Reply, got {:?}", other),
+        }
+        assert!(matches!(
+            command_rx.recv_timeout(std::time::Duration::from_secs(5)),
+            Ok(GameCommand::Like { .. })
+        ));
+        assert!(matches!(
+            command_rx.recv_timeout(std::time::Duration::from_secs(5)),
+            Ok(GameCommand::Repost { .. })
+        ));
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::CheckGate { list, subject }) => {
                 assert_eq!(list, "at://did:plc:example/app.bsky.graph.list/3abc");
@@ -2413,6 +2463,25 @@ mod tests {
                 subject: "did:plc:z".into(),
             }),
             r#"{"FetchGraph":{"kind":"follows","subject":"did:plc:z"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::Reply {
+                uri: "at://did:plc:z/app.bsky.feed.post/1".into(),
+                text: "nice".into(),
+            }),
+            r#"{"Reply":{"uri":"at://did:plc:z/app.bsky.feed.post/1","text":"nice"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::Like {
+                uri: "at://did:plc:z/app.bsky.feed.post/1".into()
+            }),
+            r#"{"Like":{"uri":"at://did:plc:z/app.bsky.feed.post/1"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::Repost {
+                uri: "at://did:plc:z/app.bsky.feed.post/1".into()
+            }),
+            r#"{"Repost":{"uri":"at://did:plc:z/app.bsky.feed.post/1"}}"#
         );
         assert_eq!(
             encode_command(&GameCommand::PostDeathMessage { text: "t".into() }),

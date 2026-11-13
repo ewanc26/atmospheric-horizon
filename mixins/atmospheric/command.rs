@@ -13,7 +13,9 @@
 // downloads the blobs (M14); /atmospheric chat-of <did|handle> reads their
 // mirrored chat history (M16); /atmospheric server-of <did|handle> reads their
 // server profile record and verifies its signing key (M19); /atmospheric
-// follows|followers|blocks|mutes <did|handle> reads a public social graph (M20).
+// follows|followers|blocks|mutes <did|handle> reads a public social graph (M20);
+// /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri> and
+// /atmospheric repost <at-uri> publish interactions (M21).
 fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut bool) {
     use crate::game::atmospheric as m;
     if !game.native_on(m::ID) {
@@ -23,7 +25,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-of <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-of <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -179,6 +181,35 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
         } else {
             m::fetch_chat(subject);
             game.native_chat("atmospheric: reading the player's chat history…");
+        }
+    } else if rest == "reply" || rest.starts_with("reply ") {
+        let mut args = rest.strip_prefix("reply").unwrap_or("").splitn(2, ' ');
+        let uri = args.next().unwrap_or("").trim();
+        let text = args.next().unwrap_or("").trim();
+        *ran = true;
+        if uri.is_empty() || text.is_empty() {
+            game.native_chat("atmospheric: /atmospheric reply <at-uri> <text>");
+        } else {
+            m::reply(uri, text);
+            game.native_chat("atmospheric: replying…");
+        }
+    } else if rest == "like" || rest.starts_with("like ") {
+        let uri = rest.strip_prefix("like").unwrap_or("").trim();
+        *ran = true;
+        if uri.is_empty() {
+            game.native_chat("atmospheric: /atmospheric like <at-uri>");
+        } else {
+            m::like(uri);
+            game.native_chat("atmospheric: liking…");
+        }
+    } else if rest == "repost" || rest.starts_with("repost ") {
+        let uri = rest.strip_prefix("repost").unwrap_or("").trim();
+        *ran = true;
+        if uri.is_empty() {
+            game.native_chat("atmospheric: /atmospheric repost <at-uri>");
+        } else {
+            m::repost(uri);
+            game.native_chat("atmospheric: reposting…");
         }
     } else if ["follows", "followers", "blocks", "mutes"]
         .iter()
