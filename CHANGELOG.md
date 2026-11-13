@@ -87,6 +87,15 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   community URI, filled from `ChannelRef::community_uri()`. The connected,
   connecting and disconnected status lines show both the channel and community,
   matching the detail atpcraft's `/atpcraft colibri status` prints.
+- **M35 — server-side identity service (#85).** A new optional
+  `atmospheric-server` binary maintains the shared Minecraft UUID-to-DID map
+  that the client cannot build alone. Public reads resolve links; admin-token
+  writes create, replace and delete them; one-time pairing codes let players
+  claim a link without the admin credential. Links and pending codes persist
+  atomically in `links.json`, and the image has a Docker end-to-end test for
+  authentication, validation, pairing, deletion and restart persistence. The
+  game client does not consume the API yet; join enforcement, label issuance,
+  RPG discovery and aspect capture remain unimplemented.
 
 ### Changed
 
