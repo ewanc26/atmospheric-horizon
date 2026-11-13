@@ -8,4 +8,7 @@ fn atmospheric_tick(game: &mut crate::game::Game<'_>) {
     // M17: spawn the sidecar worker binary once, if it is next to the game.
     let _ = m::ensure_attached();
     let _ = m::drain_events(16);
+    for line in m::drain_colibri_chat() {
+        game.native_chat(&line);
+    }
 }

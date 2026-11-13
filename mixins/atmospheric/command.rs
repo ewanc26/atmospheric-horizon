@@ -30,7 +30,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric colibri start|stop|status|send <text>, /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -80,6 +80,30 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
             _ => game.native_chat(
                 "atmospheric: /atmospheric server-account login <handle>|status|logout|publish",
             ),
+        }
+    } else if rest == "colibri" || rest.starts_with("colibri ") {
+        let payload = rest.strip_prefix("colibri").unwrap_or("").trim();
+        *ran = true;
+        if payload == "start" {
+            m::colibri_start();
+            game.native_chat("atmospheric: starting the Colibri bridge…");
+        } else if payload == "stop" {
+            m::colibri_stop();
+            game.native_chat("atmospheric: stopping the Colibri bridge…");
+        } else if payload == "status" {
+            m::colibri_status();
+            game.native_chat("atmospheric: checking the Colibri bridge…");
+        } else if let Some(text) = payload.strip_prefix("send ") {
+            if text.trim().is_empty() {
+                game.native_chat("atmospheric: /atmospheric colibri send <text>");
+            } else {
+                m::colibri_send(text.trim());
+                game.native_chat("atmospheric: sending to Colibri…");
+            }
+        } else {
+            game.native_chat(
+                "atmospheric: /atmospheric colibri start|stop|status|send <text>",
+            );
         }
     } else if rest == "notifications" {
         *ran = true;

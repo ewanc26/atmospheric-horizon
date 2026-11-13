@@ -111,6 +111,10 @@ fn main() {
         // M13: trusted endorsement keys for presence reads, as
         // "keyId=publicKeyB64" pairs separated by commas (an empty keyId is
         // derived from the public key).
+        colibri_bridge_enabled: false,
+        colibri_channel_uri: String::new(),
+        colibri_appview_url: "https://api.colibri.social".into(),
+        colibri_appview_did: "did:web:api.colibri.social".into(),
         trusted_server_keys: env::var("ATMOSPHERIC_TRUSTED_SERVER_KEYS")
             .ok()
             .filter(|s| !s.trim().is_empty())

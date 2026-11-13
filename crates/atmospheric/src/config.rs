@@ -80,6 +80,16 @@ pub struct Config {
     /// reading a player's `at.atpcraft.player.snapshot` record, endorsements
     /// from these key ids are accepted alongside the mod's own signing key.
     pub trusted_server_keys: Vec<TrustedServerKey>,
+    /// Arm the Colibri chat bridge automatically once the server account is
+    /// available (M26). The command can start it explicitly too.
+    pub colibri_bridge_enabled: bool,
+    /// The channel the bridge joins: a Colibri channel AT-URI or app link.
+    pub colibri_channel_uri: String,
+    /// Base URL of the Colibri AppView (M26).
+    pub colibri_appview_url: String,
+    /// Service DID of the AppView; `#colibri_appview` is appended for the
+    /// service-auth audience unless the value already carries a fragment.
+    pub colibri_appview_did: String,
 }
 
 impl Default for Config {
@@ -106,6 +116,10 @@ impl Default for Config {
             game_version: "26.3".into(),
             appview_url: crate::lists::DEFAULT_APPVIEW.into(),
             trusted_server_keys: Vec::new(),
+            colibri_bridge_enabled: false,
+            colibri_channel_uri: String::new(),
+            colibri_appview_url: "https://api.colibri.social".into(),
+            colibri_appview_did: "did:web:api.colibri.social".into(),
         }
     }
 }
@@ -168,6 +182,10 @@ mod tests {
                 key_id: String::new(),
                 public_key: "MCowBQYDK2VwAyEA...".into(),
             }],
+            colibri_bridge_enabled: true,
+            colibri_channel_uri: "https://colibri.social/app/c/did:plc:abc/text/3jtest".into(),
+            colibri_appview_url: "https://appview.example".into(),
+            colibri_appview_did: "did:web:appview.example".into(),
         };
         let raw = config.to_json().unwrap();
         let back = Config::from_json(&raw).unwrap();
@@ -178,6 +196,9 @@ mod tests {
         assert_eq!(back.chat_server_id, "my-server");
         assert!(back.persist_session);
         assert_eq!(back.trusted_server_keys, config.trusted_server_keys);
+        assert!(back.colibri_bridge_enabled);
+        assert_eq!(back.colibri_channel_uri, config.colibri_channel_uri);
+        assert_eq!(back.colibri_appview_url, "https://appview.example");
     }
 
     #[test]
@@ -197,6 +218,9 @@ mod tests {
         );
         assert_eq!(config.chat_server_id, "horizon-client");
         assert!(config.trusted_server_keys.is_empty());
+        assert!(!config.colibri_bridge_enabled);
+        assert!(config.colibri_channel_uri.is_empty());
+        assert_eq!(config.colibri_appview_url, "https://api.colibri.social");
     }
 
     #[test]
