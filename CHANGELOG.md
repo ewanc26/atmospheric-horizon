@@ -65,6 +65,13 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   shows atpcraft's two-line setup prompt with `https://colibri.social`; an
   existing profile or a failed read stays quiet. Other players are not checked
   yet because the mod has no server-wide player-to-ATProto mapping.
+- **M31 — Colibri reconnect and send throttle (#77).** `/atmospheric colibri
+  reconnect` requires an active bridge, re-mints the server account's
+  service-auth token and restarts only the event stream; the channel, echo
+  guard, presence generation and profile-check state survive. Player-authored
+  writes are capped at 20 per rolling 60 seconds, matching atpcraft's
+  `ColibriRateLimiter`; server notices are exempt and automatic chat-hook
+  sends drop silently at the limit.
 
 ### Changed
 
