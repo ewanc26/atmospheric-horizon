@@ -80,6 +80,10 @@ pub enum Command {
     /// `automatic` marks the chat-hook mirror; a missing bridge is silent for
     /// those, while the explicit command reports the failure.
     ColibriSend { text: String, automatic: bool },
+    /// Relay one server broadcast line into the bridged channel as the server
+    /// account (M28). The hook has already classified it; the worker silently
+    /// ignores it when the bridge or server notices are off.
+    ColibriNotice { text: String },
     /// Publish the player's state as an `at.atpcraft.player.snapshot` record,
     /// endorsed with the mod's own Ed25519 key (atpcraft port, M6). An empty
     /// `summary.username` is filled from the configured identifier.

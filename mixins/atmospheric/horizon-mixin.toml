@@ -88,6 +88,19 @@ bindings = [
   { name = "text", ty = "&horizon_client::text::Text", value = "&text" },
 ]
 
+# Server broadcast lines: join/leave/death/advancement notices go to the
+# bridged Colibri channel under the server account. The helper filters by the
+# translation key, so ordinary chat and arbitrary server lines are ignored.
+[[injection]]
+id = "colibri-notice"
+hook = "broadcast_message"
+hook_version = 1
+kind = "HEAD"
+helper = "colibri_notice.rs"
+bindings = [
+  { name = "line", ty = "&horizon_client::text::Text", value = "&*line" },
+]
+
 # Once a tick: drain the worker's events into the HUD status line.
 [[injection]]
 id = "tick"

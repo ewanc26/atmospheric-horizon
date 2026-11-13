@@ -398,6 +398,7 @@ impl Worker {
             Command::ColibriStop => self.stop_colibri(true),
             Command::ColibriStatus => self.emit_colibri(None),
             Command::ColibriSend { text, automatic } => self.send_colibri(&text, automatic).await,
+            Command::ColibriNotice { text } => self.send_colibri_notice(&text).await,
             Command::PostText { text } => {
                 self.ensure_oauth_fresh().await;
                 let result = match (&self.agent, &self.did) {
@@ -2062,16 +2063,62 @@ impl Worker {
         };
         match result {
             Ok(uri) => {
-                self.colibri_sent.push_back(uri.clone());
-                while self.colibri_sent.len() > 256 {
-                    self.colibri_sent.pop_front();
-                }
+                self.remember_colibri_uri(uri.clone());
                 if !automatic {
                     self.emit(Event::Posted { uri });
                 }
             }
             Err(error) if !automatic => self.fail(error.to_string()),
             Err(_) => {}
+        }
+    }
+
+    /// Relay one classified server broadcast as the server account (M28).
+    /// This is automatic: a missing bridge, disabled notices or a failed write
+    /// stay silent rather than interrupting the game every time someone joins.
+    async fn send_colibri_notice(&mut self, text: &str) {
+        let Some(channel) = self.colibri_channel.clone() else {
+            return;
+        };
+        let Ok(config) = self.load_config() else {
+            return;
+        };
+        if !config.colibri_server_events_enabled {
+            return;
+        }
+        let text: String = text
+            .chars()
+            .filter(|c| !c.is_control() && *c != '§')
+            .take(colibri::MAX_TEXT_LENGTH)
+            .collect();
+        if text.trim().is_empty() {
+            return;
+        }
+        self.ensure_server_oauth_fresh().await;
+        let rkey = self.tid.next_tid();
+        let record = colibri::message_record(&text, &channel.channel_uri, &colibri::now());
+        let result = match (&self.server_agent, &self.server_did) {
+            (Some(agent), Some(did)) => {
+                actions::create_record_json(
+                    agent,
+                    did,
+                    colibri::MESSAGE_COLLECTION,
+                    Some(&rkey),
+                    record,
+                )
+                .await
+            }
+            _ => Err(AtmosphericError::NotLoggedIn),
+        };
+        if let Ok(uri) = result {
+            self.remember_colibri_uri(uri);
+        }
+    }
+
+    fn remember_colibri_uri(&mut self, uri: String) {
+        self.colibri_sent.push_back(uri);
+        while self.colibri_sent.len() > 256 {
+            self.colibri_sent.pop_front();
         }
     }
 
@@ -2152,6 +2199,7 @@ mod tests {
             colibri_channel_uri: String::new(),
             colibri_appview_url: "https://api.colibri.social".into(),
             colibri_appview_did: "did:web:api.colibri.social".into(),
+            colibri_server_events_enabled: true,
         }
     }
 
@@ -3077,6 +3125,7 @@ mod tests {
             colibri_channel_uri: String::new(),
             colibri_appview_url: "https://api.colibri.social".into(),
             colibri_appview_did: "did:web:api.colibri.social".into(),
+            colibri_server_events_enabled: true,
         };
         command_tx
             .send(Command::SaveConfig {
