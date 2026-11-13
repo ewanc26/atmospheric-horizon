@@ -509,9 +509,10 @@ The game side mirrors it as plain data and the HUD shows the display name,
 stored on disk. The direct profile record is read from the PDS; its avatar is
 a blob reference, so only the AppView's avatar URL is carried in the digest.
 
-atpcraft's newer server-side surfaces (Colibri bridge, RPG item discovery,
-full aspect capture/restore, labeler issuance and the server account) remain
-out of scope for the client mod; the README port table records each one.
+atpcraft's remaining server-side surfaces (Colibri bridge, RPG item discovery,
+full aspect capture/restore and labeler issuance) are not implemented yet;
+the README port table records each one. M25 supplies the separate server
+account they need.
 
 Verified: `profiles` unit tests (whitespace normalisation, direct-record
 precedence, clearing on a successful record without pronouns, AppView
@@ -520,6 +521,40 @@ the stub (AppView fallback, direct-record pronouns, clearing, both reads
 unauthenticated, and a bad subject making no HTTP call). The runtime command,
 sidecar wire shape and HUD line are covered by the std-only encode/decode and
 status tests.
+
+### M25: the separate server account
+
+atpcraft acts as a long-lived server account for its labeler, Colibri service
+auth, RPG attestations and gate; the player session is not that identity.
+`/atmospheric server-account login <handle>` therefore starts a second
+localhost OAuth flow (`Command::LoginServerOAuth`), tagged with
+`OAuthTarget::Server` so its result cannot overwrite the player session. The
+worker keeps `server_agent`, `server_did`, `server_handle`, its own
+`server_dpop`, and a `server_stored_session`; the last is written to
+`server-session.json` with the same owner-only protection as `session.json`.
+
+At startup `try_resume_server` refreshes the server session independently;
+`/atmospheric server-account status` emits `Event::ServerAccount { state,
+handle, did }`; `/atmospheric server-account logout` drops the agent and
+removes the file. `ensure_server_oauth_fresh` refreshes its DPoP-bound token
+before a server-profile write. `/atmospheric server-account publish`
+(`Command::PostServerProfileAsServer`) writes `at.atpcraft.server.profile` at
+rkey `self` from the server account, while the existing `/atmospheric server`
+keeps writing from the player account. Both use the same shared profile writer
+and the mod's persisted Ed25519 endorsement key; `createdAt` is preserved.
+
+The session file contains a DPoP private key and a refresh token, so it is a
+secret exactly like `session.json`; the README's Network use section records
+it. The account is the foundation, not the whole server-side feature: labeler
+routes, join enforcement, Colibri and aspect sync still need their own
+milestones.
+
+Verified: a worker test runs the full stub OAuth flow for the server account,
+asserts the `ServerAccount` LoggingIn/LoggedIn/LoggedOut events, the handle
+and DID, the separate `server-session.json` (0600 on unix, no password), the
+absence of a player `session.json`, and file deletion on logout. The runtime
+and sidecar wire shapes for the new commands/events are pinned by the
+std-only encode/decode tests.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 

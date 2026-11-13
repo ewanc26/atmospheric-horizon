@@ -27,6 +27,12 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   absent; a failed direct read falls back to the AppView value, matching
   atpcraft's precedence. The HUD shows handle, display name, pronouns and a
   truncated description.
+- **M25 — server account (#65).** `/atmospheric server-account login
+  <handle>|status|logout|publish` manages a second, separate OAuth account for
+  server-side work. Its session lives in `server-session.json`, resumes at
+  startup, refreshes independently of the player and can publish the server
+  profile as the server account. The existing `/atmospheric server` still
+  publishes as the player account.
 
 ### Changed
 
