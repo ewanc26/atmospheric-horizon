@@ -13,6 +13,7 @@ use crate::{
     oauth::{self, DpopState, SharedDpop},
     presence::{self, PlayerDigest},
     records::{self, SnapshotRecord},
+    servers,
     session::{self, Agent, SessionState, StoredSession},
     signing::{self, SigningKey},
     skins,
@@ -460,6 +461,18 @@ impl Worker {
                         subject,
                         via,
                         skin: Box::new(skin),
+                    }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::FetchServerProfile { subject } => {
+                // A public read against the subject's own PDS: works logged
+                // out, no token refresh.
+                match self.fetch_server_profile(&subject).await {
+                    Ok((subject, via, profile)) => self.emit(Event::ServerProfile {
+                        subject,
+                        via,
+                        profile: Box::new(profile),
                     }),
                     Err(error) => self.fail(error.to_string()),
                 }
@@ -969,6 +982,28 @@ impl Worker {
                 self.save_verified_blob(&pds, &did, blob).await?;
             }
         }
+        Ok((did, pds, Some(digest)))
+    }
+
+    /// Read another account's `at.atpcraft.server.profile` record from their
+    /// own PDS, verify its signing key against the trusted set (the mod's own
+    /// signing key plus `trusted_server_keys`), and return the HUD digest
+    /// (M19, the read side of M10). The listRecords call is unauthenticated,
+    /// so this works logged out.
+    async fn fetch_server_profile(
+        &self,
+        subject: &str,
+    ) -> crate::error::Result<(String, String, Option<servers::ServerDigest>)> {
+        let config = self.load_config().unwrap_or_default();
+        let (did, pds) = servers::resolve_server(&self.http, &self.resolver, subject).await?;
+        let records =
+            servers::list_records(&self.http, &pds, &did, records::SERVER_PROFILE_COLLECTION)
+                .await?;
+        let keys = self.verification_keys(&config);
+        let Some((rkey, value)) = servers::latest(&records) else {
+            return Ok((did, pds, None));
+        };
+        let digest = servers::digest(&did, &rkey, &value, &keys)?;
         Ok((did, pds, Some(digest)))
     }
 
@@ -3861,6 +3896,161 @@ mod tests {
             other => panic!("expected PlayerSkin, got {other:?}"),
         }
         assert_eq!(blob_calls(), 1, "no getBlob for an unverified record");
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn fetch_server_profile_reads_and_verifies_descriptor() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("fetch-server-profile");
+        let foreign = signing::generate();
+        let foreign_spki = signing::public_key_spki_b64(&foreign.verifying_key());
+        let mut config = test_config(pds.url.clone());
+        config.trusted_server_keys = vec![crate::config::TrustedServerKey {
+            key_id: "trusted-srv".into(),
+            public_key: foreign_spki.clone(),
+        }];
+        write_config(&dir, &config);
+
+        let (command_tx, event_rx, handle) =
+            spawn_worker_with_resolver(dir.clone(), stub_resolver(&pds.url));
+
+        // Empty repo reports none.
+        command_tx
+            .send(Command::FetchServerProfile {
+                subject: "did:plc:empty".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::ServerProfile { .. })) {
+            Event::ServerProfile {
+                subject, profile, ..
+            } => {
+                assert_eq!(subject, "did:plc:empty");
+                assert!(profile.is_none());
+            }
+            other => panic!("expected ServerProfile, got {other:?}"),
+        }
+
+        // Seed a valid server profile record at rkey "self".
+        let record = serde_json::json!({
+            "$type": records::SERVER_PROFILE_COLLECTION,
+            "name": "Stub Server",
+            "description": "A test server",
+            "address": "stub.example:25565",
+            "minecraftVersion": "26.3",
+            "atpcraftVersion": "0.1.0",
+            "signingKey": {
+                "keyId": "trusted-srv",
+                "publicKey": foreign_spki,
+                "alg": "ed25519",
+            },
+            "capabilities": ["player-data-sync"],
+            "operator": {
+                "handle": "operator.test",
+            },
+            "updatedAt": "2026-11-13T00:00:00.000Z",
+        });
+        pds.seed_record(records::SERVER_PROFILE_COLLECTION, "self", record.clone());
+
+        // Read it back by handle (works logged out).
+        command_tx
+            .send(Command::FetchServerProfile {
+                subject: "stub.test".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::ServerProfile { .. })) {
+            Event::ServerProfile {
+                subject,
+                via,
+                profile,
+            } => {
+                assert_eq!(subject, "did:plc:stubuser");
+                assert_eq!(via, pds.url);
+                let d = profile.expect("a server profile exists");
+                assert_eq!(d.name, "Stub Server");
+                assert_eq!(d.address, "stub.example:25565");
+                assert_eq!(d.minecraft_version, "26.3");
+                assert_eq!(d.atpcraft_version, "0.1.0");
+                assert_eq!(d.capabilities, vec!["player-data-sync"]);
+                assert_eq!(d.operator_handle, "operator.test");
+                assert_eq!(
+                    d.verdict,
+                    servers::ServerVerdict::Trusted {
+                        key_id: "trusted-srv".into()
+                    }
+                );
+            }
+            other => panic!("expected ServerProfile, got {other:?}"),
+        }
+
+        // The listRecords call went out unauthenticated against the subject's PDS.
+        let list_hit = pds
+            .requests()
+            .into_iter()
+            .find(|r| {
+                r.path.starts_with("/xrpc/com.atproto.repo.listRecords")
+                    && r.path.contains("collection=at.atpcraft.server.profile")
+            })
+            .expect("listRecords was called for server profile");
+        assert!(!list_hit.authorized, "the read is unauthenticated");
+
+        // An unknown key reports Unknown verdict.
+        let mut unknown_rec = record.clone();
+        unknown_rec["signingKey"]["keyId"] = serde_json::json!("unknown-key");
+        pds.seed_record(records::SERVER_PROFILE_COLLECTION, "self", unknown_rec);
+        command_tx
+            .send(Command::FetchServerProfile {
+                subject: "did:plc:stubuser".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::ServerProfile { .. })) {
+            Event::ServerProfile { profile, .. } => {
+                let d = profile.expect("a server profile exists");
+                assert_eq!(d.verdict, servers::ServerVerdict::Unknown);
+            }
+            other => panic!("expected ServerProfile, got {other:?}"),
+        }
+
+        // A mismatched public key reports KeyMismatch verdict.
+        let other_key = signing::generate();
+        let other_spki = signing::public_key_spki_b64(&other_key.verifying_key());
+        let mut mismatch_rec = record.clone();
+        mismatch_rec["signingKey"]["publicKey"] = serde_json::json!(other_spki);
+        pds.seed_record(records::SERVER_PROFILE_COLLECTION, "self", mismatch_rec);
+        command_tx
+            .send(Command::FetchServerProfile {
+                subject: "did:plc:stubuser".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::ServerProfile { .. })) {
+            Event::ServerProfile { profile, .. } => {
+                let d = profile.expect("a server profile exists");
+                assert_eq!(
+                    d.verdict,
+                    servers::ServerVerdict::KeyMismatch {
+                        key_id: "trusted-srv".into()
+                    }
+                );
+            }
+            other => panic!("expected ServerProfile, got {other:?}"),
+        }
+
+        // A record URI is not a server account reference: fails before any network call.
+        let before = pds.non_poll_requests().len();
+        command_tx
+            .send(Command::FetchServerProfile {
+                subject: "at://did:plc:stubuser/app.bsky.feed.post/1".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("want a server account"), "{message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(pds.non_poll_requests().len(), before);
 
         command_tx.send(Command::Shutdown).unwrap();
         handle.join().unwrap();
