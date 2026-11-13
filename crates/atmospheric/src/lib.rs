@@ -16,6 +16,7 @@ pub mod notifications;
 pub mod oauth;
 pub mod presence;
 pub mod records;
+pub mod servers;
 pub mod session;
 pub mod signing;
 pub mod skins;
@@ -113,6 +114,11 @@ pub enum Command {
     /// skin-sync read side). The subject is a DID or a handle; the reads are
     /// unauthenticated, so this works logged out.
     FetchPlayerSkin { subject: String },
+    /// Read another account's `at.atpcraft.server.profile` record from their
+    /// own PDS and verify its signing key against trusted keys (M19, the
+    /// read side of M10). The subject is a DID or a handle; the read is
+    /// unauthenticated — works logged out.
+    FetchServerProfile { subject: String },
     /// Post the player's death message to Bluesky (only when
     /// `post_death_messages` is enabled).
     PostDeathMessage { text: String },
@@ -186,6 +192,16 @@ pub enum Event {
         via: String,
         // Boxed: SkinDigest is one of the event enum's largest variants.
         skin: Box<Option<skins::SkinDigest>>,
+    },
+    /// The latest server profile of an account (M19, the read side of M10):
+    /// the DID (`subject`), the PDS it was read from (`via`), and the digest
+    /// with its signing-key trust verdict (`None` when the repo has no
+    /// server profile).
+    ServerProfile {
+        subject: String,
+        via: String,
+        // Boxed: ServerDigest is one of the event enum's largest variants.
+        profile: Box<Option<servers::ServerDigest>>,
     },
 }
 
@@ -311,6 +327,9 @@ mod tests {
             Command::FetchPlayerSkin {
                 subject: "did:plc:z".into(),
             },
+            Command::FetchServerProfile {
+                subject: "did:plc:z".into(),
+            },
             Command::PostDeathMessage { text: "t".into() },
             Command::Logout,
             Command::Shutdown,
@@ -400,6 +419,11 @@ mod tests {
                 subject: "s".into(),
                 via: "v".into(),
                 skin: Box::new(None),
+            },
+            Event::ServerProfile {
+                subject: "s".into(),
+                via: "v".into(),
+                profile: Box::new(None),
             },
         ];
         for event in events {
