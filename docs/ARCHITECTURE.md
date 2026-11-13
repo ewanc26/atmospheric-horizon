@@ -830,12 +830,12 @@ and the `pds_check` example.
 
 ### Releases (M18)
 
-`CHANGELOG.md` is the human-readable release history; the first tag is
-`v0.1.0`. A release is cut from `main`:
+`CHANGELOG.md` is the human-readable release history; releases are annotated
+tags (`v0.1.0`, then `v0.2.0`). A release is cut from `main`:
 
 ```sh
-git tag -a v0.1.0 -m "atmospheric-horizon 0.1.0"
-git push origin v0.1.0
+git tag -a v0.2.0 -m "atmospheric-horizon 0.2.0"
+git push origin v0.2.0
 ```
 
 `.github/workflows/release.yml` then (tag `v*` only):
@@ -855,8 +855,10 @@ git push origin v0.1.0
 The worker archives are the reason the release exists: the game spawns the
 binary next to its executable (M17), so players need a per-OS build before the
 registry entry (#28) can point at one. Release bumps are mechanical: change
-the version in both `Cargo.toml`s and `runtime.rs`'s `VERSION`, let the
-consistency test prove they agree, then tag.
+the version in the root `Cargo.toml`, `crates/atmospheric/Cargo.toml`,
+`mixins/atmospheric/horizon-mixin.toml` and `runtime.rs`'s `VERSION`, refresh
+`Cargo.lock`, let the consistency test prove the library and runtime agree,
+then tag.
 
 ## Reviewer notes
 
