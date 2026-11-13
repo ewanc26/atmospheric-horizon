@@ -864,8 +864,9 @@ the game client can know other players' accounts.
 
 The service exposes `GET /healthz` and public `GET /v1/links/{uuid}` reads, an
 authenticated `GET /v1/links` listing, authenticated `PUT`/`DELETE` on
-`/v1/links/{uuid}`, authenticated `POST /v1/pairings`, and public
-`POST /v1/pairings/claim`. Admin routes require
+`/v1/links/{uuid}`, authenticated `POST /v1/pairings`, public
+`POST /v1/pairings/claim`, and the M39 browser routes (authenticated
+`POST /v1/browser/pairings`, public client metadata and link pages). Admin routes require
 `Authorization: Bearer $ATMOSPHERIC_SERVER_TOKEN`; if the variable is unset
 they return 503 instead of allowing an unauthenticated write. Pairing codes are
 random, one-time, default to ten minutes, accept 60-3600 seconds and are stored
@@ -881,10 +882,10 @@ validated before they reach the store. The service is designed for one process
 per data directory, not for multiple replicas sharing a volume.
 
 M36 wires the explicit `/atmospheric link <code>` claim, M37 wires the
-public join-time link lookup and M38 consumes the same map for login-gate
-enforcement. The service is still the foundation for labeler issuance and
-RPG/player-data work; those consumers remain separate and must not be
-described as delivered.
+public join-time link lookup, M38 consumes the same map for login-gate
+enforcement, and M39 adds browser OAuth link creation and callback routes.
+The service is still the foundation for labeler issuance and RPG/player-data
+work; those consumers remain separate and must not be described as delivered.
 
 Verified: `model` unit tests cover UUID, name, DID, handle, code and TTL
 validation; store tests cover reopen persistence, `linked_at` preservation,
@@ -980,11 +981,11 @@ fail-closed rule. With no sidecar attached the runtime cannot know the gate
 is armed and stays out of the way. The gate runs on the server thread only;
 the worker keeps all network and disk I/O.
 
-This does not yet implement atpcraft's browser `/mc` OAuth flow, IP-bound
-gate sessions, or the periodic sweep that kicks online players removed from
-the list. Those need the identity service to become an OAuth client and are
-separate milestones. Operationally, players must be linked before the gate
-is enabled.
+This does not implement atpcraft's IP-bound `/mc` gate sessions or the
+periodic sweep that kicks online players removed from the list. M39 adds the
+browser OAuth flow for players who are already connected. Operationally, a
+player refused by an armed gate still cannot run `/atmospheric link`, so they
+must use an operator-issued code or be linked before the gate is enabled.
 
 Verified: a worker test links one UUID to a member, one to a non-member and
 one to nothing, then asserts allow, refusal and fail-closed empty-list
@@ -995,6 +996,52 @@ compiled in the staged pinned Horizon tree, where all 13
 staged Horizon-wide run still reports its own `hook_points_stay_hookable`
 source-scan test because other injected helpers contain macros; the M38 hook
 has none. No live identity service or AppView was contacted.
+
+### M39: browser self-service linking
+
+M36 could only claim a code the operator issued, and M38's gate runs before a
+refused player can type a command. M39 gives an already-connected player a
+one-command browser flow without weakening the UUID binding. The game server
+calls `POST /v1/browser/pairings` with `{player_uuid, player_name}` and
+`Authorization: Bearer $ATMOSPHERIC_SERVER_LINK_TOKEN`. The service creates a
+random 24-byte link token, stores `{uuid, name, expires_at}` in memory, and
+returns `<public_url>/link/<token>`. `server_link_token` is a new game setting;
+without it, or without `ATMOSPHERIC_SERVER_PUBLIC_URL`/
+`ATMOSPHERIC_SERVER_LINK_TOKEN` on the service, the flow is disabled with a
+clear error. The browser never sends a UUID.
+
+The player's worker reports `Event::BrowserLink { player_uuid, url,
+expires_at }`. The runtime queues it for targeted `native_tell`, so only the
+requesting player sees the URL; the HUD also shows it as a status line. Opening
+the URL shows a handle form. Submitting it resolves the handle and DID, fetches
+the DID document and PDS, discovers the authorization server, generates state,
+a PKCE S256 verifier and a DPoP key, and sends a PAR request whose `dpop_jkt`
+is the key thumbprint. The returned authorize URL uses the service's published
+client metadata (`client_id = <public_url>/oauth-client-metadata.json`) and
+redirects to `<public_url>/link/callback`. The callback requires the state,
+issuer, code, DPoP token type, matching `sub` and the `atproto` scope. It then
+consumes the link token and writes the link through the same atomic store M35
+uses. State, verifier and DPoP private key are in memory only, single-use and
+ten minutes.
+
+The service now makes outbound requests for linking: the handle resolver
+(`bsky.social` by default), the PLC directory or `did:web` host, the account's
+PDS, its authorization server, and the token endpoint. It does not call the
+AppView for this flow and does not store access or refresh tokens. A restart
+invalidates browser link sessions. The OAuth client metadata and callback are
+public; link creation is authenticated to the game server, and possession of
+the one-time URL is the player's credential. An armed M38 gate still refuses
+before this command can run, so this solves browser linking for connected
+players, not pre-join gate admission.
+
+Verified: server tests cover link-token authorization, URL shape, the browser
+form, client metadata, callback state rejection and expiry; OAuth unit tests
+cover metadata, the DPoP proof and PKCE; `identity` tests cover the game-server
+request body and missing-token failure; runtime tests pin the command and event
+wire shapes. The Docker test creates a link, fetches its form and reads the
+metadata without contacting an external provider. The full OAuth start/finish
+is covered against a local stub; no live PDS or authorization server was
+contacted.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
