@@ -481,11 +481,12 @@ pub enum ModEvent {
     },
     /// A relationship was written (M23): the action and the resolved DID.
     GraphChanged { action: String, subject: String },
-    /// Colibri bridge state (M26).
+    /// Colibri bridge state (M26/M34).
     Colibri {
         active: bool,
         connected: bool,
         channel: String,
+        community: String,
         error: Option<String>,
     },
     /// One incoming Colibri message (M26).
@@ -702,16 +703,17 @@ pub fn status_text(event: &ModEvent) -> String {
             active,
             connected,
             channel,
+            community,
             error,
         } => {
             if !active {
                 "atmospheric: Colibri bridge off".into()
             } else if let Some(error) = error {
-                format!("atmospheric: Colibri disconnected: {error}")
+                format!("atmospheric: Colibri disconnected from {channel} in {community}: {error}")
             } else if *connected {
-                format!("atmospheric: Colibri connected to {channel}")
+                format!("atmospheric: Colibri connected to {channel} in {community}")
             } else {
-                format!("atmospheric: Colibri connecting to {channel}")
+                format!("atmospheric: Colibri connecting to {channel} in {community}")
             }
         }
         ModEvent::ColibriMessage { handle, text } => {
@@ -2274,6 +2276,7 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 active: jget(obj, "active").and_then(as_bool)?,
                 connected: jget(obj, "connected").and_then(as_bool)?,
                 channel: req_str(obj, "channel")?,
+                community: req_str(obj, "community")?,
                 error: jget(obj, "error").and_then(as_opt_str).flatten(),
             })
         }
@@ -3009,6 +3012,7 @@ mod tests {
                 active: false,
                 connected: false,
                 channel: String::new(),
+                community: String::new(),
                 error: None,
             }),
             "atmospheric: Colibri bridge off"
@@ -3018,9 +3022,10 @@ mod tests {
                 active: true,
                 connected: true,
                 channel: "at://c".into(),
+                community: "at://community".into(),
                 error: None,
             }),
-            "atmospheric: Colibri connected to at://c"
+            "atmospheric: Colibri connected to at://c in at://community"
         );
         assert_eq!(
             status_text(&ModEvent::ColibriMembershipPending {
@@ -3344,12 +3349,13 @@ mod tests {
         );
         assert_eq!(
             decode_event(
-                r#"{"Colibri":{"active":true,"connected":false,"channel":"at://c","error":null}}"#
+                r#"{"Colibri":{"active":true,"connected":false,"channel":"at://c","community":"at://community","error":null}}"#
             ),
             Some(ModEvent::Colibri {
                 active: true,
                 connected: false,
                 channel: "at://c".into(),
+                community: "at://community".into(),
                 error: None,
             })
         );

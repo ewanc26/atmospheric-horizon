@@ -2222,6 +2222,11 @@ impl Worker {
                 .as_ref()
                 .map(|channel| channel.channel_uri.clone())
                 .unwrap_or_default(),
+            community: self
+                .colibri_channel
+                .as_ref()
+                .map(ChannelRef::community_uri)
+                .unwrap_or_default(),
             error,
         });
     }
@@ -3652,11 +3657,18 @@ mod tests {
                 active: true,
                 connected: false,
                 channel,
+                community,
                 error: None,
-            }) => assert_eq!(
-                channel,
-                "at://did:plc:community/social.colibri.channel/3jchannel"
-            ),
+            }) => {
+                assert_eq!(
+                    channel,
+                    "at://did:plc:community/social.colibri.channel/3jchannel"
+                );
+                assert_eq!(
+                    community,
+                    "at://did:plc:community/social.colibri.community/self"
+                );
+            }
             other => panic!("expected the reconnected bridge status, got {other:?}"),
         }
         let requests = pds.requests();
