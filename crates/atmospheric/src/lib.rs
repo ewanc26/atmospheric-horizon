@@ -301,12 +301,14 @@ pub enum Event {
     /// A relationship was written (M23): the action (`follow`, `unfollow`,
     /// `block`, `unblock`, `mute` or `unmute`) and the subject's resolved DID.
     GraphChanged { action: String, subject: String },
-    /// Colibri bridge state (M26). `error` is set when the stream dropped; the
-    /// worker reconnects, so it is a status line rather than a terminal error.
+    /// Colibri bridge state (M26/M34). `error` is set when the stream dropped;
+    /// the worker reconnects, so it is a status line rather than a terminal
+    /// error. `community` is the owning community's URI.
     Colibri {
         active: bool,
         connected: bool,
         channel: String,
+        community: String,
         error: Option<String>,
     },
     /// One Colibri message for the game chat (M26).
