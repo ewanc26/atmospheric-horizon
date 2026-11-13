@@ -38,8 +38,14 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   service-auth token from the server account, holds the Colibri `subscribeEvents`
   WebSocket, and shows channel upserts in native chat. Game chat is mirrored
   into the channel as the player account while the bridge runs. The Colibri
-  OAuth grants are added only when `colibri_bridge_enabled` is set. Membership
-  repair, server event notices, the profile prompt and token rotation remain.
+  OAuth grants are added only when `colibri_bridge_enabled` is set.
+- **M27 — Colibri membership and token rotation (#69).** Before opening the
+  stream, the worker lists the server account's `social.colibri.membership`
+  records and creates one for the bridged community when absent, using
+  `createRecord` so a second start creates no duplicate. The socket closes at
+  45 minutes and the worker mints a fresh service-auth token and reconnects,
+  keeping the one-hour token ahead of expiry. Server event notices, approval
+  prompts and the Colibri profile prompt remain.
 
 ### Changed
 

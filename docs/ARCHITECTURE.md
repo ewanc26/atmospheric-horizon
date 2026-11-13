@@ -515,7 +515,7 @@ a blob reference, so only the AppView's avatar URL is carried in the digest.
 atpcraft's remaining server-side surfaces (RPG item discovery, full aspect
 capture/restore and labeler issuance) are not implemented yet; the README port
 table records each one. M25 supplies the separate server account they need,
-and M26 starts the Colibri bridge on top of it.
+and M26/M27 start the operational Colibri bridge on top of it.
 
 Verified: `profiles` unit tests (whitespace normalisation, direct-record
 precedence, clearing on a successful record without pronouns, AppView
@@ -595,11 +595,10 @@ or the `social.colibri:/channel/…` deep link. It derives the channel URI, the
 session resume. `/atmospheric colibri stop` aborts the socket task and drops
 the channel; `/atmospheric colibri status` reports active/connected state.
 
-Not in M26: ensuring the server account's community membership, join/leave/
-death/advancement notices, the Colibri profile prompt, and proactive 45-minute
-token rotation. A stream that outlives its one-hour token needs a stop/start
-until rotation lands. The service token is in memory only; no new credential
-is written to disk.
+Not in M26: join/leave/death/advancement notices, approval and profile
+prompts. M27 adds the server account's community membership and proactive
+45-minute token rotation. The service token is in memory only; no new
+credential is written to disk.
 
 Verified: `colibri` unit tests cover all three channel-link forms, the old
 community-rkey form, record shapes and text caps, audience/stream URL/
@@ -608,6 +607,38 @@ asserts `Connected` plus a delivered message. Worker tests cover start without
 a server account and an explicit send while stopped. The runtime tests pin the
 four command wire shapes, both event shapes, HUD text, the automatic chat fan
 out, and native-chat draining. No live Colibri AppView was contacted.
+
+### M27: Colibri membership and token rotation
+
+The AppView only streams a community's events to accounts that carry a
+`social.colibri.membership` record, and `getServiceAuth` tokens live at most
+one hour. `start_colibri` now repairs the first and the stream task handles the
+second:
+
+1. Before minting the stream token, the worker pages the server account's
+   `social.colibri.membership` records with an authenticated
+   `com.atproto.repo.listRecords` (limit 100). If none carries the channel's
+   community URI, it writes one with `com.atproto.repo.createRecord` at a fresh
+   TID. It deliberately does not use `putRecord`: the Colibri OAuth grant
+   carries create/delete, not update. A second start reuses the record instead
+   of creating a duplicate.
+2. `connect_once` arms a 45-minute rotation timer. When it fires, the socket
+   reports `StreamEvent::Rotate` and returns; the worker's async update handler
+   calls `start_colibri` again. That path re-runs membership repair (a no-op),
+   refreshes the server account's DPoP token if needed, mints a fresh
+   service-auth token, and spawns a new stream. Network drops still reconnect
+   inside the same stream task with 1–60 second backoff.
+
+The membership record is public and owned by the server account; its
+`createdAt` is the write time. No membership state or token is persisted
+locally. Approval-gated communities still accept the membership record as
+pending, but the bridge does not yet tell the operator to wait for a moderator.
+
+Verified: a worker test logs an agent into the stub PDS, runs
+`ensure_membership` twice, and asserts one `createRecord` with the expected
+`community` and no duplicate. The full gate covers the rotation code's types;
+time itself is not accelerated in a test, so no test waits 45 minutes. No live
+Colibri AppView was contacted.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
