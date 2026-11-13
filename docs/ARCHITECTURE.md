@@ -2,7 +2,7 @@
 
 How atmospheric-horizon is put together, for reviewers, contributors, and coding agents. Start with `AGENTS.md` for the working rules.
 
-## The two layers
+## The two client layers
 
 ```text
 ┌──────────────────────────────┐   GameCommand channel   ┌──────────────────────────┐
@@ -14,6 +14,8 @@ How atmospheric-horizon is put together, for reviewers, contributors, and coding
 │ └────────────────────────┘   │                          │ (session, cursor in M3+) │
 └──────────────────────────────┘                          └──────────────────────────┘
 ```
+
+The optional `atmospheric-server` binary is not in this diagram: it is a separate HTTP process run by the Minecraft server operator, with no game imports and no outbound requests. It owns the shared player UUID-to-DID map described under M35 below.
 
 ### The injected module: `mixins/atmospheric/runtime.rs`
 
@@ -518,8 +520,9 @@ a blob reference, so only the AppView's avatar URL is carried in the digest.
 
 atpcraft's remaining server-side surfaces (RPG item discovery, full aspect
 capture/restore and labeler issuance) are not implemented yet; the README port
-table records each one. M25 supplies the separate server account they need,
-and M26/M27 start the operational Colibri bridge on top of it.
+table records each one. M25 supplies the separate server account, M26/M27 run
+the operational Colibri bridge, and M35 supplies the shared player-to-DID map;
+enforcement, issuance and capture remain separate milestones.
 
 Verified: `profiles` unit tests (whitespace normalisation, direct-record
 precedence, clearing on a successful record without pronouns, AppView
@@ -729,8 +732,7 @@ same missing-profile message into the HUD.
 
 The check resets on an explicit bridge stop and on player logout, so a new
 session or account is checked again. A 45-minute token rotation does not repeat
-the prompt. Other players are not checked; that needs the server-side identity
-mapping described in M25 and remains unimplemented.
+the prompt. Other players are not checked; M35 now supplies the server-side identity mapping, but the client-side profile check is still local-only.
 
 Verified: a worker test logs an agent into the stub PDS, points the worker at a
 channel, and calls the check with no profile (asserting the
@@ -840,6 +842,45 @@ unchanged.
 Verified: the wire decoder test pins the new field, the status test checks the
 combined line, and the reconnect test asserts the parsed community URI. No new
 network request is made and no live Colibri AppView was contacted.
+
+### M35: server-side player identity service
+
+M30-M34 can only inspect the local player because the client has no shared
+mapping from a Minecraft UUID to an ATProto DID. M35 adds that map as an
+optional separate process, `crates/atmospheric-server`, rather than pretending
+the game client can know other players' accounts.
+
+The service exposes `GET /healthz` and public `GET /v1/links/{uuid}` reads, an
+authenticated `GET /v1/links` listing, authenticated `PUT`/`DELETE` on
+`/v1/links/{uuid}`, authenticated `POST /v1/pairings`, and public
+`POST /v1/pairings/claim`. Admin routes require
+`Authorization: Bearer $ATMOSPHERIC_SERVER_TOKEN`; if the variable is unset
+they return 503 instead of allowing an unauthenticated write. Pairing codes are
+random, one-time, default to ten minutes, accept 60-3600 seconds and are stored
+canonicalised without their display hyphen. Creating a new code for a UUID
+invalidates that UUID's previous code.
+
+The store is a single JSON document (`links.json`) protected by an async write
+lock. Every mutation clones the state, writes a temporary file with owner-only
+permissions on Unix, fsyncs it, renames it over the old file (atomic on the
+Unix/Docker target), and only then commits the new state in memory. A failed
+write therefore leaves both copies unchanged. UUIDs, DIDs, handles, player names, codes and TTLs are normalised and
+validated before they reach the store. The service is designed for one process
+per data directory, not for multiple replicas sharing a volume.
+
+No player-to-DID resolution is wired into the game worker yet. M35 is the
+foundation for server-wide Colibri profile checks, join-gate enforcement,
+labeler issuance and RPG/player-data work; those consumers remain separate and
+must not be described as delivered.
+
+Verified: `model` unit tests cover UUID, name, DID, handle, code and TTL
+validation; store tests cover reopen persistence, `linked_at` preservation,
+one-time and expired pairings, and idempotent deletion; router tests cover
+public reads, admin authentication, direct writes, deletion and a claim that
+survives a store reopen. `docker/server-test.sh` builds the image, runs the
+container against a named volume, exercises the API including an invalid DID,
+restarts the container and checks links still resolve. No network service
+outside the container is contacted.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
