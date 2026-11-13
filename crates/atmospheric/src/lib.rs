@@ -314,6 +314,9 @@ pub enum Event {
     /// The local player has no `social.colibri.actor.profile` record (M30);
     /// the runtime shows atpcraft's setup prompt with this URL in chat.
     ColibriProfileMissing { url: String },
+    /// A new local-player Colibri membership needs moderator approval (M32);
+    /// the runtime shows `message` in chat and the HUD.
+    ColibriMembershipPending { message: String },
 }
 
 #[cfg(test)]
@@ -504,6 +507,13 @@ mod tests {
             r#"{"ColibriProfileMissing":{"url":"https://colibri.social"}}"#
         );
         assert_eq!(
+            serde_json::to_string(&Event::ColibriMembershipPending {
+                message: "Your join is pending. A moderator must approve it.".into()
+            })
+            .unwrap(),
+            r#"{"ColibriMembershipPending":{"message":"Your join is pending. A moderator must approve it."}}"#
+        );
+        assert_eq!(
             serde_json::to_string(&Event::Session(session::SessionState::LoggedOut)).unwrap(),
             r#"{"Session":"LoggedOut"}"#
         );
@@ -600,6 +610,9 @@ mod tests {
             },
             Event::ColibriProfileMissing {
                 url: "https://colibri.social".into(),
+            },
+            Event::ColibriMembershipPending {
+                message: "Your join is pending. A moderator must approve it.".into(),
             },
         ];
         for event in events {

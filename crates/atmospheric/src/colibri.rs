@@ -36,6 +36,8 @@ pub const ACTOR_PROFILE_COLLECTION: &str = "social.colibri.actor.profile";
 pub const SELF_RKEY: &str = "self";
 /// The setup page atpcraft links to when a player has no Colibri profile.
 pub const PROFILE_URL: &str = "https://colibri.social";
+/// atpcraft's notice when a new player membership needs moderator approval.
+pub const MEMBERSHIP_PENDING_MESSAGE: &str = "Your join is pending. A moderator must approve it.";
 /// The AppView's event-stream method.
 pub const SUBSCRIBE_EVENTS_LXM: &str = "social.colibri.sync.subscribeEvents";
 /// The service id of the AppView in its DID document.

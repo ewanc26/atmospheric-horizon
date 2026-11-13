@@ -493,6 +493,8 @@ pub enum ModEvent {
     /// The local player has no Colibri actor profile (M30); `url` is the
     /// setup page shown in chat.
     ColibriProfileMissing { url: String },
+    /// A new local-player Colibri membership needs approval (M32).
+    ColibriMembershipPending { message: String },
 }
 
 /// The HUD wording for an endorsement verdict (M13/M14).
@@ -725,6 +727,9 @@ pub fn status_text(event: &ModEvent) -> String {
                 clean_remote(url)
             )
         }
+        ModEvent::ColibriMembershipPending { message } => {
+            format!("[Colibri] {}", clean_remote(message))
+        }
         ModEvent::SocialGraph {
             kind,
             subject,
@@ -907,6 +912,9 @@ fn colibri_chat_lines(event: &ModEvent) -> Vec<String> {
             "[Colibri] You need a Colibri profile to use the chat bridge.".into(),
             format!("[Colibri] Open Colibri: {}", clean_remote(url)),
         ],
+        ModEvent::ColibriMembershipPending { message } => {
+            vec![format!("[Colibri] {}", clean_remote(message))]
+        }
         _ => Vec::new(),
     }
 }
@@ -2262,6 +2270,12 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 url: req_str(obj, "url")?,
             })
         }
+        "ColibriMembershipPending" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::ColibriMembershipPending {
+                message: req_str(obj, "message")?,
+            })
+        }
         _ => None,
     }
 }
@@ -2966,6 +2980,18 @@ mod tests {
             "atmospheric: Colibri connected to at://c"
         );
         assert_eq!(
+            status_text(&ModEvent::ColibriMembershipPending {
+                message: "Your join is pending. A moderator must approve it.".into(),
+            }),
+            "[Colibri] Your join is pending. A moderator must approve it."
+        );
+        assert_eq!(
+            colibri_chat_lines(&ModEvent::ColibriMembershipPending {
+                message: "Your join is pending. A moderator must approve it.".into(),
+            }),
+            vec!["[Colibri] Your join is pending. A moderator must approve it."]
+        );
+        assert_eq!(
             status_text(&ModEvent::ColibriProfileMissing {
                 url: "https://colibri.social".into(),
             }),
@@ -3295,6 +3321,14 @@ mod tests {
             decode_event(r#"{"ColibriProfileMissing":{"url":"https://colibri.social"}}"#),
             Some(ModEvent::ColibriProfileMissing {
                 url: "https://colibri.social".into(),
+            })
+        );
+        assert_eq!(
+            decode_event(
+                r#"{"ColibriMembershipPending":{"message":"Your join is pending. A moderator must approve it."}}"#
+            ),
+            Some(ModEvent::ColibriMembershipPending {
+                message: "Your join is pending. A moderator must approve it.".into(),
             })
         );
         assert_eq!(
