@@ -1,117 +1,225 @@
+<p align="center">
+  <a href="https://github.com/ewanc26/atmospheric-horizon/actions/workflows/ci.yml"><img src="https://github.com/ewanc26/atmospheric-horizon/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/ewanc26/atmospheric-horizon/releases/latest"><img src="https://img.shields.io/github/v/release/ewanc26/atmospheric-horizon?label=release" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/ewanc26/atmospheric-horizon?label=licence" alt="AGPL-3.0"></a>
+  <a href="https://github.com/sponsors/ewanc26"><img src="https://img.shields.io/github/sponsors/ewanc26?logo=githubsponsors&logoColor=white&label=sponsors" alt="Sponsor"></a>
+</p>
+
 # atmospheric-horizon
 
-AT Protocol (Bluesky) integration for [Horizon](https://playhorizon.dev), the Rust rewrite of Minecraft: Java Edition — post screenshots and milestones to Bluesky, and read your notifications, without leaving the game.
+AT Protocol (Bluesky) integration for [Horizon](https://playhorizon.dev), the Rust rewrite of Minecraft: Java Edition — post text and screenshots, reply and react, and read notifications, profiles and public graph data without leaving the game.
 
-Independent project; not affiliated with Mojang, Microsoft, Bluesky PBC, or the Horizon project. NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.
+> Independent project; not affiliated with Mojang, Microsoft, Bluesky PBC, or the Horizon project. NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.
 
-This project is the successor to [jollywhoppers-socialsync](https://github.com/ewanc26/jollywhoppers-socialsync) — the Paper plugin that linked Minecraft players to AT Protocol identities — rebuilt as a native Horizon mod. It also aims to port the feature set of [atpcraft](https://git.atforge.org/atforge/atpcraft/ATPcraft) (atforge's Minecraft server mod: per-player AT Protocol identity, chat and player-state records, skins as blobs, a labeler, a server profile) to Horizon; see the roadmap below.
+This is the successor to [jollywhoppers-socialsync](https://github.com/ewanc26/jollywhoppers-socialsync), the Paper plugin that linked Minecraft players to AT Protocol identities, rebuilt as a native Horizon mod. It also ports the feature set of [atpcraft](https://git.atforge.org/atforge/atpcraft/ATPcraft) client-side; its lexicons are reimplemented as data, and no code is copied because the upstream repo carries no licence. See [Roadmap](#roadmap).
 
 ## Status
 
-Early scaffold. The protocol library builds and tests standalone; the native injection pipeline follows the [horizon-native-mod-template](https://github.com/horizon-rust/horizon-native-mod-template). Milestones: M1 library skeleton, M2 worker wiring + login/text posts and the game-side hooks (keybind, `/atmospheric` commands, HUD status line), M3 screenshots (F2, then a keybind posts the latest one), M4 notifications (poll timer + persisted cursor + `/atmospheric notifications`), M5 atpcraft port start — chat messages as `at.atpcraft.player.chat` records (TID-keyed, off by default; `/atmospheric chat <text>` publishes one), M6 player-state snapshots as `at.atpcraft.player.snapshot` records (Ed25519-endorsed, keybind or `/atmospheric snapshot`), M7 registry submission, M8 localhost OAuth login (PAR + PKCE + DPoP, `/atmospheric login <handle>`) replacing app passwords, M9 player skin records (`at.atpcraft.player.skin`, blob upload + Ed25519 endorsement, `/atmospheric skin [path] [default|slim]`), M10 server profile record (`at.atpcraft.server.profile` at rkey `self`, `/atmospheric server`), M11 join-gate list reads (`app.bsky.graph.getList` pagination, `/atmospheric list <reference>`), M12 labeler read side (labels on subjects via AppView views, plus `com.atproto.label.queryLabels` at a labeler's `#atproto_labeler` endpoint — `/atmospheric labels <subject>` and `/atmospheric labeler <did> [subject]`), M13 presence reads (any account's latest `at.atpcraft.player.snapshot` record, Ed25519-endorsement-verified — `/atmospheric player <did|handle>`), M14 skin reads (any account's latest `at.atpcraft.player.skin` record, verified, with the blobs downloaded via `com.atproto.sync.getBlob` — `/atmospheric skin-of <did|handle>`), M15 join-gate decision (is a DID on a list, fail-closed — `/atmospheric gate <list> <did|handle>`), M16 chat-history reads (any account's `at.atpcraft.player.chat` records — `/atmospheric chat-of <did|handle>`), M17 sidecar worker — the `atmospheric-worker` binary spawned next to the game consumes the command channel over stdio (JSON-lines), so the mod works in-game today without waiting for horizon-mixins to allow-list the worker crate (#2 option 3), M18 the first tagged release (`v0.1.0`): a changelog, per-OS worker archives, the mixins bundle and checksums built by `.github/workflows/release.yml`, and M19 server-profile reads: any account's `at.atpcraft.server.profile` record read from their PDS and verified against `trusted_server_keys` / own key — `/atmospheric server-of <did|handle>` (#44), and M20 social-graph reads: any account's follows, followers, blocks and mutes via the public AppView — `/atmospheric follows|followers|blocks|mutes <did|handle>` (#48), and M21 interactions: reply to, like or repost any Bluesky post from in-game — `/atmospheric reply <at-uri> <text>`, `/atmospheric like <at-uri>`, `/atmospheric repost <at-uri>` (#53).
+**v0.2.0** (13 November 2026) is the current release. The mod is usable in-game today through the `atmospheric-worker` sidecar: the injected runtime is std-only, and every network or disk operation happens in the worker. Public reads work signed out; posting and record writes need a Bluesky account.
 
-### Roadmap: porting atpcraft to Horizon
+Shipped so far: OAuth and app-password login, text and screenshot posts, notifications, atpcraft-compatible chat, signed snapshots and skins, a server profile, read sides for lists, labels, presence, skins, chat history and server profiles, social-graph reads, and reply/like/repost.
 
-atpcraft is a server-side Fabric mod; Horizon native mods can hook the server side too (`native_tick`/`native_world_lifecycle` run there), so the port maps onto milestones and later work. atpcraft's lexicon schemas are reimplemented here as data (its repo carries no licence, so no code is copied — only the wire formats are matched):
-
-| atpcraft feature | atmospheric-horizon |
-|---|---|
-| Bluesky sign-in | **M8**: localhost OAuth login (`/atmospheric login <handle>` — PAR + PKCE + DPoP with a loopback redirect; app-password login remains as the fallback via bare `/atmospheric login`) |
-| Chat messages as records (`at.atpcraft.player.chat`) | **M5**: chat hook mirrors each line; the worker publishes TID-keyed records when `post_chat_messages` is on, and `/atmospheric chat <text>` always publishes one. **M16** (read side): `/atmospheric chat-of <did|handle>` lists the collection on the subject's own PDS (unauthenticated) and reports the count plus the newest messages — chat records are unsigned by design, so there is no endorsement to verify |
-| Player state snapshots (`at.atpcraft.player.snapshot`, `defs`) | **M6**: keybind or `/atmospheric snapshot` publishes a self-endorsed record (Ed25519 key generated + persisted by the worker; rkey = key id, monotonic version). **M13** (read side): `/atmospheric player <did|handle>` pages `com.atproto.repo.listRecords` for the collection on the subject's own PDS, takes the highest `version`, and verifies the endorsement against your own key or `trusted_server_keys` in `config.json` |
-| Reading other players' snapshots (presence) | **M13**: as above — the client-side half of atpcraft's player-data sync |
-| Skins and capes as blobs on the PDS | **M9**: skin/cape PNGs uploaded as blobs, published as an Ed25519-endorsed `at.atpcraft.player.skin` record (rkey = key id, `putRecord` upsert) via `/atmospheric skin [path] [default|slim]`. **M14** (read side): `/atmospheric skin-of <did|handle>` lists the collection on the subject's own PDS, verifies the endorsement against your own key or `trusted_server_keys`, and downloads the skin/cape blobs (`com.atproto.sync.getBlob`) into the mod's `skins/` folder — only when the record verifies |
-| Labeler publishing player activity | **M12** (read side only): labels on a subject via the AppView view `labels` fields (`/atmospheric labels <subject>`), and `com.atproto.label.queryLabels` at a labeler's `#atproto_labeler` DID-doc endpoint (`/atmospheric labeler <did> [subject]`). Label *issuance* stays server-side — a client mod cannot host the HTTP endpoint |
-| Server profile record (`at.atpcraft.server.profile`) | **M10**: published at rkey `self` via `putRecord` with `/atmospheric server` (identity fields from `config.json`, `signingKey` block = the mod's Ed25519 key, `createdAt` preserved across re-publishes). **M19** (read side): `/atmospheric server-of <did|handle>` lists the collection on the subject's own PDS (unauthenticated) and reports the server name, MC version, capabilities, and whether its published signing key is trusted, unknown, or mismatched |
-| Join gate reading a public Bluesky list | **M11** (read side): `/atmospheric list <at-uri | bsky.app URL>` fetches member DIDs via paginated `app.bsky.graph.getList` on the public AppView; **M15** (the decision): `/atmospheric gate <list> <did|handle>` reports whether the DID is on the list, fail-closed (enforcement itself stays server-side) |
-| Web server for login pages / lexicons | not planned for the client mod; OAuth sign-in is the alternative |
+Not yet: launcher registry distribution, which waits on third-party native-mod support upstream ([#28](https://github.com/ewanc26/atmospheric-horizon/issues/28)); label issuance and join-gate enforcement, which stay server-side; and writing follows, blocks or mutes.
 
 ## Features
 
-- Post text and in-game screenshots to Bluesky from a keybind
-- Publish chat messages as `at.atpcraft.player.chat` records (atpcraft-compatible, TID-keyed)
-- Publish your skin/cape as an `at.atpcraft.player.skin` record (atpcraft-compatible, blob upload + Ed25519 endorsement, M9)
-- Publish/refresh an `at.atpcraft.server.profile` descriptor at rkey `self` (atpcraft-compatible, M10)
-- Read any account's server descriptor: `/atmospheric server-of <did|handle>` lists `at.atpcraft.server.profile` on their own PDS, checks its published signing key against `trusted_server_keys` and your own key, and displays the server name, Minecraft version, and capabilities (M19)
-- Read any account's public social graph: `/atmospheric follows|followers|blocks|mutes <did|handle>` pages `app.bsky.graph.getFollows`/`getFollowers`/`getBlocks`/`getMutes` on the public AppView and reports the count plus the first handles (M20)
-- Take part in the conversation: `/atmospheric reply <at-uri> <text>`, `/atmospheric like <at-uri>` and `/atmospheric repost <at-uri>` read the target post's strong ref (and thread root) from its author's PDS and publish the matching record to your own repo (M21)
-- Read public Bluesky lists (the join-gate read side): `/atmospheric list <reference>` paginates `app.bsky.graph.getList` and reports the member DIDs (M11), and `/atmospheric gate <list> <did|handle>` decides membership fail-closed (M15)
-- Read labels on accounts, posts and lists via the AppView (`/atmospheric labels <subject>`), and query a labeler directly through its DID-document `#atproto_labeler` endpoint (`/atmospheric labeler <did> [subject]`) (M12)
-- Read any player's latest server-endorsed snapshot record (presence): `/atmospheric player <did|handle>` lists `at.atpcraft.player.snapshot` on their own PDS and verifies the Ed25519 endorsement against your own key or the configured `trusted_server_keys` (M13)
-- Read any player's latest server-endorsed skin record and download the skin/cape PNGs: `/atmospheric skin-of <did|handle>` verifies the record the same way and saves the blobs under the mod's `skins/` folder (M14)
-- Read any player's mirrored chat history: `/atmospheric chat-of <did|handle>` lists `at.atpcraft.player.chat` on their own PDS and reports the count plus the newest messages (M16; chat records are unsigned by design)
-- OAuth login in the system browser (`/atmospheric login <handle>`, M8 — DPoP-bound tokens, loopback redirect), with app-password login (`com.atproto.server.createSession`) as the fallback via the [ATrium](https://github.com/atrium-rs/atrium) SDK
-- Notification digest panel in the HUD
-- All network and disk I/O on one worker thread — the game thread never blocks
-- Reads and writes the PDS you configure, and nothing else
+- **Post from the game.** Publish text with `/atmospheric post`, or the latest F2 screenshot or your current position from a keybind, plus optional death messages.
+- **Join the conversation.** Reply to, like or repost any Bluesky post, from its AT-URI or its bsky.app URL.
+- **Notifications in the HUD.** A digest line, a poll timer and a cursor that survives restarts.
+- **atpcraft-compatible records.** Chat messages, Ed25519-endorsed snapshots and skins with blob uploads, and a server descriptor at rkey `self`.
+- **Read the public side.** List membership (with a fail-closed gate decision), labels and labeler queries, player presence, skins, chat history, server profiles, and follows/followers/blocks/mutes.
+- **Sign in properly.** OAuth in the system browser (PAR + PKCE + DPoP, loopback redirect), with app passwords as the fallback.
+- **Never block the game.** All network and disk I/O lives on one worker thread; the game thread only exchanges JSON lines with it.
+- **No surprises.** Writes go to your own PDS, public reads go to the configured AppView or the subject's PDS, and nothing is sent anywhere else.
 
 ## Requirements
 
-- Rust 1.95+ (pinned by `rust-toolchain.toml`)
-- Linux for native staging (Windows/macOS not validated by the template)
-- A Minecraft: Java Edition 26.3 install via the official launcher
-- A Bluesky account (OAuth in the system browser, or an app password as the fallback)
+| | |
+| --- | --- |
+| Rust | 1.95+ (pinned by `rust-toolchain.toml`) |
+| Game | Minecraft: Java Edition 26.3 through the official launcher |
+| Account | A Bluesky account (OAuth, or an app password as the fallback) |
+| OS | Linux for native staging; the worker is released for Linux x86_64, macOS arm64 and Windows x86_64 |
 
 ## Install
+
+The published mod installs through the Horizon launcher's Mods page once it is in the [horizon-mods registry](https://playhorizon.dev/mods). Native mods are built by the launcher against the pinned revisions in `compatibility.json`.
+
+Until then, install the sidecar by hand:
+
+1. Download the archive for your OS from [Releases](https://github.com/ewanc26/atmospheric-horizon/releases) — `atmospheric-worker-vX.Y.Z-linux-x86_64.tar.gz`, `...-macos-aarch64.tar.gz` or `...-windows-x86_64.zip` — plus `atmospheric-horizon-mixins-vX.Y.Z.tar.gz` and `SHA256SUMS`. Check the hash.
+2. Put `atmospheric-worker` next to the game executable, or set `ATMOSPHERIC_WORKER_BIN` to its path.
+3. Stage `mixins/atmospheric/` and `compatibility.json` from the mixins bundle as described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+The sidecar keeps its files in `<game exe dir>/atmospheric-data/`; set `ATMOSPHERIC_DATA_DIR` to move that folder. (When Horizon spawns the worker through its native storage API, the folder is `horizon-mods/.horizon-mod-data/atmospheric/` instead.) When the game exits, the pipe closes and the worker exits with it. With no worker found, commands are no-ops and the HUD stays hidden.
+
+## Build
 
 ```bash
 git clone https://github.com/ewanc26/atmospheric-horizon.git
 cd atmospheric-horizon
 cargo fetch --locked
 cargo test --workspace --locked
-```
-
-The published mod installs through the Horizon launcher's Mods page once it is in the [horizon-mods registry](https://playhorizon.dev/mods); native mods are built by the launcher against the pinned revisions in `compatibility.json`.
-
-**Sidecar worker (M17).** The game-side hooks talk to a separate worker process, not to code linked into the game (horizon-mixins allow-lists bundle-crate deps to Horizon's `Cargo.lock`, which has no `atrium-api`/`reqwest` — issue #2). The [releases page](https://github.com/ewanc26/atmospheric-horizon/releases) carries a prebuilt `atmospheric-worker` for Linux x86_64, macOS arm64 and Windows x86_64, plus the mixins bundle and a `SHA256SUMS` file; download the archive for your OS, check its hash, and unpack the binary next to the game executable. To build it yourself:
-
-```bash
 cargo build --release -p atmospheric --bin atmospheric-worker
-cp target/release/atmospheric-worker <dir of the horizon-client executable>/   # or set ATMOSPHERIC_WORKER_BIN=/path/to/atmospheric-worker
 ```
 
-The mixins bundle (`atmospheric-horizon-mixins-vX.Y.Z.tar.gz`) holds `mixins/atmospheric/` plus `compatibility.json`, so it can be staged with the pinned Horizon export exactly as described in `docs/ARCHITECTURE.md`.
+Copy `target/release/atmospheric-worker` next to the game executable. [CONTRIBUTING.md](CONTRIBUTING.md) lists the fmt, clippy and test gates; [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) covers staging the mixins bundle.
 
-The worker stores its files (`config.json`, `session.json`, …) in `<game exe dir>/atmospheric-data/` by default — override with `ATMOSPHERIC_DATA_DIR`. When the game exits, the pipe closes and the worker exits with it. With no binary found, the mod's commands are no-ops and the HUD stays hidden.
+## Usage
+
+### Keybinds
+
+| Key | Action |
+| --- | --- |
+| `B` | Post your current position |
+| `V` | Post the latest screenshot from `screenshots/` |
+| `C` | Publish a player-state snapshot |
+
+### Commands
+
+All commands are under `/atmospheric`:
+
+| Command | What it does |
+| --- | --- |
+| `login [handle]` | Sign in; with a handle, OAuth in the system browser, without one, an app password |
+| `logout` | Drop the session |
+| `post <text>` | Publish a text post |
+| `notifications` | Poll and show the notification digest |
+| `chat <text>` | Publish one `at.atpcraft.player.chat` record |
+| `snapshot` | Publish a signed player-state snapshot |
+| `skin [path] [default\|slim]` | Publish a skin/cape record and its blobs |
+| `server` | Publish or refresh the server profile |
+| `server-of <did\|handle>` | Read and verify a server profile |
+| `list <at-uri\|bsky.app URL>` | List the members of a Bluesky list |
+| `gate <list> <did\|handle>` | Decide list membership, fail-closed |
+| `labels <subject>` | Read labels from the AppView |
+| `labeler <did> [subject]` | Query a labeler directly |
+| `player <did\|handle>` | Read a player's latest verified snapshot |
+| `skin-of <did\|handle>` | Read a verified skin and download its blobs |
+| `chat-of <did\|handle>` | Read a player's mirrored chat history |
+| `follows\|followers\|blocks\|mutes <did\|handle>` | Read a public social graph |
+| `reply <at-uri> <text>` | Reply to a post |
+| `like <at-uri>` | Like a post |
+| `repost <at-uri>` | Repost a post |
+
+`bsky.app` post URLs work wherever an `at-uri` is accepted. The `ATMOSPHERIC_*` probes in [`examples/pds_check.rs`](crates/atmospheric/examples/pds_check.rs) exercise the network paths without starting the game.
+
+## Configuration
+
+`config.json` lives in the worker's data folder. The defaults are:
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `pds_url` | `https://bsky.social` | PDS to read from and write to |
+| `appview_url` | `https://public.api.bsky.app` | AppView for public reads |
+| `identifier` | empty | Handle, email or DID for app-password login |
+| `app_password` | empty | App password — never an account password |
+| `poll_interval_secs` | `60` | Seconds between notification polls |
+| `persist_session` | `true` | Keep the refresh token in `session.json` across restarts |
+| `post_death_messages` | `false` | Post a text post when you die |
+| `post_chat_messages` | `false` | Mirror every chat line to your repo |
+| `chat_server_id` | `horizon-client` | The `server` field on chat records |
+| `skin_path`, `cape_path` | empty | Default PNGs for `/atmospheric skin` |
+| `skin_model` | `default` | Skin model: `default` or `slim` |
+| `oauth_client_id` | empty | Hosted client-metadata URL when loopback registration is unsupported |
+| `server_name`, `server_description`, `server_address`, `server_website`, `server_contact` | empty | Server-profile identity; blank omits the field, and `server_name` falls back to the login handle |
+| `server_capabilities` | `player-data-sync`, `skin-sync` | Capability list, sorted and deduped on write |
+| `game_version` | `26.3` | `minecraftVersion` in the server profile |
+| `trusted_server_keys` | `[]` | `{key_id, public_key}` endorsements accepted on reads |
+
+The app password is the only secret in `config.json`; OAuth sessions never store one.
+
+## Roadmap
+
+M1–M21 are shipped, through v0.1.0 and v0.2.0; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, the server-side halves a client mod cannot host, and the next read/write surfaces.
+
+### Porting atpcraft
+
+atpcraft is a server-side Fabric mod, while Horizon native mods can hook the server side too (`native_tick`/`native_world_lifecycle` run there). Its lexicons are reimplemented here as data — no code is copied, only the wire formats are matched.
+
+| atpcraft feature | atmospheric-horizon |
+| --- | --- |
+| Bluesky sign-in | **M8**: localhost OAuth login (`/atmospheric login <handle>` — PAR + PKCE + DPoP with a loopback redirect); app-password login remains the fallback via bare `/atmospheric login` |
+| Chat messages as records (`at.atpcraft.player.chat`) | **M5**: the chat hook mirrors each line, and the worker publishes TID-keyed records when `post_chat_messages` is on; `/atmospheric chat <text>` always publishes one. **M16** (read side): `/atmospheric chat-of <did\|handle>` lists the collection on the subject's own PDS, unauthenticated, and reports the count plus the newest messages — chat records are unsigned by design |
+| Player state snapshots (`at.atpcraft.player.snapshot`, `defs`) | **M6**: the keybind or `/atmospheric snapshot` publishes a self-endorsed record (the worker generates and persists an Ed25519 key; rkey = key id, monotonic version). **M13** (read side): `/atmospheric player <did\|handle>` pages `com.atproto.repo.listRecords`, takes the highest `version`, and verifies the endorsement against your own key or `trusted_server_keys` |
+| Reading other players' snapshots (presence) | **M13**: as above — the client-side half of atpcraft's player-data sync |
+| Skins and capes as blobs on the PDS | **M9**: skin/cape PNGs are uploaded as blobs and published as an Ed25519-endorsed `at.atpcraft.player.skin` record (rkey = key id, `putRecord` upsert) via `/atmospheric skin [path] [default\|slim]`. **M14** (read side): `/atmospheric skin-of <did\|handle>` verifies the endorsement against your own key or `trusted_server_keys`, then downloads the skin/cape blobs into the mod's `skins/` folder — only when the record verifies |
+| Labeler publishing player activity | **M12** (read side only): labels on a subject via the AppView's `labels` fields (`/atmospheric labels <subject>`), and `com.atproto.label.queryLabels` at a labeler's `#atproto_labeler` DID-document endpoint (`/atmospheric labeler <did> [subject]`). Label *issuance* stays server-side — a client mod cannot host the HTTP endpoint |
+| Server profile record (`at.atpcraft.server.profile`) | **M10**: published at rkey `self` via `putRecord` with `/atmospheric server` (identity fields from `config.json`, `signingKey` block = the mod's Ed25519 key, `createdAt` preserved across re-publishes). **M19** (read side): `/atmospheric server-of <did\|handle>` lists the collection and reports the server name, MC version, capabilities, and whether its published signing key is trusted, unknown or mismatched |
+| Join gate reading a public Bluesky list | **M11** (read side): `/atmospheric list <at-uri \| bsky.app URL>` fetches member DIDs via paginated `app.bsky.graph.getList`. **M15** (the decision): `/atmospheric gate <list> <did\|handle>` reports whether the DID is on the list, fail-closed (enforcement itself stays server-side) |
+| Web server for login pages / lexicons | not planned for the client mod; OAuth sign-in is the alternative |
 
 ## Network use
 
-This mod talks to the network **by design**: the AT Protocol services needed to reach and authenticate with your account's PDS — nothing else. All network I/O happens in the spawned local `atmospheric-worker` process (M17), never in the game itself; the game and the worker exchange plain JSON commands/events over a local pipe only.
+This mod talks to the network **by design**: the AT Protocol services needed to reach and authenticate with your account's PDS, plus the public AppView and labelers — nothing else. All network I/O happens in the spawned local `atmospheric-worker` process, never in the game; the game and the worker exchange plain JSON commands and events over a local pipe only.
 
-- Identity resolution for OAuth login (M8) and for bsky.app list URLs (M11), using the public AT Protocol directory services: `com.atproto.identity.resolveHandle` on `https://bsky.social`, the DID document from `https://plc.directory` (did:plc) or the domain's `/.well-known/did.json` (did:web), and the PDS's own `/.well-known/oauth-protected-resource` + authorization server `/.well-known/oauth-authorization-server`.
-- Public list reads (M11/M15, the join-gate read side and decision): unauthenticated `app.bsky.graph.getList` (paged, limit 100) against the public AppView `https://public.api.bsky.app` — configurable via `appview_url` in `config.json`; `/atmospheric gate` uses the same read and compares the subject's resolved DID against the members (a read failure is reported as a deny-with-reason, never a silent allow).
-- Public label reads (M12, the labeler read side): unauthenticated `app.bsky.actor.getProfile`, `app.bsky.feed.getPosts` and `app.bsky.graph.getList` (first page, limit 1 — the list view itself carries the labels) against the same AppView (`appview_url`), reading the `labels` field of the returned views for `/atmospheric labels <subject>`; and unauthenticated `com.atproto.label.queryLabels` (paged, limit 100) against a labeler's service endpoint for `/atmospheric labeler <did> [subject]` — the endpoint is the `#atproto_labeler` (type `AtprotoLabeler`) service of the labeler DID's document, fetched from `https://plc.directory` (did:plc) or the domain's `/.well-known/did.json` (did:web) like the other DID documents.
-- Player snapshot reads (M13, the presence read side): for `/atmospheric player <did|handle>`, handle resolution and the DID-document fetch work exactly as above, then unauthenticated `com.atproto.repo.listRecords` for `at.atpcraft.player.snapshot` (paged, limit 100) against the subject's own PDS — the `#atproto_pds` service endpoint of their DID document. The only value sent in the query is the subject's DID/handle; the records come back to you, nothing about you goes out.
-- Player skin reads (M14, the skin-sync read side): for `/atmospheric skin-of <did|handle>`, the same resolution, then unauthenticated `com.atproto.repo.listRecords` for `at.atpcraft.player.skin` (paged, limit 100) against the subject's own PDS, and — only when the record's endorsement verifies — unauthenticated `com.atproto.sync.getBlob` for the skin/cape blob CIDs (query: the subject's DID and the CID) to download the PNGs.
-- Chat-history reads (M16, the read side of the M5 chat mirror): for `/atmospheric chat-of <did|handle>`, the same resolution, then unauthenticated `com.atproto.repo.listRecords` for `at.atpcraft.player.chat` (paged, limit 100) against the subject's own PDS. Chat records are unsigned (plain records in the author's repo), so nothing is verified — the query carries only the subject's DID.
-- Server profile reads (M19, the read side of the M10 server descriptor): for `/atmospheric server-of <did|handle>`, the same account resolution (handle to DID via directory, then DID doc for the PDS endpoint), then unauthenticated `com.atproto.repo.listRecords` for `at.atpcraft.server.profile` against the subject's own PDS. No credentials or player state are sent.
-- Social-graph reads (M20): for `/atmospheric follows|followers|blocks|mutes <did|handle>`, handle resolution as above, then unauthenticated `app.bsky.graph.getFollows`, `getFollowers`, `getBlocks` or `getMutes` (paged, limit 100) against the public AppView at `appview_url`. The query carries only the subject's DID; the member list comes back to you and nothing about you goes out.
-- Interactions (M21): for `/atmospheric reply|like|repost <at-uri>` (or a bsky.app post URL), the target post is read unauthenticated with `com.atproto.repo.getRecord` from the author's PDS (query: their DID, collection `app.bsky.feed.post`, and the record key) to obtain its CID and, for replies, its thread root. The interaction is then written to your own PDS with `com.atproto.repo.createRecord`: `app.bsky.feed.like` or `app.bsky.feed.repost` carrying a `subject` strong ref `{uri, cid}`, or an `app.bsky.feed.post` carrying `text`, `createdAt` and `reply: {root, parent}` strong refs. The read sends nothing about you.
-- OAuth login (M8): a pushed authorization request (`POST <authorization server>/oauth/par`) with PKCE and a DPoP key thumbprint, the authorize page opened in your system browser (the authorize URL is always shown first, and if no browser can be launched the worker tells you to open the link manually), the redirect received on `http://127.0.0.1:<port>/` (loopback only), and the code exchanged at the authorization server's token endpoint (`POST <authorization server>/oauth/token`, also used for refreshes). Every request to the authorization server and every request to the PDS while OAuth-logged-in carries `Authorization: DPoP <access token>` plus a `DPoP` proof JWT (ES256, signed by a per-install P-256 key). The client registers as the loopback client `http://localhost?scope=atproto%20transition%3Ageneric` (the spec's localhost exception); if your PDS's authorization server does not support it, set `oauth_client_id` in `config.json` to a hosted copy of `oauth-client-metadata.json` — this repo's own GitHub Pages copy is served at `https://ewanc26.github.io/atmospheric-horizon/oauth-client-metadata.json` (#21).
-- Sent to your PDS: your identifier and app password (`com.atproto.server.createSession`), a session check after login (`com.atproto.server.getSession`), notification polling (`app.bsky.notification.listNotifications` with a `seenAt` timestamp, on a timer and on `/atmospheric notifications`), session resume across restarts (`com.atproto.server.refreshSession` with the stored refresh token — app-password sessions — or the OAuth token endpoint's `refresh_token` grant with the stored DPoP-bound refresh token, once per game start), and the records you choose to make: text and screenshot posts (`com.atproto.repo.uploadBlob` for the image, then `com.atproto.repo.createRecord` with an `app.bsky.embed.images` embed), chat lines (`com.atproto.repo.createRecord` in the `at.atpcraft.player.chat` collection, TID-keyed — only when `post_chat_messages` is enabled in `config.json`, or one at a time via `/atmospheric chat <text>`), player-state snapshots (`com.atproto.repo.createRecord` in the `at.atpcraft.player.snapshot` collection, keybind or `/atmospheric snapshot`, carrying your position/dimension and an Ed25519 endorsement signature), skin/cape (`com.atproto.repo.uploadBlob` for each PNG, a `com.atproto.repo.getRecord` to keep other servers' endorsements, then `com.atproto.repo.putRecord` in the `at.atpcraft.player.skin` collection at the endorsing key id — `/atmospheric skin [path] [default|slim]`, M9), the server profile (a `com.atproto.repo.getRecord` to preserve `createdAt`, then `com.atproto.repo.putRecord` in the `at.atpcraft.server.profile` collection at rkey `self` — `/atmospheric server`, M10), and death messages (an `app.bsky.feed.post` when you die, only when `post_death_messages` is enabled). `/atmospheric logout` drops the session.
-- Stored on disk: files in the mod's own storage folder `horizon-mods/.horizon-mod-data/atmospheric/` — never in world saves. The files that hold secrets — `config.json` (PDS URL, identifier, app password, poll interval, post-death-messages flag, post-chat-messages flag, chat server id, skin/cape paths, skin model, server-profile identity fields/capabilities, game version, AppView URL, trusted server endorsement keys), `signing-key.json` (the Ed25519 seed for snapshot endorsements, generated once) and `session.json` (the refresh token for resuming the session across restarts; for OAuth sessions it also holds the DPoP private key (JWK) and the token endpoint; app passwords are never stored in it) — are written with owner-only permissions (0600 on unix; on Windows/macOS the OS file ACLs apply as usual). Delete `session.json` or use `/atmospheric logout` to revoke a session. `cursor.json` (the notification seen-cursor, so restarts do not re-show old notifications) and `snapshot-state.json` (the snapshot version counter, so records never roll back) are not secret. Verified skin/cape PNGs downloaded by `/atmospheric skin-of` land in the `skins/` subfolder of the mod's storage folder (content-addressed by blob CID; not secret, and only written for records whose endorsement verified). The image you post is read from the game's `screenshots/` folder only when you press the post-screenshot keybind; the path of the latest screenshot is otherwise kept in memory only. The skin/cape PNGs you publish with `/atmospheric skin` are read from the path you pass (or `skin_path`/`cape_path` in `config.json`) only at that moment; nothing else is read. The login session is held in memory for the running game; the refresh token is persisted (see above) so restarts resume automatically unless `persist_session` is off.
-- Nothing else: no telemetry, no analytics, no other endpoints.
+### Identity and login
 
-## Files
+- Handle resolution uses `com.atproto.identity.resolveHandle` on `https://bsky.social`, and DID documents come from `https://plc.directory` (did:plc) or the domain's `/.well-known/did.json` (did:web). The DID document supplies the PDS's `#atproto_pds` service endpoint and a labeler's `#atproto_labeler` endpoint.
+- OAuth (M8) discovers the PDS's `/.well-known/oauth-protected-resource` and the authorization server's `/.well-known/oauth-authorization-server`, then sends a pushed authorization request (`POST <authorization server>/oauth/par`) with PKCE and a DPoP key thumbprint. The authorize page opens in your system browser (the URL is always shown first; if no browser can launch, the worker tells you to open it manually), and the redirect is received on `http://127.0.0.1:<port>/` (loopback only). The code is exchanged at the authorization server's token endpoint (`POST <authorization server>/oauth/token`), which is also used for refreshes.
+- Every request to the authorization server, and every PDS request while OAuth-logged-in, carries `Authorization: DPoP <access token>` plus a `DPoP` proof JWT (ES256, signed by a per-install P-256 key). The client registers as the loopback client `http://localhost?scope=atproto%20transition%3Ageneric`; if your PDS's authorization server does not support that, set `oauth_client_id` to a hosted copy of `oauth-client-metadata.json`. This repo serves one at `https://ewanc26.github.io/atmospheric-horizon/oauth-client-metadata.json` ([#21](https://github.com/ewanc26/atmospheric-horizon/issues/21)).
+- App-password login uses `com.atproto.server.createSession`, checks the session with `com.atproto.server.getSession`, and resumes restarts with `com.atproto.server.refreshSession` (or the OAuth token endpoint's `refresh_token` grant). `/atmospheric logout` drops the session.
 
-- `mixins/atmospheric/` — horizon-mixins declarations: the injected `runtime.rs` module (std-only; also spawns/bridges the M17 sidecar worker), its placeholder hook, and `horizon-mixin.toml`
-- `crates/atmospheric/` — the protocol library: `config`, `session`, `oauth` (M8: DPoP/PKCE/PAR/loopback/token flow), `actions`, `notifications`, `lists` (M11/M15), `labels` (M12), `presence` (M13), `skins` (M14), `chats` (M16), `servers` (M19: server profile reads), `graph` (M20: social-graph reads), `interactions` (M21: reply/like/repost), `records` (atpcraft lexicon types), `tid` (record keys), `signing` (Ed25519 endorsements), `worker` (all game-free and testable); plus the `atmospheric-worker` sidecar bin (`src/bin/atmospheric-worker.rs`, M17) and its end-to-end test (`tests/sidecar.rs`)
-- `oauth-client-metadata.json` — the OAuth client metadata document to host when an authorization server does not support the loopback client; this repo serves it via GitHub Pages at `https://ewanc26.github.io/atmospheric-horizon/oauth-client-metadata.json` (#21) — point `oauth_client_id` at that URL
-- `compatibility.json` — the pinned Horizon and horizon-mixins revisions the bundle is built against
-- `CHANGELOG.md` — release notes and the release process (tag `vX.Y.Z`; the release workflow builds the worker archives and mixins bundle)
-- `docs/ARCHITECTURE.md` — how the layers connect, for reviewers and contributors
+### Public reads
 
-## Licence
+All of these are unauthenticated, and the query carries only the subject's DID or the requested record. No credentials or player state are sent.
 
-AGPL-3.0
+- **Lists and the join gate (M11/M15):** `app.bsky.graph.getList` (paged, limit 100) against `appview_url` for `/atmospheric list` and `/atmospheric gate`. A failed read is a deny-with-reason, never a silent allow.
+- **Labels (M12):** `app.bsky.actor.getProfile`, `app.bsky.feed.getPosts` and `app.bsky.graph.getList` (first page, limit 1 — the view carries the labels) against the same AppView for `/atmospheric labels`; and `com.atproto.label.queryLabels` (paged, limit 100) at the labeler's `#atproto_labeler` endpoint for `/atmospheric labeler`.
+- **Presence (M13):** `com.atproto.repo.listRecords` for `at.atpcraft.player.snapshot` (paged, limit 100) against the subject's own PDS for `/atmospheric player`.
+- **Skins (M14):** `com.atproto.repo.listRecords` for `at.atpcraft.player.skin`, then — only when the endorsement verifies — `com.atproto.sync.getBlob` for the skin/cape blob CIDs (query: the subject's DID and the CID) to download the PNGs.
+- **Chat history (M16):** `com.atproto.repo.listRecords` for `at.atpcraft.player.chat` against the subject's own PDS for `/atmospheric chat-of`. Chat records are unsigned by design, so nothing is verified.
+- **Server profiles (M19):** `com.atproto.repo.listRecords` for `at.atpcraft.server.profile` against the subject's own PDS for `/atmospheric server-of`.
+- **Social graphs (M20):** `app.bsky.graph.getFollows`, `getFollowers`, `getBlocks` and `getMutes` (paged, limit 100) against `appview_url` for `/atmospheric follows|followers|blocks|mutes`. The member list comes back to you; nothing about you goes out.
+- **Interaction targets (M21):** `com.atproto.repo.getRecord` from the target author's PDS (query: their DID, collection `app.bsky.feed.post`, and record key) to obtain the post's CID and, for replies, its thread root.
+
+### Writes to your PDS
+
+- Notification polling uses `app.bsky.notification.listNotifications` with a `seenAt` timestamp, on a timer and on `/atmospheric notifications`.
+- Text and screenshot posts use `com.atproto.repo.uploadBlob` for the image, then `com.atproto.repo.createRecord` with an `app.bsky.embed.images` embed (or a plain text post). The post-location keybind and death messages publish `app.bsky.feed.post` records the same way; death messages only when `post_death_messages` is enabled.
+- Chat lines use `com.atproto.repo.createRecord` in the `at.atpcraft.player.chat` collection, TID-keyed — only when `post_chat_messages` is enabled, or one at a time via `/atmospheric chat <text>`.
+- Snapshots use `com.atproto.repo.createRecord` in `at.atpcraft.player.snapshot`, carrying your position/dimension and an Ed25519 endorsement signature.
+- Skins use `com.atproto.repo.uploadBlob` for each PNG, `com.atproto.repo.getRecord` to keep other servers' endorsements, then `com.atproto.repo.putRecord` in `at.atpcraft.player.skin` at the endorsing key id.
+- The server profile uses `com.atproto.repo.getRecord` to preserve `createdAt`, then `com.atproto.repo.putRecord` in `at.atpcraft.server.profile` at rkey `self`.
+- Interactions use `com.atproto.repo.createRecord`: `app.bsky.feed.like` or `app.bsky.feed.repost` with a `subject` strong ref `{uri, cid}`, or an `app.bsky.feed.post` with `text`, `createdAt` and `reply: {root, parent}` strong refs.
+
+### Stored on disk
+
+Everything lives in the worker's own data folder — never in a world save. In sidecar mode that is `<game exe dir>/atmospheric-data/`; under Horizon's native storage API it is `horizon-mods/.horizon-mod-data/atmospheric/`.
+
+- `config.json` holds the settings above, including the PDS URL, identifier, app password, poll interval, post flags, chat server id, skin/cape paths and model, server-profile fields, game version, AppView URL and trusted endorsement keys.
+- `signing-key.json` holds the Ed25519 seed for snapshot and skin endorsements, generated once.
+- `session.json` holds the refresh token used to resume across restarts. For OAuth sessions it also holds the DPoP private key (JWK) and token endpoint; app passwords are never stored in it. Delete it or use `/atmospheric logout` to revoke a session.
+- `cursor.json` (the notification seen-cursor, so restarts do not re-show old notifications) and `snapshot-state.json` (the snapshot version counter, so records never roll back) are not secret.
+- `skins/` holds skin/cape PNGs downloaded by `/atmospheric skin-of`, content-addressed by blob CID. They are written only for records whose endorsement verified.
+
+The files that hold secrets are written with owner-only permissions (0600 on unix; the OS file ACLs apply on Windows and macOS). The image you post is read from the game's `screenshots/` folder only when you press the post-screenshot keybind; otherwise the latest path stays in memory. Skin/cape PNGs are read from the path you pass (or `skin_path`/`cape_path`) only at that moment; nothing else is read. The login session is held in memory for the running game; the refresh token is persisted so restarts resume automatically unless `persist_session` is off.
+
+### Nothing else
+
+No telemetry, no analytics, no other endpoints.
+
+## Layout
+
+- `mixins/atmospheric/` — horizon-mixins declarations: the injected std-only `runtime.rs` (which also spawns and bridges the sidecar), its placeholder hook, and `horizon-mixin.toml`.
+- `crates/atmospheric/` — the protocol library: `config`, `session`, `oauth` (M8), `actions`, `notifications`, `lists` (M11/M15), `labels` (M12), `presence` (M13), `skins` (M14), `chats` (M16), `servers` (M19), `graph` (M20), `interactions` (M21), `records` (atpcraft lexicon types), `tid`, `signing` (Ed25519 endorsements) and `worker`, plus the `atmospheric-worker` bin and its end-to-end test (`tests/sidecar.rs`).
+- `oauth-client-metadata.json` — the OAuth client metadata document to host when an authorization server does not support the loopback client ([#21](https://github.com/ewanc26/atmospheric-horizon/issues/21)).
+- `compatibility.json` — the pinned Horizon and horizon-mixins revisions the bundle is built against.
+- `CHANGELOG.md` — release notes and the release process.
+- `docs/ARCHITECTURE.md` — how the layers connect, for reviewers and contributors.
 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and the checks required before opening a pull request. [AGENTS.md](AGENTS.md) carries the rules for AI coding agents.
 
+## Licence
+
+AGPL-3.0-only. See [LICENSE](LICENSE).
+
 ## Support
 
 If you find this project useful, consider supporting its development:
+
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-F16061?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/ewancroft)
 [![GitHub Sponsors](https://img.shields.io/badge/GitHub%20Sponsors-30363D?style=for-the-badge&logo=github&logoColor=white)](https://github.com/sponsors/ewanc26)
 
