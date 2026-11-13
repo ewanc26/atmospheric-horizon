@@ -305,6 +305,9 @@ struct Worker {
     /// Whether the local player's Colibri profile was checked for this bridge
     /// session (M30).
     colibri_profile_checked: bool,
+    /// Whether the local player's own Colibri membership was repaired for this
+    /// bridge session (M32).
+    colibri_player_membership_checked: bool,
     /// Player-authored Colibri messages inside the rolling send window (M31).
     colibri_send_times: VecDeque<Instant>,
     /// The DID the current `colibri_send_times` window belongs to.
@@ -418,6 +421,7 @@ impl Worker {
             colibri_last_blank: None,
             colibri_started_at: None,
             colibri_profile_checked: false,
+            colibri_player_membership_checked: false,
             colibri_send_times: VecDeque::new(),
             colibri_rate_did: None,
         }
@@ -705,6 +709,7 @@ impl Worker {
                 *self.dpop.lock().unwrap() = None;
                 self.stored_session = None;
                 self.colibri_profile_checked = false;
+                self.colibri_player_membership_checked = false;
                 let _ = std::fs::remove_file(self.storage_dir.join(SESSION_FILE));
                 self.emit(Event::Session(SessionState::LoggedOut));
             }
@@ -1557,6 +1562,8 @@ impl Worker {
                 }
                 self.emit(Event::Session(SessionState::LoggedIn { did }));
                 self.colibri_profile_checked = false;
+                self.colibri_player_membership_checked = false;
+                self.check_colibri_player_membership().await;
                 self.check_colibri_profile().await;
             }
             Err(error) => self.emit(Event::Session(SessionState::Failed {
@@ -1681,6 +1688,8 @@ impl Worker {
                 }
                 self.emit(Event::Session(SessionState::LoggedIn { did }));
                 self.colibri_profile_checked = false;
+                self.colibri_player_membership_checked = false;
+                self.check_colibri_player_membership().await;
                 self.check_colibri_profile().await;
             }
             Err(error) => self.emit(Event::Session(SessionState::Failed {
@@ -2066,6 +2075,7 @@ impl Worker {
         self.colibri_started_at = Some(Instant::now());
         self.spawn_colibri_stream(config.colibri_appview_url.clone(), token);
         self.emit_colibri(None);
+        self.check_colibri_player_membership().await;
         self.check_colibri_profile().await;
     }
 
@@ -2123,6 +2133,43 @@ impl Worker {
         self.emit_colibri(None);
     }
 
+    /// Repair the local player's own Colibri community membership once per
+    /// bridge session (M32). atpcraft writes this record when a player
+    /// authorizes, so the AppView can index that player's messages. A failure
+    /// is logged-only upstream and must never disturb the bridge, so this stays
+    /// quiet and leaves the guard unset for a later login or rotation.
+    async fn check_colibri_player_membership(&mut self) {
+        if self.colibri_player_membership_checked || self.colibri_channel.is_none() {
+            return;
+        }
+        let Some(channel) = self.colibri_channel.clone() else {
+            return;
+        };
+        let Some(did) = self.did.clone() else {
+            return;
+        };
+        self.ensure_oauth_fresh().await;
+        let rkey = self.tid.next_tid();
+        let result = {
+            let Some(agent) = self.agent.as_ref() else {
+                return;
+            };
+            colibri::ensure_membership(agent, &did, &channel, &rkey).await
+        };
+        if let Ok(created) = result {
+            self.colibri_player_membership_checked = true;
+            if created
+                && colibri::requires_approval(&self.http, &self.resolver, &channel.community_did)
+                    .await
+                    == Some(true)
+            {
+                self.emit(Event::ColibriMembershipPending {
+                    message: colibri::MEMBERSHIP_PENDING_MESSAGE.into(),
+                });
+            }
+        }
+    }
+
     /// Check the local player's Colibri actor profile once per bridge session
     /// (M30). atpcraft prompts every linked player on join; a client mod only
     /// knows the local player's session, so this checks that account. A
@@ -2161,6 +2208,7 @@ impl Worker {
         self.colibri_started_at = None;
         if announce {
             self.colibri_profile_checked = false;
+            self.colibri_player_membership_checked = false;
             self.emit_colibri(None);
         }
     }
@@ -3369,6 +3417,60 @@ mod tests {
         assert_eq!(creates.len(), 1, "exactly one membership record is written");
         let body: serde_json::Value = serde_json::from_str(&creates[0].body).unwrap();
         assert_eq!(body["record"]["community"], channel.community_uri());
+    }
+
+    #[test]
+    fn colibri_player_membership_is_created_on_login_and_not_duplicated() {
+        let pds = StubPds::start(false);
+        pds.seed_record(
+            colibri::COMMUNITY_COLLECTION,
+            "self",
+            serde_json::json!({
+                "$type": colibri::COMMUNITY_COLLECTION,
+                "requiresApprovalToJoin": true
+            }),
+        );
+        let dir = temp_dir("colibri-player-membership");
+        write_config(&dir, &test_config(pds.url.clone()));
+        let (events, event_rx) = std::sync::mpsc::channel();
+        let (oauth_tx, _oauth_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (colibri_tx, _colibri_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut worker = Worker::new(WorkerOptions::new(dir), events, oauth_tx, colibri_tx);
+        worker.resolver = stub_resolver(&pds.url);
+        worker.colibri_channel = Some(
+            ChannelRef::parse("at://did:plc:community/social.colibri.channel/3jchannel").unwrap(),
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(worker.login());
+
+        let mut pending = None;
+        while let Ok(event) = event_rx.try_recv() {
+            if let Event::ColibriMembershipPending { message } = event {
+                pending = Some(message);
+            }
+        }
+        assert_eq!(
+            pending.as_deref(),
+            Some(colibri::MEMBERSHIP_PENDING_MESSAGE)
+        );
+        let membership_creates = || {
+            pds.requests()
+                .into_iter()
+                .filter(|request| {
+                    request.path == "/xrpc/com.atproto.repo.createRecord"
+                        && request.body.contains(colibri::MEMBERSHIP_COLLECTION)
+                })
+                .count()
+        };
+        assert_eq!(membership_creates(), 1);
+
+        worker.colibri_player_membership_checked = false;
+        runtime.block_on(worker.check_colibri_player_membership());
+        assert!(
+            event_rx.try_recv().is_err(),
+            "an existing player membership emits nothing"
+        );
+        assert_eq!(membership_creates(), 1, "the membership is not duplicated");
     }
 
     #[test]
