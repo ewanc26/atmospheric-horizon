@@ -721,6 +721,36 @@ and the HUD shows the session events. Without the binary, sends are no-ops
 and the worker is proven standalone by the crate tests, the `sidecar` test,
 and the `pds_check` example.
 
+### Releases (M18)
+
+`CHANGELOG.md` is the human-readable release history; the first tag is
+`v0.1.0`. A release is cut from `main`:
+
+```sh
+git tag -a v0.1.0 -m "atmospheric-horizon 0.1.0"
+git push origin v0.1.0
+```
+
+`.github/workflows/release.yml` then (tag `v*` only):
+
+1. checks the tag matches `version` in the root `Cargo.toml` (the same
+   version `runtime.rs` pins to `CARGO_PKG_VERSION` in its unit test), builds
+   `atmospheric-worker` with `--locked --release` for Linux x86_64, macOS
+   arm64 and Windows x86_64, and packs each binary as
+   `atmospheric-worker-vX.Y.Z-<platform>.tar.gz` (zip on Windows);
+2. packs `atmospheric-horizon-mixins-vX.Y.Z.tar.gz` from `mixins/atmospheric`
+   + `compatibility.json` + `LICENSE` + `README.md` + `CHANGELOG.md` + `docs/`
+   — the bundle is source, staged by horizon-mixins against the pinned
+   revision, not a prebuilt game binary;
+3. writes `SHA256SUMS` and publishes the GitHub Release with generated notes
+   and all artifacts.
+
+The worker archives are the reason the release exists: the game spawns the
+binary next to its executable (M17), so players need a per-OS build before the
+registry entry (#28) can point at one. Release bumps are mechanical: change
+the version in both `Cargo.toml`s and `runtime.rs`'s `VERSION`, let the
+consistency test prove they agree, then tag.
+
 ## Reviewer notes
 
 - Network use is declared, not hidden: this README, the mod page, and the
