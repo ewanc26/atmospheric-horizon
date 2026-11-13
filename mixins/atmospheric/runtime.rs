@@ -102,6 +102,8 @@ pub enum GameCommand {
     ColibriHandled { kind: Option<String> },
     /// A join/leave connection event for the presence fallback (M29).
     ColibriPresence { kind: String, text: String },
+    /// Claim a server identity pairing code as the logged-in player (M36).
+    ClaimServerLink { code: String },
     /// Publish the player's state as an `at.atpcraft.player.snapshot` record
     /// (M6, atpcraft port).
     PostSnapshot { summary: SnapshotSummary },
@@ -1027,6 +1029,13 @@ pub fn refresh_notifications() {
     send(GameCommand::RefreshNotifications);
 }
 
+/// Claim a server identity pairing code as the logged-in player (M36).
+pub fn claim_server_link(code: &str) {
+    send(GameCommand::ClaimServerLink {
+        code: code.trim().into(),
+    });
+}
+
 /// Ask the worker to publish a chat message as an `at.atpcraft.player.chat`
 /// record. `automatic` is true for messages the chat hook mirrored (published
 /// only when `post_chat_messages` is enabled), false for the explicit
@@ -1828,6 +1837,9 @@ fn encode_command(command: &GameCommand) -> String {
             "ColibriPresence",
             jobj(vec![("kind", jstr(kind)), ("text", jstr(text))]),
         )]),
+        GameCommand::ClaimServerLink { code } => {
+            jobj(vec![("ClaimServerLink", jobj(vec![("code", jstr(code))]))])
+        }
         GameCommand::PostSnapshot { summary } => jobj(vec![(
             "PostSnapshot",
             jobj(vec![(
@@ -3157,6 +3169,12 @@ mod tests {
             }),
             r#"{"ColibriPresence":{"kind":"leave","text":"Alex left the game"}}"#
         );
+        assert_eq!(
+            encode_command(&GameCommand::ClaimServerLink {
+                code: "ABCD-EFGH".into()
+            }),
+            r#"{"ClaimServerLink":{"code":"ABCD-EFGH"}}"#
+        );
         // The flat game-side x/y/z map onto the nested `position` object.
         assert_eq!(
             encode_command(&GameCommand::PostSnapshot {
@@ -3268,6 +3286,12 @@ mod tests {
                 uri: "at://did:plc:z/app.bsky.feed.post/1".into()
             }),
             r#"{"Repost":{"uri":"at://did:plc:z/app.bsky.feed.post/1"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::ClaimServerLink {
+                code: "ABCD-EFGH".into()
+            }),
+            r#"{"ClaimServerLink":{"code":"ABCD-EFGH"}}"#
         );
         assert_eq!(
             encode_command(&GameCommand::PostDeathMessage { text: "t".into() }),

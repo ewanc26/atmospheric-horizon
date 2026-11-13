@@ -130,6 +130,19 @@ fn handshake_login_bad_line_then_shutdown() {
         "unexpected event: {failed}"
     );
 
+    // A link claim without a player session fails before any network call.
+    worker.send(&atmospheric::Command::ClaimServerLink {
+        code: "ABCD-EFGH".into(),
+    });
+    let failed = worker.event();
+    assert!(
+        failed["Failed"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not logged in"),
+        "unexpected event: {failed}"
+    );
+
     worker.finish();
 }
 

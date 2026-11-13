@@ -12,6 +12,7 @@ pub mod colibri;
 pub mod config;
 pub mod error;
 pub mod graph;
+pub mod identity;
 pub mod interactions;
 pub mod labels;
 pub mod lists;
@@ -95,6 +96,10 @@ pub enum Command {
     /// game side has already localized `text`; the worker waits 3 seconds and
     /// writes it only when no matching broadcast line arrived.
     ColibriPresence { kind: String, text: String },
+    /// Claim a server-side identity pairing code as the logged-in player
+    /// (M36). The worker posts only the code, its DID and optional handle to
+    /// `server_api_url`; success is reported as a status line.
+    ClaimServerLink { code: String },
     /// Publish the player's state as an `at.atpcraft.player.snapshot` record,
     /// endorsed with the mod's own Ed25519 key (atpcraft port, M6). An empty
     /// `summary.username` is filled from the configured identifier.
@@ -370,6 +375,13 @@ mod tests {
             r#""ColibriReconnect""#
         );
         assert_eq!(
+            serde_json::to_string(&Command::ClaimServerLink {
+                code: "ABCD-EFGH".into()
+            })
+            .unwrap(),
+            r#"{"ClaimServerLink":{"code":"ABCD-EFGH"}}"#
+        );
+        assert_eq!(
             serde_json::to_string(&Command::ColibriHandled {
                 kind: Some("join".into())
             })
@@ -419,6 +431,9 @@ mod tests {
             Command::PostChat {
                 message: "m".into(),
                 automatic: false,
+            },
+            Command::ClaimServerLink {
+                code: "ABCD-EFGH".into(),
             },
             Command::PostSnapshot {
                 summary: records::SnapshotSummary {

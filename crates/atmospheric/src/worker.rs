@@ -10,7 +10,7 @@ use crate::{
     Command, Config, Event, actions, chats,
     colibri::{self, ChannelRef, StreamEvent},
     error::AtmosphericError,
-    graph, interactions,
+    graph, identity, interactions,
     notifications::{self, SeenCursor},
     oauth::{self, DpopState, SharedDpop},
     presence::{self, PlayerDigest},
@@ -480,6 +480,7 @@ impl Worker {
             Command::ColibriNotice { text } => self.send_colibri_notice(&text).await,
             Command::ColibriHandled { kind } => self.mark_colibri_handled(kind.as_deref()),
             Command::ColibriPresence { kind, text } => self.schedule_colibri_fallback(&kind, text),
+            Command::ClaimServerLink { code } => self.claim_server_link(&code).await,
             Command::PostText { text } => {
                 self.ensure_oauth_fresh().await;
                 let result = match (&self.agent, &self.did) {
@@ -1514,6 +1515,41 @@ impl Worker {
         Ok(())
     }
 
+    /// Claim a server identity pairing code as the logged-in player (M36).
+    /// Nothing is sent unless the explicit command is used, and the request
+    /// carries no session token or game data.
+    async fn claim_server_link(&self, code: &str) {
+        let Some(did) = self.did.as_deref() else {
+            self.fail("not logged in: /atmospheric link needs a player account");
+            return;
+        };
+        let config = match self.load_config() {
+            Ok(config) => config,
+            Err(error) => {
+                self.fail(format!("could not read the settings file: {error}"));
+                return;
+            }
+        };
+        if config.server_api_url.trim().is_empty() {
+            self.fail(
+                "server_api_url is not configured: set the M35 identity service URL in config.json",
+            );
+            return;
+        }
+        let handle = self
+            .stored_session
+            .as_ref()
+            .map(|session| session.handle.trim())
+            .filter(|handle| !handle.is_empty());
+        match identity::claim(&self.http, &config.server_api_url, code, did, handle).await {
+            Ok(link) => self.emit(Event::Status(format!(
+                "atmospheric: linked {} ({}) to {}",
+                link.player_name, link.player_uuid, link.did
+            ))),
+            Err(error) => self.fail(error.to_string()),
+        }
+    }
+
     /// App-password login: read the settings file, log in, cache the agent
     /// and the DID from `get_session`.
     async fn login(&mut self) {
@@ -2518,6 +2554,7 @@ mod tests {
             server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
             game_version: "26.3".into(),
             appview_url: "https://public.api.bsky.app".into(),
+            server_api_url: String::new(),
             trusted_server_keys: Vec::new(),
             colibri_bridge_enabled: false,
             colibri_channel_uri: String::new(),
@@ -2749,6 +2786,11 @@ mod tests {
                     r#"{"cursor":"c2","seenAt":"2026-11-12T12:00:00.000Z","notifications":[{"uri":"at://did:plc:alice/app.bsky.feed.like/1","cid":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy","indexedAt":"2026-11-12T10:00:00.000Z","isRead":false,"reason":"like","record":{"$type":"app.bsky.feed.like"},"author":{"did":"did:plc:alice","handle":"alice.test"}},{"uri":"at://did:plc:bob/app.bsky.feed.post/2","cid":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy","indexedAt":"2026-11-12T11:00:00.000Z","isRead":false,"reason":"reply","record":{"$type":"app.bsky.feed.post","text":"nice post!"},"author":{"did":"did:plc:bob","handle":"bob.test"}}]}"#.to_string(),
                 )
             }
+        } else if path == "/v1/pairings/claim" {
+            (
+                "200 OK",
+                r#"{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex","did":"did:plc:stubuser","handle":"stub.test","linked_at":1760000000}"#.to_string(),
+            )
         } else {
             match path.split('?').next().unwrap_or(&path) {
                 "/xrpc/com.atproto.server.createSession" => {
@@ -3749,6 +3791,7 @@ mod tests {
             server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
             game_version: "26.3".into(),
             appview_url: "https://public.api.bsky.app".into(),
+            server_api_url: String::new(),
             trusted_server_keys: Vec::new(),
             colibri_bridge_enabled: false,
             colibri_channel_uri: String::new(),
@@ -5770,6 +5813,49 @@ mod tests {
             other => panic!("expected Failed, got {other:?}"),
         }
         assert_eq!(pds.non_poll_requests().len(), before);
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn claim_server_link_posts_the_logged_in_identity() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("claim-link");
+        let mut config = test_config(pds.url.clone());
+        config.server_api_url = pds.url.clone();
+        write_config(&dir, &config);
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir.clone());
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        command_tx
+            .send(Command::ClaimServerLink {
+                code: "ABCD-efgh".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Status(_))) {
+            Event::Status(message) => {
+                assert!(message.contains("linked Alex"), "{message}");
+                assert!(
+                    message.contains("00000000-0000-4000-8000-000000000001"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected Status, got {other:?}"),
+        }
+
+        let requests = pds.requests();
+        let claim = requests
+            .iter()
+            .find(|request| request.path == "/v1/pairings/claim")
+            .expect("the claim reached the configured identity service");
+        let body: serde_json::Value = serde_json::from_str(&claim.body).unwrap();
+        assert_eq!(body["code"], "ABCD-efgh");
+        assert_eq!(body["did"], "did:plc:stubuser");
+        assert_eq!(body["handle"], "stub.test");
 
         command_tx.send(Command::Shutdown).unwrap();
         handle.join().unwrap();
