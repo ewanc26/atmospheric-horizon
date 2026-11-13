@@ -826,6 +826,21 @@ spaces, the 64-character handle cap, and the formatted chat line. Existing
 profile, membership and message tests remain unchanged. No live Colibri
 AppView was contacted.
 
+### M34: Colibri status detail
+
+atpcraft's admin status prints the channel URI and the owning community URI
+separately. `Event::Colibri` previously carried only the channel, so the port
+could not show which community the bridge belonged to. The worker now fills
+`community` from `ChannelRef::community_uri()` (the channel's authority plus
+`social.colibri.community/self`). The runtime decoder requires the field and the
+connected/connecting/disconnected status line reads `... to <channel> in
+<community>` (or `from ...` when an error is present). Bridge-off output is
+unchanged.
+
+Verified: the wire decoder test pins the new field, the status test checks the
+combined line, and the reconnect test asserts the parsed community URI. No new
+network request is made and no live Colibri AppView was contacted.
+
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
 `/atmospheric skin-of <did|handle>` sends `Command::FetchPlayerSkin` — the

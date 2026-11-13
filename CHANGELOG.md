@@ -83,6 +83,10 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   whitespace runs collapse, the result is trimmed, and handles/text are capped
   at 64/512 characters. This prevents adjacent words from merging when a
   colour or control character is removed.
+- **M34 — Colibri status detail (#83).** `Event::Colibri` now carries the owning
+  community URI, filled from `ChannelRef::community_uri()`. The connected,
+  connecting and disconnected status lines show both the channel and community,
+  matching the detail atpcraft's `/atpcraft colibri status` prints.
 
 ### Changed
 
