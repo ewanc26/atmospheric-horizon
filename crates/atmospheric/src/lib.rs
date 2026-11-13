@@ -84,6 +84,12 @@ pub enum Command {
         labeler: String,
         subject: Option<String>,
     },
+    /// Read a player's latest `at.atpcraft.player.snapshot` record from their
+    /// own PDS and verify its endorsement (M13, atpcraft presence read side).
+    /// The subject is a DID or a handle. Works logged out: the read is an
+    /// unauthenticated `com.atproto.repo.listRecords` against the subject's
+    /// PDS.
+    FetchPlayer { subject: String },
     /// Post the player's death message to Bluesky (only when
     /// `post_death_messages` is enabled).
     PostDeathMessage { text: String },
@@ -119,5 +125,14 @@ pub enum Event {
         subject: String,
         via: String,
         labels: Vec<labels::LabelDigest>,
+    },
+    /// The latest snapshot record of a player (M13, presence read side): the
+    /// DID (`subject`), the PDS it was read from (`via`), and the digest with
+    /// its endorsement verdict (`None` when the repo has no snapshot
+    /// records).
+    PlayerSnapshot {
+        subject: String,
+        via: String,
+        snapshot: Option<presence::PlayerDigest>,
     },
 }
