@@ -17,6 +17,7 @@ pub mod lists;
 pub mod notifications;
 pub mod oauth;
 pub mod presence;
+pub mod profiles;
 pub mod records;
 pub mod servers;
 pub mod session;
@@ -110,6 +111,13 @@ pub enum Command {
     /// unauthenticated `com.atproto.repo.listRecords` against the subject's
     /// PDS.
     FetchPlayer { subject: String },
+    /// Read an account's Bluesky profile (M24, atpcraft profile pronouns):
+    /// `app.bsky.actor.getProfile` from the AppView plus the direct
+    /// `app.bsky.actor.profile` record at rkey `self` from the account's own
+    /// PDS. The direct record's `pronouns` wins when the read succeeds, even
+    /// when the field is absent; a failed read falls back to the AppView.
+    /// The subject is a DID or a handle. Unauthenticated — works logged out.
+    FetchProfile { subject: String },
     /// Read a player's latest `at.atpcraft.player.skin` record from their own
     /// PDS, verify its endorsement, and — only when it verifies — download
     /// the skin/cape blobs into the mod's storage folder (M14, the atpcraft
@@ -202,6 +210,15 @@ pub enum Event {
         via: String,
         // Boxed: PlayerDigest is the enum's largest variant.
         snapshot: Box<Option<presence::PlayerDigest>>,
+    },
+    /// An account's profile (M24, atpcraft profile pronouns): the resolved DID
+    /// (`subject`), the PDS the direct record was read from (`via`), and the
+    /// digest. The digest combines the AppView profile with the direct record,
+    /// with atpcraft's pronoun precedence already applied.
+    Profile {
+        subject: String,
+        via: String,
+        profile: Box<profiles::ProfileDigest>,
     },
     /// The latest skin record of a player (M14, skin-sync read side): the DID
     /// (`subject`), the PDS it was read from (`via`), and the digest with its

@@ -13,6 +13,7 @@ use crate::{
     notifications::{self, SeenCursor},
     oauth::{self, DpopState, SharedDpop},
     presence::{self, PlayerDigest},
+    profiles,
     records::{self, SnapshotRecord},
     servers,
     session::{self, Agent, SessionState, StoredSession},
@@ -450,6 +451,18 @@ impl Worker {
                         subject,
                         via,
                         snapshot: Box::new(snapshot),
+                    }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::FetchProfile { subject } => {
+                // Public AppView and PDS reads: works logged out, no token
+                // refresh.
+                match self.fetch_profile(&subject).await {
+                    Ok((subject, via, profile)) => self.emit(Event::Profile {
+                        subject,
+                        via,
+                        profile: Box::new(profile),
                     }),
                     Err(error) => self.fail(error.to_string()),
                 }
@@ -981,6 +994,24 @@ impl Worker {
             .map(|(rkey, value)| presence::digest(&did, &rkey, &value, &keys))
             .transpose()?;
         Ok((did, pds, snapshot))
+    }
+
+    /// Read an account's Bluesky profile (M24, atpcraft profile pronouns):
+    /// the AppView's `getProfile` plus the direct `app.bsky.actor.profile`
+    /// record from the account's own PDS, with atpcraft's precedence applied
+    /// by [`profiles::fetch_profile`]. Both reads are unauthenticated, so this
+    /// works logged out.
+    async fn fetch_profile(
+        &self,
+        subject: &str,
+    ) -> crate::error::Result<(String, String, profiles::ProfileDigest)> {
+        let config = self.load_config().unwrap_or_default();
+        let appview = if config.appview_url.is_empty() {
+            crate::lists::DEFAULT_APPVIEW.to_string()
+        } else {
+            config.appview_url.clone()
+        };
+        profiles::fetch_profile(&self.http, &self.resolver, &appview, subject).await
     }
 
     /// Read a player's `at.atpcraft.player.chat` records from their own PDS
@@ -2067,7 +2098,7 @@ mod tests {
                 // The stub doubles as the AppView for the M12 view-label reads.
                 "/xrpc/app.bsky.actor.getProfile" => (
                     "200 OK",
-                    r#"{"did":"did:plc:stubuser","handle":"stub.test","labels":[{"ver":1,"src":"did:plc:labeler","uri":"did:plc:stubuser","val":"player","cts":"2026-11-12T10:00:00.000Z"}]}"#.to_string(),
+                    r#"{"did":"did:plc:stubuser","handle":"stub.test","displayName":"AppView Name","description":"AppView bio","pronouns":"she/her","labels":[{"ver":1,"src":"did:plc:labeler","uri":"did:plc:stubuser","val":"player","cts":"2026-11-12T10:00:00.000Z"}]}"#.to_string(),
                 ),
                 "/xrpc/app.bsky.feed.getPosts" => (
                     "200 OK",
@@ -3822,6 +3853,127 @@ mod tests {
             }
             other => panic!("expected PlayerSnapshot, got {other:?}"),
         }
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn fetch_profile_applies_atpcraft_pronoun_precedence() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("fetch-profile");
+        let mut config = test_config(pds.url.clone());
+        config.appview_url = pds.url.clone();
+        write_config(&dir, &config);
+        let (command_tx, event_rx, handle) =
+            spawn_worker_with_resolver(dir.clone(), stub_resolver(&pds.url));
+
+        // With no direct record, the AppView profile is the fallback.
+        command_tx
+            .send(Command::FetchProfile {
+                subject: "stub.test".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Profile { .. })) {
+            Event::Profile {
+                subject,
+                via,
+                profile,
+            } => {
+                assert_eq!(subject, "did:plc:stubuser");
+                assert_eq!(via, pds.url);
+                assert_eq!(profile.handle, "stub.test");
+                assert_eq!(profile.display_name, "AppView Name");
+                assert_eq!(profile.description, "AppView bio");
+                assert_eq!(profile.pronouns.as_deref(), Some("she/her"));
+            }
+            other => panic!("expected Profile, got {other:?}"),
+        }
+
+        // A successful direct record wins for pronouns, even when it is not
+        // the AppView value; the AppView display name still wins.
+        pds.seed_record(
+            profiles::PROFILE_COLLECTION,
+            profiles::PROFILE_RKEY,
+            serde_json::json!({
+                "displayName": "Direct Name",
+                "description": "Direct bio",
+                "pronouns": "  they / them  ",
+            }),
+        );
+        command_tx
+            .send(Command::FetchProfile {
+                subject: "did:plc:stubuser".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Profile { .. })) {
+            Event::Profile { profile, .. } => {
+                assert_eq!(profile.display_name, "AppView Name");
+                assert_eq!(profile.pronouns.as_deref(), Some("they / them"));
+            }
+            other => panic!("expected Profile, got {other:?}"),
+        }
+
+        // A successful direct read without pronouns clears the AppView value.
+        pds.seed_record(
+            profiles::PROFILE_COLLECTION,
+            profiles::PROFILE_RKEY,
+            serde_json::json!({ "displayName": "Direct Name" }),
+        );
+        command_tx
+            .send(Command::FetchProfile {
+                subject: "did:plc:stubuser".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Profile { .. })) {
+            Event::Profile { profile, .. } => {
+                assert_eq!(profile.pronouns, None);
+                assert_eq!(profile.display_name, "AppView Name");
+            }
+            other => panic!("expected Profile, got {other:?}"),
+        }
+
+        // Both reads went out unauthenticated.
+        let hits: Vec<_> = pds
+            .requests()
+            .into_iter()
+            .filter(|r| {
+                r.path.starts_with("/xrpc/app.bsky.actor.getProfile")
+                    || r.path
+                        .starts_with("/xrpc/com.atproto.repo.getRecord?repo=did%3Aplc%3Astubuser")
+            })
+            .collect();
+        assert!(
+            hits.iter()
+                .any(|r| { r.path.starts_with("/xrpc/app.bsky.actor.getProfile") })
+        );
+        assert!(
+            hits.iter()
+                .any(|r| { r.path.contains("collection=app.bsky.actor.profile") })
+        );
+        assert!(
+            hits.iter().all(|r| !r.authorized),
+            "profile reads are unauthenticated"
+        );
+
+        // A record URI is not an account: fails before any network call.
+        let before = pds.non_poll_requests().len();
+        command_tx
+            .send(Command::FetchProfile {
+                subject: "https://example.com/nope".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("not a subject reference"), "{message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            pds.non_poll_requests().len(),
+            before,
+            "no HTTP call for a bad subject"
+        );
 
         command_tx.send(Command::Shutdown).unwrap();
         handle.join().unwrap();
