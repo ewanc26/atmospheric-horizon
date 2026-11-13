@@ -12,6 +12,16 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+### Changed
+
+- **Horizon compatibility bump (#8).** The pinned Horizon revision moves from
+  `ba6344a` to `9f42064` (nightly 2026-11-13). That revision carries
+  horizon-rust/horizon#9394, so `horizon-ctl command "/atmospheric …"` now
+  reaches the mod's client-side `command` hook instead of the integrated
+  server console; the chat-box key workaround is no longer needed. The
+  pinned source hashes and the mixin's `[compatibility]` revision move with
+  it.
+
 ## [0.2.0] — 2026-11-13
 
 Second tagged release. Adds the read side of the server descriptor, public
