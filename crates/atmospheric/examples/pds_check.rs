@@ -22,6 +22,8 @@
 //! ATMOSPHERIC_FETCH_PLAYER="did:plc:… | handle" \               # optional, M13
 //! ATMOSPHERIC_TRUSTED_SERVER_KEYS="keyId=publicKeyB64,…" \      # optional, M13
 //! ATMOSPHERIC_FETCH_SKIN="did:plc:… | handle" \                 # optional, M14
+//! ATMOSPHERIC_GATE="at://…/app.bsky.graph.list/<rkey> | URL" \  # optional, M15
+//! ATMOSPHERIC_GATE_SUBJECT="did:plc:… | handle" \               # optional, M15 (default: own DID)
 //! cargo run -p atmospheric --example pds_check
 //! ```
 //!
@@ -155,11 +157,13 @@ fn main() {
     // In OAuth mode a persisted session may already resume at startup; give
     // it a moment before sending a fresh login.
     let mut logged_in = false;
+    let mut own_did = String::new();
     if let Some(handle_name) = &oauth_handle {
         if let Ok(event) = event_rx.recv_timeout(Duration::from_secs(15)) {
             println!("event: {event:?}");
-            if let Event::Session(SessionState::LoggedIn { .. }) = event {
+            if let Event::Session(SessionState::LoggedIn { did }) = event {
                 logged_in = true;
+                own_did = did;
                 println!("resumed the persisted OAuth session");
             }
         }
@@ -184,7 +188,10 @@ fn main() {
             Ok(event) => {
                 println!("event: {event:?}");
                 match event {
-                    Event::Session(SessionState::LoggedIn { .. }) => logged_in = true,
+                    Event::Session(SessionState::LoggedIn { did }) => {
+                        logged_in = true;
+                        own_did = did;
+                    }
                     Event::OAuthAuthorize { url } => {
                         println!("OAUTH AUTHORIZE URL (finish the login in the browser): {url}");
                     }
@@ -446,6 +453,41 @@ fn main() {
                         }
                         Event::Failed { message } => {
                             eprintln!("skin fetch failed: {message}");
+                            exit(1);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(error) => {
+                    eprintln!("no event from the worker: {error}");
+                    exit(1);
+                }
+            }
+        }
+    }
+
+    // Optionally run the join-gate decision (M15): is the subject (default:
+    // the logged-in account's own DID) on the list? Fail-closed — a fetch
+    // error exits non-zero as the deny-with-reason.
+    if let Some(list) = env::var("ATMOSPHERIC_GATE").ok().filter(|s| !s.is_empty()) {
+        let subject = env::var("ATMOSPHERIC_GATE_SUBJECT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| own_did.clone());
+        command_tx
+            .send(Command::CheckGate { list, subject })
+            .expect("send CheckGate");
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(event) => {
+                    println!("event: {event:?}");
+                    match event {
+                        Event::GateDecision { allowed, .. } => {
+                            println!("gate decision: allowed={allowed}");
+                            break;
+                        }
+                        Event::Failed { message } => {
+                            eprintln!("gate check failed (deny-with-reason): {message}");
                             exit(1);
                         }
                         _ => {}

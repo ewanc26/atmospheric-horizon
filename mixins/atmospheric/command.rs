@@ -3,7 +3,9 @@
 // text; /atmospheric notifications polls now (the worker also polls on a
 // timer); /atmospheric chat <text> publishes one chat record (atpcraft port);
 // /atmospheric skin [path] [default|slim] publishes a skin record (M9);
-// /atmospheric list <reference> reads a public list (M11); /atmospheric labels
+// /atmospheric list <reference> reads a public list (M11); /atmospheric gate
+// <list> <did|handle> decides join-gate membership, fail-closed (M15);
+// /atmospheric labels
 // <subject> reads labels off a subject's AppView view and /atmospheric labeler
 // <did> [subject] queries a labeler directly (M12); /atmospheric player
 // <did|handle> reads a player's latest verified snapshot record (M13);
@@ -18,7 +20,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric list <list>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -91,6 +93,22 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
         } else {
             m::fetch_list(reference);
             game.native_chat("atmospheric: fetching the list…");
+        }
+    } else if rest == "gate" || rest.starts_with("gate ") {
+        let args: Vec<&str> = rest
+            .strip_prefix("gate")
+            .unwrap_or("")
+            .split_whitespace()
+            .collect();
+        *ran = true;
+        match args.as_slice() {
+            [list, subject] => {
+                m::check_gate(list, subject);
+                game.native_chat("atmospheric: checking the join gate…");
+            }
+            _ => game.native_chat(
+                "atmospheric: /atmospheric gate <at://…/app.bsky.graph.list/<rkey> | bsky.app list URL> <did | handle>",
+            ),
         }
     } else if rest == "labels" || rest.starts_with("labels ") {
         let subject = rest.strip_prefix("labels").unwrap_or("").trim();
