@@ -9,7 +9,7 @@
 use crate::{
     Command, Config, Event, actions, chats,
     error::AtmosphericError,
-    graph,
+    graph, interactions,
     notifications::{self, SeenCursor},
     oauth::{self, DpopState, SharedDpop},
     presence::{self, PlayerDigest},
@@ -487,6 +487,27 @@ impl Worker {
                         via,
                         members,
                     }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::Reply { uri, text } => {
+                self.ensure_oauth_fresh().await;
+                match self.reply(&uri, &text).await {
+                    Ok(uri) => self.emit(Event::Posted { uri }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::Like { uri } => {
+                self.ensure_oauth_fresh().await;
+                match self.like(&uri).await {
+                    Ok(uri) => self.emit(Event::Posted { uri }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::Repost { uri } => {
+                self.ensure_oauth_fresh().await;
+                match self.repost(&uri).await {
+                    Ok(uri) => self.emit(Event::Posted { uri }),
                     Err(error) => self.fail(error.to_string()),
                 }
             }
@@ -1042,6 +1063,59 @@ impl Worker {
         let actor = graph::resolve_subject(&self.http, &self.resolver, subject).await?;
         let members = graph::fetch_graph(&self.http, &appview, kind, &actor).await?;
         Ok((kind.key().to_string(), actor, appview, members))
+    }
+
+    /// Reply to a post (M21): fetch the target's strong ref + thread root
+    /// from the author's PDS, then publish an `app.bsky.feed.post` with
+    /// `reply: { root, parent }` to your own repo.
+    async fn reply(&self, uri: &str, text: &str) -> crate::error::Result<String> {
+        if text.trim().is_empty() {
+            return Err(AtmosphericError::Message("the reply text is empty".into()));
+        }
+        let (Some(agent), Some(did)) = (&self.agent, &self.did) else {
+            return Err(AtmosphericError::NotLoggedIn);
+        };
+        let target = interactions::resolve_post(&self.http, &self.resolver, uri).await?;
+        let (parent, value) = interactions::fetch_ref(&self.http, &target.pds, &target.uri).await?;
+        let targets = interactions::reply_targets(parent, &value);
+        let record = interactions::reply_record(text, &targets);
+        actions::create_record_json(agent, did, interactions::POST_COLLECTION, None, record).await
+    }
+
+    /// Like a post (M21): fetch its strong ref and publish an
+    /// `app.bsky.feed.like` record to your own repo.
+    async fn like(&self, uri: &str) -> crate::error::Result<String> {
+        let (Some(agent), Some(did)) = (&self.agent, &self.did) else {
+            return Err(AtmosphericError::NotLoggedIn);
+        };
+        let target = interactions::resolve_post(&self.http, &self.resolver, uri).await?;
+        let (parent, _) = interactions::fetch_ref(&self.http, &target.pds, &target.uri).await?;
+        actions::create_record_json(
+            agent,
+            did,
+            interactions::LIKE_COLLECTION,
+            None,
+            interactions::like_record(&parent),
+        )
+        .await
+    }
+
+    /// Repost a post (M21): fetch its strong ref and publish an
+    /// `app.bsky.feed.repost` record to your own repo.
+    async fn repost(&self, uri: &str) -> crate::error::Result<String> {
+        let (Some(agent), Some(did)) = (&self.agent, &self.did) else {
+            return Err(AtmosphericError::NotLoggedIn);
+        };
+        let target = interactions::resolve_post(&self.http, &self.resolver, uri).await?;
+        let (parent, _) = interactions::fetch_ref(&self.http, &target.pds, &target.uri).await?;
+        actions::create_record_json(
+            agent,
+            did,
+            interactions::REPOST_COLLECTION,
+            None,
+            interactions::repost_record(&parent),
+        )
+        .await
     }
 
     /// Download one blob and save it under `<storage>/skins/<cid>.png`,
@@ -1787,16 +1861,14 @@ mod tests {
                         param("collection").unwrap_or_default(),
                         param("rkey").unwrap_or_default()
                     );
-                    if !authorized {
-                        (
-                            "401 Unauthorized",
-                            r#"{"error":"ExpiredToken","message":"no"}"#.to_string(),
-                        )
-                    } else if let Some(record) = records.lock().unwrap().get(&key).cloned() {
+                    // Public repos serve getRecord unauthenticated, which the
+                    // M21 interaction reads rely on.
+                    let repo = param("repo").unwrap_or_default().replace("%3A", ":");
+                    if let Some(record) = records.lock().unwrap().get(&key).cloned() {
                         (
                             "200 OK",
                             format!(
-                                r#"{{"uri":"at://did:plc:stubuser/{key}","cid":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy","value":{record}}}"#
+                                r#"{{"uri":"at://{repo}/{key}","cid":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy","value":{record}}}"#
                             ),
                         )
                     } else {
@@ -1880,6 +1952,16 @@ mod tests {
                 "/did:plc:nolabeler" => {
                     let doc = serde_json::json!({
                         "id": "did:plc:nolabeler",
+                        "service": [
+                            {"id": "#atproto_pds", "type": "AtprotoPersonalDataServer", "serviceEndpoint": server_url}
+                        ],
+                    });
+                    ("200 OK", doc.to_string())
+                }
+                // The author of the M21 interaction targets.
+                "/did:plc:target" => {
+                    let doc = serde_json::json!({
+                        "id": "did:plc:target",
                         "service": [
                             {"id": "#atproto_pds", "type": "AtprotoPersonalDataServer", "serviceEndpoint": server_url}
                         ],
@@ -4654,6 +4736,121 @@ mod tests {
             before,
             "no HTTP call for an unknown kind"
         );
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn interactions_resolve_the_target_and_publish_records() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("interactions");
+        write_config(&dir, &test_config(pds.url.clone()));
+        let (command_tx, event_rx, handle) =
+            spawn_worker_with_resolver(dir.clone(), stub_resolver(&pds.url));
+
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+
+        // A target post that is itself a reply in a thread.
+        pds.seed_record(
+            interactions::POST_COLLECTION,
+            "target1",
+            serde_json::json!({
+                "$type": interactions::POST_COLLECTION,
+                "text": "parent post",
+                "reply": {
+                    "root": {"uri": "at://did:plc:root/app.bsky.feed.post/root1", "cid": STUB_CIDS[1]},
+                    "parent": {"uri": "at://did:plc:root/app.bsky.feed.post/parent1", "cid": STUB_CIDS[1]},
+                },
+            }),
+        );
+        let target = "at://did:plc:target/app.bsky.feed.post/target1";
+
+        for command in [
+            Command::Like { uri: target.into() },
+            Command::Repost { uri: target.into() },
+        ] {
+            command_tx.send(command).unwrap();
+            match wait_for(&event_rx, |e| matches!(e, Event::Posted { .. })) {
+                Event::Posted { uri } => assert!(uri.starts_with("at://did:plc:stubuser/")),
+                other => panic!("expected Posted, got {other:?}"),
+            }
+        }
+        command_tx
+            .send(Command::Reply {
+                uri: target.into(),
+                text: "nice thread".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Posted { .. })) {
+            Event::Posted { uri } => assert!(uri.contains(interactions::POST_COLLECTION)),
+            other => panic!("expected Posted, got {other:?}"),
+        }
+
+        // A non-post target fails before any record is written.
+        let creates_before = pds
+            .requests()
+            .iter()
+            .filter(|r| r.path == "/xrpc/com.atproto.repo.createRecord")
+            .count();
+        command_tx
+            .send(Command::Like {
+                uri: "at://did:plc:target/app.bsky.feed.like/1".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => assert!(message.contains("want a post"), "{message}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            pds.requests()
+                .iter()
+                .filter(|r| r.path == "/xrpc/com.atproto.repo.createRecord")
+                .count(),
+            creates_before,
+            "no record for a non-post target"
+        );
+
+        let creates: Vec<serde_json::Value> = pds
+            .requests()
+            .iter()
+            .filter(|r| r.path == "/xrpc/com.atproto.repo.createRecord")
+            .map(|r| serde_json::from_str(&r.body).unwrap())
+            .collect();
+        let by_collection = |collection: &str| {
+            creates
+                .iter()
+                .find(|body| body["collection"] == collection)
+                .unwrap_or_else(|| panic!("no createRecord for {collection}: {creates:?}"))
+        };
+
+        let like = by_collection(interactions::LIKE_COLLECTION);
+        assert_eq!(like["record"]["$type"], interactions::LIKE_COLLECTION);
+        assert_eq!(like["record"]["subject"]["uri"], target);
+        assert_eq!(like["record"]["subject"]["cid"], STUB_CIDS[0]);
+
+        let repost = by_collection(interactions::REPOST_COLLECTION);
+        assert_eq!(repost["record"]["subject"]["uri"], target);
+
+        let reply = by_collection(interactions::POST_COLLECTION);
+        assert_eq!(reply["record"]["text"], "nice thread");
+        assert_eq!(reply["record"]["reply"]["parent"]["uri"], target);
+        assert_eq!(
+            reply["record"]["reply"]["root"]["uri"],
+            "at://did:plc:root/app.bsky.feed.post/root1"
+        );
+
+        // The target reads were unauthenticated.
+        let reads: Vec<_> = pds
+            .requests()
+            .into_iter()
+            .filter(|r| r.path.starts_with("/xrpc/com.atproto.repo.getRecord"))
+            .collect();
+        assert_eq!(reads.len(), 3, "one per interaction");
+        assert!(reads.iter().all(|r| !r.authorized));
 
         command_tx.send(Command::Shutdown).unwrap();
         handle.join().unwrap();
