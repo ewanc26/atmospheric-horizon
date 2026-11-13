@@ -786,13 +786,13 @@ With clones of the two upstream repositories beside this one, at the pinned
 commits:
 
 ```sh
-git -C ../horizon checkout ba6344a59cb9e755b730dcf02285fc0d33b97d3c   # pinned Horizon
+git -C ../horizon checkout 9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0   # pinned Horizon
 git -C ../horizon-mixins checkout d9c83d7                            # pinned mixins
 cargo build --locked -p horizon-mixins-cli --manifest-path ../horizon-mixins/Cargo.toml
 mkdir -p target/horizon-export
-git -C ../horizon archive ba6344a59cb9e755b730dcf02285fc0d33b97d3c | tar -x -C target/horizon-export
+git -C ../horizon archive 9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0 | tar -x -C target/horizon-export
 find target/horizon-export -type l -delete   # the tool refuses links; nothing needs them
-echo -n ba6344a59cb9e755b730dcf02285fc0d33b97d3c > target/horizon-export/.horizon-revision
+echo -n 9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0 > target/horizon-export/.horizon-revision
 ../horizon-mixins/target/debug/horizon-mixins plan  --workspace target/horizon-export --mods mixins --out target/mixins/plan.json
 ../horizon-mixins/target/debug/horizon-mixins apply --workspace target/horizon-export --mods mixins --out target/modded
 cd target/modded && cargo build --locked --profile fast --no-default-features -p horizon-client
@@ -810,8 +810,8 @@ HORIZON_HOME=/tmp/atmos-home target/modded/target/fast/horizon-client \
 horizon-ctl --socket /tmp/atmos-test.sock state
 ```
 
-Observed for M2 on the pinned revision: `plan`/`apply` succeed (1 module, 5
-named-hook injections); the stage builds with no warnings; the game launches
+Observed for M2 on the then-pinned revision: `plan`/`apply` succeed (1 module,
+5 named-hook injections); the stage builds with no warnings; the game launches
 and plays. In-game, verified through the control socket: Options > Mods lists
 "Atmospheric 0.1.0" and toggles ON/OFF; typing `/atmospheric login` and
 `/atmospheric post <text>` in chat shows the mod's chat feedback, so the
@@ -827,6 +827,13 @@ on the first tick — `/atmospheric login` then reaches the worker over stdio
 and the HUD shows the session events. Without the binary, sends are no-ops
 and the worker is proven standalone by the crate tests, the `sidecar` test,
 and the `pds_check` example.
+
+Re-validated for #8 on `9f42064` (nightly 2026-11-13): with the staged client
+running, `horizon-ctl command "/atmospheric"` replied `{"ok":true}` with the
+mod's usage text in `chat`, proving the control socket takes the same client
+`command` hook as typed chat. The `atmospheric-worker` sidecar attached with
+`--data-dir`, and the chat-box key-event workaround from the older pin is no
+longer needed. Upstream horizon-rust/horizon#9394 carries the routing fix.
 
 ### Releases (M18)
 
