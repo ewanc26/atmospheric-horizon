@@ -108,10 +108,9 @@ pub fn spawn(
             };
             runtime.block_on(async move {
                 // Bridge the blocking game-side channel into async land, so
-                // the loop below can later select on a notification timer
-                // (M4) next to the commands. When the game side drops its
-                // sender, this thread ends, `rx` yields `None`, and the loop
-                // exits.
+                // the loop below can select on the notification timer (M4)
+                // next to the commands. When the game side drops its sender,
+                // this thread ends, `rx` yields `None`, and the loop exits.
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
                 // Results of spawned OAuth logins (M8) come back here, so the
                 // loop stays responsive while the browser is open.
