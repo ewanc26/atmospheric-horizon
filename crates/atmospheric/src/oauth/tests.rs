@@ -598,6 +598,34 @@ fn handle(
                 &[],
             );
         }
+        ("GET", "/xrpc/com.atproto.repo.getRecord") => {
+            // The server-profile writer reads the existing record first; a
+            // missing one is RecordNotFound, which it treats as an upsert.
+            respond(
+                stream,
+                "400 Bad Request",
+                r#"{"error":"RecordNotFound","message":"no record"}"#.to_string(),
+                &[],
+            );
+        }
+        ("POST", "/xrpc/com.atproto.repo.putRecord") => {
+            let access = access_token.lock().unwrap().clone();
+            let expected_auth = format!("DPoP {access}");
+            assert_eq!(authorization.as_deref(), Some(expected_auth.as_str()));
+            let proof = dpop.clone().expect("putRecord carries a DPoP proof");
+            verify_proof(
+                &proof,
+                "POST",
+                &format!("{server_url}/xrpc/com.atproto.repo.putRecord"),
+                Some(&access_token_hash(&access)),
+            );
+            respond(
+                stream,
+                "200 OK",
+                r#"{"uri":"at://did:plc:stubuser/at.atpcraft.server.profile/self","cid":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy"}"#.to_string(),
+                &[],
+            );
+        }
         ("POST", "/xrpc/com.atproto.repo.createRecord") => {
             let access = access_token.lock().unwrap().clone();
             let expected_auth = format!("DPoP {access}");

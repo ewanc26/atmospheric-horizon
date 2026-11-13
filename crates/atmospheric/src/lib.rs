@@ -42,6 +42,16 @@ pub enum Command {
     /// Log in with localhost OAuth (M8): resolve the handle, open the browser
     /// at the authorization server, and exchange the loopback redirect.
     LoginOAuth { handle: String },
+    /// Log in a separate server account with localhost OAuth (M25): the
+    /// account atpcraft uses for its labeler, Colibri service auth, RPG
+    /// attestations and server-side gate. Its session is persisted apart from
+    /// the player session.
+    LoginServerOAuth { handle: String },
+    /// Report the server account's session state (M25).
+    ServerAccountStatus,
+    /// Drop the server account session and delete its persisted refresh token
+    /// (M25).
+    LogoutServerAccount,
     /// Replace the settings file with these settings.
     SaveConfig { config: Config },
     /// Post plain text to Bluesky.
@@ -78,6 +88,9 @@ pub enum Command {
     /// Identity fields come from the settings file; the signing key block is
     /// the mod's persisted Ed25519 key.
     PostServerProfile,
+    /// Publish/refresh the server profile from the separate server account
+    /// (M25), the atpcraft ownership model, instead of the player account.
+    PostServerProfileAsServer,
     /// Fetch the member DIDs of a public Bluesky list — the read side of
     /// atpcraft's join gate (M11). The reference is an
     /// `at://…/app.bsky.graph.list/<rkey>` URI or a bsky.app list URL.
@@ -162,6 +175,13 @@ pub enum Command {
 pub enum Event {
     /// Session health, mirrored on the HUD.
     Session(session::SessionState),
+    /// The separate server account's session (M25). `handle` and `did` are
+    /// present whenever the account is known, including while logging in.
+    ServerAccount {
+        state: session::SessionState,
+        handle: Option<String>,
+        did: Option<String>,
+    },
     /// A record was written; carries its `at://` URI.
     Posted { uri: String },
     /// Something failed; carries a HUD-friendly message.

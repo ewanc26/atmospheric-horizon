@@ -13,6 +13,8 @@
 // downloads the blobs (M14); /atmospheric chat-of <did|handle> reads their
 // mirrored chat history (M16); /atmospheric server-of <did|handle> reads their
 // server profile record and verifies its signing key (M19); /atmospheric
+// server-account login|status|logout|publish manages the separate server
+// account (M25); /atmospheric
 // profile <did|handle> reads a Bluesky profile with atpcraft's pronoun
 // precedence (M24); /atmospheric follows|followers|blocks|mutes <did|handle>
 // reads a public social graph (M20);
@@ -28,7 +30,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -45,6 +47,39 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
             game.native_chat(&format!(
                 "atmospheric: starting OAuth login for {handle} — a browser window should open; otherwise use the authorize link shown in chat"
             ));
+        }
+    } else if rest == "server-account" || rest.starts_with("server-account ") {
+        let args: Vec<&str> = rest
+            .strip_prefix("server-account")
+            .unwrap_or("")
+            .split_whitespace()
+            .collect();
+        *ran = true;
+        match args.as_slice() {
+            ["login"] => game.native_chat(
+                "atmospheric: /atmospheric server-account login <handle>",
+            ),
+            ["login", handle] => {
+                m::login_server_oauth(handle);
+                game.native_chat(&format!(
+                    "atmospheric: starting server-account OAuth login for {handle} — a browser window should open"
+                ));
+            }
+            ["status"] => {
+                m::server_account_status();
+                game.native_chat("atmospheric: checking the server account…");
+            }
+            ["logout"] => {
+                m::logout_server_account();
+                game.native_chat("atmospheric: logging out the server account…");
+            }
+            ["publish"] => {
+                m::post_server_profile_as_server();
+                game.native_chat("atmospheric: publishing the server profile from the server account…");
+            }
+            _ => game.native_chat(
+                "atmospheric: /atmospheric server-account login <handle>|status|logout|publish",
+            ),
         }
     } else if rest == "notifications" {
         *ran = true;
