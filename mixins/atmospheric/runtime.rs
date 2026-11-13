@@ -95,6 +95,10 @@ pub enum GameCommand {
     /// Fetch a public Bluesky list's member DIDs (M11, join-gate read side):
     /// an `at://…app.bsky.graph.list/<rkey>` URI or a bsky.app list URL.
     FetchList { reference: String },
+    /// The join-gate decision (M15): is `subject` (a DID or handle) on the
+    /// list `list` (an AT-URI or bsky.app list URL)? Fail-closed — errors
+    /// come back as `ModEvent::Failed` (the deny-with-reason).
+    CheckGate { list: String, subject: String },
     /// Read the labels on a subject (M12, labeler read side): an AT-URI, a
     /// DID, a handle, or a bsky.app profile/post/list URL.
     FetchLabels { subject: String },
@@ -275,6 +279,13 @@ pub enum ModEvent {
     Notifications { items: Vec<NotificationDigest> },
     /// The members of a fetched Bluesky list (M11, join-gate read side).
     ListMembers { list: String, members: Vec<String> },
+    /// The join-gate decision (M15): the resolved list AT-URI, the subject's
+    /// DID, and whether the DID is on the list.
+    GateDecision {
+        list: String,
+        subject: String,
+        allowed: bool,
+    },
     /// The labels found on a subject (M12, labeler read side): the subject
     /// (AT-URI or DID), where the labels came from (`via`: the AppView URL or
     /// the labeler's endpoint), and the labels themselves.
@@ -332,6 +343,14 @@ pub fn status_text(event: &ModEvent) -> String {
         ModEvent::ListMembers { list, members } => {
             format!("atmospheric: list {list} has {} members", members.len())
         }
+        ModEvent::GateDecision {
+            list,
+            subject,
+            allowed,
+        } => format!(
+            "atmospheric: gate {list} — {subject} {}",
+            if *allowed { "ALLOWED" } else { "DENIED" }
+        ),
         ModEvent::Labels {
             subject,
             via,
@@ -626,6 +645,14 @@ pub fn fetch_list(reference: &str) {
     });
 }
 
+/// Ask the worker for the join-gate decision (M15): is `subject` on `list`?
+pub fn check_gate(list: &str, subject: &str) {
+    send(GameCommand::CheckGate {
+        list: list.into(),
+        subject: subject.into(),
+    });
+}
+
 /// Ask the worker to read the labels on a subject via its AppView view (M12).
 pub fn fetch_labels(subject: &str) {
     send(GameCommand::FetchLabels {
@@ -708,6 +735,10 @@ mod tests {
         fetch_labeler_labels("did:plc:labeler", None);
         fetch_player("someone.example");
         fetch_player_skin("someone.example");
+        check_gate(
+            "at://did:plc:example/app.bsky.graph.list/3abc",
+            "did:plc:example",
+        );
         logout();
         assert!(!post_screenshot("no screenshot yet"));
         remember_screenshot("/tmp/shots/2026-11-12_07.00.00.png");
@@ -782,6 +813,13 @@ mod tests {
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::FetchPlayerSkin { subject }) => assert_eq!(subject, "someone.example"),
             other => panic!("expected FetchPlayerSkin, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::CheckGate { list, subject }) => {
+                assert_eq!(list, "at://did:plc:example/app.bsky.graph.list/3abc");
+                assert_eq!(subject, "did:plc:example");
+            }
+            other => panic!("expected CheckGate, got {:?}", other),
         }
         assert!(matches!(
             command_rx.recv_timeout(std::time::Duration::from_secs(5)),
@@ -898,6 +936,22 @@ mod tests {
                 members: vec!["did:plc:a".into(), "did:plc:b".into()],
             }),
             "atmospheric: list at://did:plc:x/app.bsky.graph.list/3abc has 2 members"
+        );
+        assert_eq!(
+            status_text(&ModEvent::GateDecision {
+                list: "at://did:plc:x/app.bsky.graph.list/3abc".into(),
+                subject: "did:plc:a".into(),
+                allowed: true,
+            }),
+            "atmospheric: gate at://did:plc:x/app.bsky.graph.list/3abc — did:plc:a ALLOWED"
+        );
+        assert_eq!(
+            status_text(&ModEvent::GateDecision {
+                list: "at://did:plc:x/app.bsky.graph.list/3abc".into(),
+                subject: "did:plc:z".into(),
+                allowed: false,
+            }),
+            "atmospheric: gate at://did:plc:x/app.bsky.graph.list/3abc — did:plc:z DENIED"
         );
         assert_eq!(
             status_text(&ModEvent::Labels {
