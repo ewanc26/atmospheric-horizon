@@ -13,7 +13,9 @@
 // downloads the blobs (M14); /atmospheric chat-of <did|handle> reads their
 // mirrored chat history (M16); /atmospheric server-of <did|handle> reads their
 // server profile record and verifies its signing key (M19); /atmospheric
-// follows|followers|blocks|mutes <did|handle> reads a public social graph (M20);
+// profile <did|handle> reads a Bluesky profile with atpcraft's pronoun
+// precedence (M24); /atmospheric follows|followers|blocks|mutes <did|handle>
+// reads a public social graph (M20);
 // follow|unfollow|block|unblock|mute|unmute <did|handle> writes one (M23);
 // /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri> and
 // /atmospheric repost <at-uri> publish interactions (M21).
@@ -26,7 +28,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-of <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -146,6 +148,15 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
                 game.native_chat("atmospheric: querying the labeler…");
             }
             _ => game.native_chat("atmospheric: /atmospheric labeler <labeler-did> [subject]"),
+        }
+    } else if rest == "profile" || rest.starts_with("profile ") {
+        let subject = rest.strip_prefix("profile").unwrap_or("").trim();
+        *ran = true;
+        if subject.is_empty() {
+            game.native_chat("atmospheric: /atmospheric profile <did | handle>");
+        } else {
+            m::fetch_profile(subject);
+            game.native_chat("atmospheric: reading the profile…");
         }
     } else if rest == "player" || rest.starts_with("player ") {
         let subject = rest.strip_prefix("player").unwrap_or("").trim();
