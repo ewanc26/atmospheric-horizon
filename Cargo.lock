@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "atmospheric"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "atrium-api",
  "atrium-common",
@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "atmospheric-horizon"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "atomic-waker"
