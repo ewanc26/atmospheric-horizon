@@ -78,7 +78,8 @@ Everything else, with zero Horizon imports so it builds and tests with plain
   records (`com.atproto.repo.listRecords` on the subject's own PDS, highest
   version, Ed25519 endorsement verification)
 - `colibri` — M26 Colibri channel parsing, message/membership record shapes,
-  service-auth minting, event decoding and the worker-owned WebSocket loop
+  service-auth minting, event decoding, the worker-owned WebSocket loop and
+  the M30 local actor-profile check
 - `profiles` — M24 Bluesky profile reads (AppView `app.bsky.actor.getProfile`
   plus the direct `app.bsky.actor.profile` record at rkey `self`, with
   atpcraft's direct-record pronoun precedence and whitespace normalisation)
@@ -666,7 +667,7 @@ interrupts the game.
 This observes vanilla broadcast lines only. M29 adds the fallback for lines
 that another mod rewrites or hides, and the pending-approval notice. The hook
 still does not cover a client connected to a remote server that does not run
-the mod, and the Colibri profile prompt remains.
+the mod, and the server-wide Colibri profile prompt remains.
 
 Verified: the runtime classifier test covers all accepted and rejected keys;
 the runtime forwarding test asserts the `ColibriNotice` command and the codec
@@ -708,6 +709,34 @@ covers true/false/missing values, and the fallback window test covers the
 inclusive 5-second boundary, blank-line suppression, the other kind and
 unknown kinds. The injected connection hooks themselves are not compiled by
 `cargo test`; no live server or Colibri AppView was contacted.
+
+### M30: Colibri local profile prompt
+
+atpcraft checks each linked player's `social.colibri.actor.profile` on join and
+sends a two-line setup prompt when the `self` record is absent. This client mod
+has no server-wide player-to-ATProto mapping, so M30 checks the only account it
+knows: the local player's session.
+
+`start_colibri` calls `check_colibri_profile` after the bridge is armed, and a
+player login calls it when a bridge is already active. It refreshes the player
+OAuth token if needed, then reads `social.colibri.actor.profile`/`self` with
+`actions::get_record` as that player. A missing record emits
+`Event::ColibriProfileMissing { url }` once per bridge session; an existing
+record and any failed read stay quiet, matching atpcraft's `EXISTS` and
+`UNAVAILABLE`. The runtime queues atpcraft's two chat lines ("You need a
+Colibri profile…" and "Open Colibri: https://colibri.social") and folds the
+same missing-profile message into the HUD.
+
+The check resets on an explicit bridge stop and on player logout, so a new
+session or account is checked again. A 45-minute token rotation does not repeat
+the prompt. Other players are not checked; that needs the server-side identity
+mapping described in M25 and remains unimplemented.
+
+Verified: a worker test logs an agent into the stub PDS, points the worker at a
+channel, and calls the check with no profile (asserting the
+`ColibriProfileMissing` event and the `getRecord` request), then seeds the
+`self` record and asserts silence. Runtime tests pin the event wire shape, HUD
+line, and both chat lines. No live Colibri AppView was contacted.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 

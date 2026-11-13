@@ -57,7 +57,14 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   seconds; blank lines suppress the fallback. `colibri_server_events_fallback_enabled`
   defaults to true. After a new membership is created, the worker reads the
   community's `requiresApprovalToJoin` flag unauthenticated and shows a HUD
-  notice when a moderator must approve the join. The profile prompt remains.
+  notice when a moderator must approve the join. The server-wide profile prompt
+  remains.
+- **M30 — Colibri local profile prompt (#75).** When a Colibri bridge starts
+  and the local player is logged in, the worker reads the player's
+  `social.colibri.actor.profile` at rkey `self`. If it is absent, native chat
+  shows atpcraft's two-line setup prompt with `https://colibri.social`; an
+  existing profile or a failed read stays quiet. Other players are not checked
+  yet because the mod has no server-wide player-to-ATProto mapping.
 
 ### Changed
 
