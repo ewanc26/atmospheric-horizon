@@ -30,6 +30,12 @@ pub const COMMUNITY_COLLECTION: &str = "social.colibri.community";
 pub const MESSAGE_COLLECTION: &str = "social.colibri.message";
 /// The membership record collection.
 pub const MEMBERSHIP_COLLECTION: &str = "social.colibri.membership";
+/// The player's Colibri actor profile collection (M30).
+pub const ACTOR_PROFILE_COLLECTION: &str = "social.colibri.actor.profile";
+/// The singleton record key shared by Colibri self records.
+pub const SELF_RKEY: &str = "self";
+/// The setup page atpcraft links to when a player has no Colibri profile.
+pub const PROFILE_URL: &str = "https://colibri.social";
 /// The AppView's event-stream method.
 pub const SUBSCRIBE_EVENTS_LXM: &str = "social.colibri.sync.subscribeEvents";
 /// The service id of the AppView in its DID document.
@@ -235,6 +241,17 @@ pub fn membership_record(community_uri: &str, created_at: &str) -> Value {
         "community": community_uri,
         "createdAt": created_at,
     })
+}
+
+/// Whether `did` has a Colibri actor profile at the singleton `self` key.
+/// A missing record is `Ok(false)`; every other failure is an error, so the
+/// caller can distinguish "needs setup" from "could not check".
+pub async fn profile_exists(agent: &Agent, did: &str) -> Result<bool> {
+    Ok(
+        actions::get_record(agent, did, ACTOR_PROFILE_COLLECTION, SELF_RKEY)
+            .await?
+            .is_some(),
+    )
 }
 
 /// Ensure the server account has a membership record for the channel's

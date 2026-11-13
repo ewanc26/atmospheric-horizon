@@ -296,6 +296,9 @@ struct Worker {
     /// When the current bridge generation started. A fallback scheduled before
     /// a restart must not write into the new channel.
     colibri_started_at: Option<Instant>,
+    /// Whether the local player's Colibri profile was checked for this bridge
+    /// session (M30).
+    colibri_profile_checked: bool,
 }
 
 /// Whether a due connection-event fallback still needs a notice. Only the last
@@ -387,6 +390,7 @@ impl Worker {
             colibri_last_leave: None,
             colibri_last_blank: None,
             colibri_started_at: None,
+            colibri_profile_checked: false,
         }
     }
 
@@ -670,6 +674,7 @@ impl Worker {
                 self.did = None;
                 *self.dpop.lock().unwrap() = None;
                 self.stored_session = None;
+                self.colibri_profile_checked = false;
                 let _ = std::fs::remove_file(self.storage_dir.join(SESSION_FILE));
                 self.emit(Event::Session(SessionState::LoggedOut));
             }
@@ -1521,6 +1526,8 @@ impl Worker {
                     }
                 }
                 self.emit(Event::Session(SessionState::LoggedIn { did }));
+                self.colibri_profile_checked = false;
+                self.check_colibri_profile().await;
             }
             Err(error) => self.emit(Event::Session(SessionState::Failed {
                 message: AtmosphericError::protocol(error).to_string(),
@@ -1643,6 +1650,8 @@ impl Worker {
                     self.fail(format!("could not persist the session file: {error}"));
                 }
                 self.emit(Event::Session(SessionState::LoggedIn { did }));
+                self.colibri_profile_checked = false;
+                self.check_colibri_profile().await;
             }
             Err(error) => self.emit(Event::Session(SessionState::Failed {
                 message: error.to_string(),
@@ -2031,6 +2040,31 @@ impl Worker {
             colibri::run_stream(appview, token, tx).await;
         }));
         self.emit_colibri(None);
+        self.check_colibri_profile().await;
+    }
+
+    /// Check the local player's Colibri actor profile once per bridge session
+    /// (M30). atpcraft prompts every linked player on join; a client mod only
+    /// knows the local player's session, so this checks that account. A
+    /// missing record emits the setup prompt; a failed read stays quiet.
+    async fn check_colibri_profile(&mut self) {
+        if self.colibri_profile_checked || self.colibri_channel.is_none() {
+            return;
+        }
+        let Some(did) = self.did.clone() else {
+            return;
+        };
+        self.ensure_oauth_fresh().await;
+        let exists = match self.agent.as_ref() {
+            Some(agent) => colibri::profile_exists(agent, &did).await,
+            None => return,
+        };
+        self.colibri_profile_checked = true;
+        if matches!(exists, Ok(false)) {
+            self.emit(Event::ColibriProfileMissing {
+                url: colibri::PROFILE_URL.into(),
+            });
+        }
     }
 
     /// Disarm the bridge and, unless called from a replace, report it.
@@ -2046,6 +2080,7 @@ impl Worker {
         self.colibri_last_blank = None;
         self.colibri_started_at = None;
         if announce {
+            self.colibri_profile_checked = false;
             self.emit_colibri(None);
         }
     }
@@ -3224,6 +3259,55 @@ mod tests {
         assert_eq!(creates.len(), 1, "exactly one membership record is written");
         let body: serde_json::Value = serde_json::from_str(&creates[0].body).unwrap();
         assert_eq!(body["record"]["community"], channel.community_uri());
+    }
+
+    #[test]
+    fn colibri_profile_prompt_is_only_for_a_missing_record() {
+        let pds = StubPds::start(false);
+        let config = test_config(pds.url.clone());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (agent, _) = runtime
+            .block_on(session::login(&config, oauth::new_shared_dpop()))
+            .unwrap();
+        let dir = temp_dir("colibri-profile");
+        let (events, event_rx) = std::sync::mpsc::channel();
+        let (oauth_tx, _oauth_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (colibri_tx, _colibri_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut worker = Worker::new(
+            WorkerOptions::new(dir.clone()),
+            events,
+            oauth_tx,
+            colibri_tx,
+        );
+        worker.agent = Some(agent);
+        worker.did = Some("did:plc:stubuser".into());
+        worker.colibri_channel = Some(
+            ChannelRef::parse("at://did:plc:community/social.colibri.channel/3jchannel").unwrap(),
+        );
+
+        runtime.block_on(worker.check_colibri_profile());
+        match event_rx.try_recv() {
+            Ok(Event::ColibriProfileMissing { url }) => assert_eq!(url, colibri::PROFILE_URL),
+            other => panic!("expected the Colibri profile prompt, got {other:?}"),
+        }
+        assert!(
+            pds.requests()
+                .iter()
+                .any(|request| request.path.contains(colibri::ACTOR_PROFILE_COLLECTION)),
+            "the profile check reads the actor profile over getRecord"
+        );
+
+        pds.seed_record(
+            colibri::ACTOR_PROFILE_COLLECTION,
+            colibri::SELF_RKEY,
+            serde_json::json!({"$type": colibri::ACTOR_PROFILE_COLLECTION}),
+        );
+        worker.colibri_profile_checked = false;
+        runtime.block_on(worker.check_colibri_profile());
+        assert!(
+            event_rx.try_recv().is_err(),
+            "an existing profile emits no prompt"
+        );
     }
 
     #[test]
