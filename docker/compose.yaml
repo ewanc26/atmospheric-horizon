@@ -1,0 +1,17 @@
+name: atmospheric-server
+
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: docker/server.Dockerfile
+    environment:
+      ATMOSPHERIC_SERVER_TOKEN: ${ATMOSPHERIC_SERVER_TOKEN:?set ATMOSPHERIC_SERVER_TOKEN}
+    ports:
+      - "8787:8787"
+    volumes:
+      - atmospheric-server-data:/data
+    restart: unless-stopped
+
+volumes:
+  atmospheric-server-data:

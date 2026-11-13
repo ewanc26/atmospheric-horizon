@@ -25,3 +25,12 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --locked
+
+  server-docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test the server image
+        run: bash docker/server-test.sh
