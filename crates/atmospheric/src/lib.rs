@@ -125,6 +125,10 @@ pub enum Command {
     /// "follows", "followers", "blocks" or "mutes", and `subject` is a DID
     /// or a handle. Unauthenticated AppView read — works logged out.
     FetchGraph { kind: String, subject: String },
+    /// Write one relationship (M23): `action` is "follow", "unfollow",
+    /// "block", "unblock", "mute" or "unmute", and `subject` is a DID or a
+    /// handle. Requires a session.
+    GraphWrite { action: String, subject: String },
     /// Reply to a post (M21): publish an `app.bsky.feed.post` whose
     /// `reply` root/parent strong refs point at the target thread. The
     /// target is an `at://…/app.bsky.feed.post/<rkey>` URI or a bsky.app
@@ -228,6 +232,9 @@ pub enum Event {
         via: String,
         members: Vec<graph::GraphMember>,
     },
+    /// A relationship was written (M23): the action (`follow`, `unfollow`,
+    /// `block`, `unblock`, `mute` or `unmute`) and the subject's resolved DID.
+    GraphChanged { action: String, subject: String },
 }
 
 #[cfg(test)]
@@ -359,6 +366,10 @@ mod tests {
                 kind: "follows".into(),
                 subject: "did:plc:z".into(),
             },
+            Command::GraphWrite {
+                action: "follow".into(),
+                subject: "did:plc:z".into(),
+            },
             Command::Reply {
                 uri: "at://did:plc:z/app.bsky.feed.post/1".into(),
                 text: "nice".into(),
@@ -473,6 +484,10 @@ mod tests {
                     handle: "a.test".into(),
                     display_name: "A".into(),
                 }],
+            },
+            Event::GraphChanged {
+                action: "follow".into(),
+                subject: "did:plc:a".into(),
             },
         ];
         for event in events {

@@ -131,6 +131,9 @@ pub enum GameCommand {
     /// "follows", "followers", "blocks" or "mutes", and `subject` is a DID
     /// or a handle. Works logged out.
     FetchGraph { kind: String, subject: String },
+    /// Write one relationship (M23): `action` is "follow", "unfollow",
+    /// "block", "unblock", "mute" or "unmute"; `subject` is a DID or handle.
+    GraphWrite { action: String, subject: String },
     /// Reply to a post (M21): publish an `app.bsky.feed.post` with
     /// `reply: { root, parent }` strong refs after reading the target's CID.
     Reply { uri: String, text: String },
@@ -417,6 +420,8 @@ pub enum ModEvent {
         via: String,
         members: Vec<GraphMember>,
     },
+    /// A relationship was written (M23): the action and the resolved DID.
+    GraphChanged { action: String, subject: String },
 }
 
 /// The HUD wording for an endorsement verdict (M13/M14).
@@ -565,6 +570,18 @@ pub fn status_text(event: &ModEvent) -> String {
                 )
             }
         },
+        ModEvent::GraphChanged { action, subject } => {
+            let past = match action.as_str() {
+                "follow" => "followed",
+                "unfollow" => "unfollowed",
+                "block" => "blocked",
+                "unblock" => "unblocked",
+                "mute" => "muted",
+                "unmute" => "unmuted",
+                _ => "updated",
+            };
+            format!("atmospheric: {past} {subject}")
+        }
         ModEvent::SocialGraph {
             kind,
             subject,
@@ -895,6 +912,43 @@ pub fn fetch_graph(kind: &str, subject: &str) {
         kind: kind.into(),
         subject: subject.into(),
     });
+}
+
+fn graph_write(action: &str, subject: &str) {
+    send(GameCommand::GraphWrite {
+        action: action.into(),
+        subject: subject.into(),
+    });
+}
+
+/// Ask the worker to follow an account (M23). `subject` is a DID or handle.
+pub fn follow(subject: &str) {
+    graph_write("follow", subject);
+}
+
+/// Ask the worker to undo a follow (M23).
+pub fn unfollow(subject: &str) {
+    graph_write("unfollow", subject);
+}
+
+/// Ask the worker to block an account (M23).
+pub fn block(subject: &str) {
+    graph_write("block", subject);
+}
+
+/// Ask the worker to undo a block (M23).
+pub fn unblock(subject: &str) {
+    graph_write("unblock", subject);
+}
+
+/// Ask the worker to mute an account (M23).
+pub fn mute(subject: &str) {
+    graph_write("mute", subject);
+}
+
+/// Ask the worker to undo a mute (M23).
+pub fn unmute(subject: &str) {
+    graph_write("unmute", subject);
 }
 
 /// Ask the worker to reply to a post (M21). `uri` is an
@@ -1498,6 +1552,10 @@ fn encode_command(command: &GameCommand) -> String {
             "FetchGraph",
             jobj(vec![("kind", jstr(kind)), ("subject", jstr(subject))]),
         )]),
+        GameCommand::GraphWrite { action, subject } => jobj(vec![(
+            "GraphWrite",
+            jobj(vec![("action", jstr(action)), ("subject", jstr(subject))]),
+        )]),
         GameCommand::Reply { uri, text } => jobj(vec![(
             "Reply",
             jobj(vec![("uri", jstr(uri)), ("text", jstr(text))]),
@@ -1822,6 +1880,13 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 members,
             })
         }
+        "GraphChanged" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::GraphChanged {
+                action: req_str(obj, "action")?,
+                subject: req_str(obj, "subject")?,
+            })
+        }
         _ => None,
     }
 }
@@ -1872,6 +1937,12 @@ mod tests {
         fetch_player_skin("someone.example");
         fetch_server_profile("someone.example");
         fetch_graph("follows", "someone.example");
+        follow("someone.example");
+        unfollow("someone.example");
+        block("someone.example");
+        unblock("someone.example");
+        mute("someone.example");
+        unmute("someone.example");
         reply("at://did:plc:example/app.bsky.feed.post/3abc", "nice");
         like("at://did:plc:example/app.bsky.feed.post/3abc");
         repost("at://did:plc:example/app.bsky.feed.post/3abc");
@@ -1967,6 +2038,15 @@ mod tests {
                 assert_eq!(subject, "someone.example");
             }
             other => panic!("expected FetchGraph, got {:?}", other),
+        }
+        for expected in ["follow", "unfollow", "block", "unblock", "mute", "unmute"] {
+            match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(GameCommand::GraphWrite { action, subject }) => {
+                    assert_eq!(action, expected);
+                    assert_eq!(subject, "someone.example");
+                }
+                other => panic!("expected GraphWrite({expected}), got {:?}", other),
+            }
         }
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::Reply { uri, text }) => {
@@ -2084,6 +2164,20 @@ mod tests {
 
     #[test]
     fn status_text_covers_every_event() {
+        assert_eq!(
+            status_text(&ModEvent::GraphChanged {
+                action: "follow".into(),
+                subject: "did:plc:x".into(),
+            }),
+            "atmospheric: followed did:plc:x"
+        );
+        assert_eq!(
+            status_text(&ModEvent::GraphChanged {
+                action: "unmute".into(),
+                subject: "did:plc:x".into(),
+            }),
+            "atmospheric: unmuted did:plc:x"
+        );
         assert_eq!(
             status_text(&ModEvent::SocialGraph {
                 kind: "follows".into(),
@@ -2465,6 +2559,13 @@ mod tests {
             r#"{"FetchGraph":{"kind":"follows","subject":"did:plc:z"}}"#
         );
         assert_eq!(
+            encode_command(&GameCommand::GraphWrite {
+                action: "follow".into(),
+                subject: "did:plc:z".into(),
+            }),
+            r#"{"GraphWrite":{"action":"follow","subject":"did:plc:z"}}"#
+        );
+        assert_eq!(
             encode_command(&GameCommand::Reply {
                 uri: "at://did:plc:z/app.bsky.feed.post/1".into(),
                 text: "nice".into(),
@@ -2506,6 +2607,13 @@ mod tests {
                     handle: "a.test".into(),
                     display_name: "A".into(),
                 }],
+            })
+        );
+        assert_eq!(
+            decode_event(r#"{"GraphChanged":{"action":"follow","subject":"did:plc:x"}}"#),
+            Some(ModEvent::GraphChanged {
+                action: "follow".into(),
+                subject: "did:plc:x".into(),
             })
         );
         assert_eq!(
