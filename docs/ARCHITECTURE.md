@@ -73,6 +73,9 @@ Everything else, with zero Horizon imports so it builds and tests with plain
 - `presence` — M13 verified reads of other players' `at.atpcraft.player.snapshot`
   records (`com.atproto.repo.listRecords` on the subject's own PDS, highest
   version, Ed25519 endorsement verification)
+- `profiles` — M24 Bluesky profile reads (AppView `app.bsky.actor.getProfile`
+  plus the direct `app.bsky.actor.profile` record at rkey `self`, with
+  atpcraft's direct-record pronoun precedence and whitespace normalisation)
 - `skins` — M14 verified reads of other players' `at.atpcraft.player.skin`
   records (newest `timestamp`, endorsement verification) plus
   `com.atproto.sync.getBlob` downloads; `records` carries the shared
@@ -477,6 +480,46 @@ a repo with no records reports `None`, and the `listRecords` request is
 asserted unauthenticated. Real-PDS wire check: `pds_check` with
 `ATMOSPHERIC_FETCH_PLAYER` (and `ATMOSPHERIC_TRUSTED_SERVER_KEYS` for
 trusted-key verification).
+
+### M24: profile reads (`app.bsky.actor.getProfile` + `app.bsky.actor.profile`)
+
+`/atmospheric profile <did|handle>` sends `Command::FetchProfile` — the
+client-side half of atpcraft's profile pronouns, with the same fallback rule
+atpcraft uses during OAuth. The flow, in `profiles.rs`:
+
+1. `resolve_profile` parses the subject with the M12 subject parser (record
+   URIs are rejected — a profile is an account), resolves handles through the
+   same directory service OAuth login uses, fetches the DID document and
+   takes its `#atproto_pds` endpoint.
+2. The AppView's `app.bsky.actor.getProfile` (`actor` = the DID) and the
+   subject PDS's `com.atproto.repo.getRecord` (`collection`
+   `app.bsky.actor.profile`, `rkey` `self`) are both read
+   **unauthenticated**, so the command works logged out.
+3. `digest` combines them. A successful direct-record read owns `pronouns`,
+   including the absence of the field — this clears an older AppView value.
+   Only a failed record read falls back to the AppView's pronouns. Display
+   names use the AppView value when non-empty and fall back to the direct
+   record; the description does the same. Pronouns are trimmed and internal
+   whitespace is collapsed; a blank value is no value.
+
+The worker emits `Event::Profile { subject, via, profile }` with a
+`ProfileDigest` (DID, handle, display name, description, pronouns, avatar URL).
+The game side mirrors it as plain data and the HUD shows the display name,
+`(@handle)`, pronouns in parentheses and a truncated description. Nothing is
+stored on disk. The direct profile record is read from the PDS; its avatar is
+a blob reference, so only the AppView's avatar URL is carried in the digest.
+
+atpcraft's newer server-side surfaces (Colibri bridge, RPG item discovery,
+full aspect capture/restore, labeler issuance and the server account) remain
+out of scope for the client mod; the README port table records each one.
+
+Verified: `profiles` unit tests (whitespace normalisation, direct-record
+precedence, clearing on a successful record without pronouns, AppView
+fallback, direct-only profiles, both-sources-failed) and a worker test against
+the stub (AppView fallback, direct-record pronouns, clearing, both reads
+unauthenticated, and a bad subject making no HTTP call). The runtime command,
+sidecar wire shape and HUD line are covered by the std-only encode/decode and
+status tests.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
