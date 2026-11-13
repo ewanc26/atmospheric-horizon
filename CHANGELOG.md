@@ -12,6 +12,13 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+### Added
+
+- **M20 — social-graph reads (#48).** `/atmospheric follows|followers|blocks|mutes
+  <did|handle>` pages `app.bsky.graph.getFollows`, `getFollowers`,
+  `getBlocks` or `getMutes` on the public AppView and reports the count plus
+  the first handles in the HUD. Unauthenticated, so it works logged out.
+
 ## [0.1.0] — 2026-11-13
 
 First tagged release. The mod is an early but complete client-side port of the
