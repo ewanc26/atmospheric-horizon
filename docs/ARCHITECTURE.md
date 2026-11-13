@@ -663,16 +663,51 @@ uses the same echo guard as player sends. The path is deliberately quiet: a
 missing bridge, a disabled setting or an automatic write failure never
 interrupts the game.
 
-This observes vanilla broadcast lines only. If another mod rewrites or hides
-a join/leave line, there is no fallback notice yet; the hook also does not
-cover a client connected to a remote server that does not run the mod. Those
-remain M29+ work, along with approval and profile prompts.
+This observes vanilla broadcast lines only. M29 adds the fallback for lines
+that another mod rewrites or hides, and the pending-approval notice. The hook
+still does not cover a client connected to a remote server that does not run
+the mod, and the Colibri profile prompt remains.
 
 Verified: the runtime classifier test covers all accepted and rejected keys;
 the runtime forwarding test asserts the `ColibriNotice` command and the codec
 pins its wire shape. The worker's write path reuses the already-tested
 `colibri::message_record` and `create_record_json`; no live server or AppView
 was contacted.
+
+### M29: Colibri presence fallback and approval notice
+
+The connection hooks `player_logged_in` and `player_logged_out`
+(`hook_version = 1`, server side) call `colibri_join.rs` and
+`colibri_leave.rs`. Each localises the join/leave line through
+`Text::translate`, then sends `GameCommand::ColibriPresence { kind, text }`.
+The worker waits **3 seconds** (`COLIBRI_PRESENCE_WAIT`) and asks whether a
+matching line arrived within **5 seconds** before or after the event
+(`COLIBRI_PRESENCE_WINDOW`), the same window atpcraft uses.
+
+`colibri_notice.rs` marks handled lines through `ColibriHandled { kind }`.
+Join and leave lines mark their kind; a textless line marks `None`, which
+counts for both kinds. This matters when a chat mod intentionally hides a
+line: the hidden line must suppress the fallback, not trigger a duplicate.
+The worker keeps the last time for join, leave and blank lines, and a
+scheduled fallback is dropped when its generation predates the current bridge
+(`colibri_started_at`), so a stop/start cannot write a stale notice. The
+fallback is off when either `colibri_server_events_enabled` or the new
+`colibri_server_events_fallback_enabled` switch is false.
+
+After `ensure_membership` creates a record, the worker calls
+`colibri::requires_approval`: resolve the community DID document with the
+shared OAuth resolver, take its `#atproto_pds` endpoint, and issue an
+unauthenticated `com.atproto.repo.getRecord` for
+`social.colibri.community`/`self`. `requiresApprovalToJoin == true` emits
+`Event::Status`, which the runtime renders as a HUD line. A failed read or a
+missing flag is silent; an existing membership is never re-checked.
+
+Verified: the worker test seeds the community record in the stub PDS and
+asserts the `getRecord` read returns `Some(true)`; the pure approval parser
+covers true/false/missing values, and the fallback window test covers the
+inclusive 5-second boundary, blank-line suppression, the other kind and
+unknown kinds. The injected connection hooks themselves are not compiled by
+`cargo test`; no live server or Colibri AppView was contacted.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
