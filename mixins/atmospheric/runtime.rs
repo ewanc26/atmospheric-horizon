@@ -102,6 +102,12 @@ pub enum GameCommand {
     ColibriHandled { kind: Option<String> },
     /// A join/leave connection event for the presence fallback (M29).
     ColibriPresence { kind: String, text: String },
+    /// A player joined the server (M37); the worker checks their linked
+    /// Colibri profile while the bridge is active.
+    ColibriPlayerJoined {
+        player_uuid: String,
+        player_name: String,
+    },
     /// Claim a server identity pairing code as the logged-in player (M36).
     ClaimServerLink { code: String },
     /// Publish the player's state as an `at.atpcraft.player.snapshot` record
@@ -496,6 +502,13 @@ pub enum ModEvent {
     /// The local player has no Colibri actor profile (M30); `url` is the
     /// setup page shown in chat.
     ColibriProfileMissing { url: String },
+    /// A linked joining player has no Colibri actor profile (M37); `url` is
+    /// the setup page sent to that player.
+    ColibriRemoteProfileMissing {
+        player_uuid: String,
+        player_name: String,
+        url: String,
+    },
     /// A new local-player Colibri membership needs approval (M32).
     ColibriMembershipPending { message: String },
 }
@@ -731,6 +744,10 @@ pub fn status_text(event: &ModEvent) -> String {
                 clean_remote(url, COLIBRI_MAX_TEXT)
             )
         }
+        ModEvent::ColibriRemoteProfileMissing { player_name, .. } => format!(
+            "atmospheric: prompted {} to set up a Colibri profile",
+            clean_remote(player_name, COLIBRI_MAX_HANDLE)
+        ),
         ModEvent::ColibriMembershipPending { message } => {
             format!("[Colibri] {}", clean_remote(message, COLIBRI_MAX_TEXT))
         }
@@ -866,6 +883,25 @@ pub fn drain_events(max: usize) -> Vec<ModEvent> {
             }
         }
     }
+    if let Ok(mut prompts) = REMOTE_COLIBRI_PROMPTS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+    {
+        for event in &drained {
+            if let ModEvent::ColibriRemoteProfileMissing {
+                player_uuid, url, ..
+            } = event
+            {
+                prompts.push(RemoteColibriPrompt {
+                    player_uuid: player_uuid.clone(),
+                    lines: remote_prompt_lines(url),
+                });
+            }
+        }
+        while prompts.len() > 32 {
+            prompts.remove(0);
+        }
+    }
     if let Ok(mut status) = status_slot().lock() {
         let now = std::time::Instant::now();
         prune_expired(&mut status, now);
@@ -927,6 +963,34 @@ fn colibri_chat_lines(event: &ModEvent) -> Vec<String> {
         }
         _ => Vec::new(),
     }
+}
+
+/// The setup prompt sent to one linked player (M37).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteColibriPrompt {
+    pub player_uuid: String,
+    pub lines: Vec<String>,
+}
+
+static REMOTE_COLIBRI_PROMPTS: OnceLock<Mutex<Vec<RemoteColibriPrompt>>> = OnceLock::new();
+
+fn remote_prompt_lines(url: &str) -> Vec<String> {
+    vec![
+        "[Colibri] You need a Colibri profile to use the chat bridge.".into(),
+        format!(
+            "[Colibri] Open Colibri: {}",
+            clean_remote(url, COLIBRI_MAX_TEXT)
+        ),
+    ]
+}
+
+/// Take the targeted player prompts queued for server-side delivery (M37).
+pub fn drain_colibri_prompts() -> Vec<RemoteColibriPrompt> {
+    REMOTE_COLIBRI_PROMPTS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .map(|mut prompts| std::mem::take(&mut *prompts))
+        .unwrap_or_default()
 }
 
 /// Take the incoming Colibri lines queued for native chat.
@@ -1100,6 +1164,36 @@ pub fn post_colibri_presence(kind: &str, text: &str) {
         kind: kind.into(),
         text: text.into(),
     });
+}
+
+/// Ask the worker to check a joining player's linked Colibri profile (M37).
+pub fn check_colibri_player(player: u128, name: &str) {
+    send(GameCommand::ColibriPlayerJoined {
+        player_uuid: uuid_text(player),
+        player_name: name.into(),
+    });
+}
+
+/// The canonical lowercase hyphenated form of a Minecraft UUID.
+pub fn uuid_text(value: u128) -> String {
+    let hex = format!("{value:032x}");
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+/// Parse a canonical Minecraft UUID for a targeted server message (M37).
+pub fn uuid_value(value: &str) -> Option<u128> {
+    let compact: String = value.chars().filter(|ch| *ch != '-').collect();
+    if compact.len() != 32 || !compact.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    u128::from_str_radix(&compact, 16).ok()
 }
 
 /// The fallback kind for a server broadcast translation key (M29), or `None`
@@ -1837,6 +1931,16 @@ fn encode_command(command: &GameCommand) -> String {
             "ColibriPresence",
             jobj(vec![("kind", jstr(kind)), ("text", jstr(text))]),
         )]),
+        GameCommand::ColibriPlayerJoined {
+            player_uuid,
+            player_name,
+        } => jobj(vec![(
+            "ColibriPlayerJoined",
+            jobj(vec![
+                ("player_uuid", jstr(player_uuid)),
+                ("player_name", jstr(player_name)),
+            ]),
+        )]),
         GameCommand::ClaimServerLink { code } => {
             jobj(vec![("ClaimServerLink", jobj(vec![("code", jstr(code))]))])
         }
@@ -2305,6 +2409,14 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 url: req_str(obj, "url")?,
             })
         }
+        "ColibriRemoteProfileMissing" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::ColibriRemoteProfileMissing {
+                player_uuid: req_str(obj, "player_uuid")?,
+                player_name: req_str(obj, "player_name")?,
+                url: req_str(obj, "url")?,
+            })
+        }
         "ColibriMembershipPending" => {
             let obj = payload_obj()?;
             Some(ModEvent::ColibriMembershipPending {
@@ -2354,6 +2466,7 @@ mod tests {
         post_colibri_notice("Alex joined the game");
         post_colibri_handled(Some("join"));
         post_colibri_presence("join", "Alex joined the game");
+        check_colibri_player(1, "Alex");
         post_snapshot(snapshot_from_player(
             "",
             "minecraft:overworld",
@@ -2469,6 +2582,16 @@ mod tests {
                 assert_eq!(text, "Alex joined the game");
             }
             other => panic!("expected ColibriPresence, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::ColibriPlayerJoined {
+                player_uuid,
+                player_name,
+            }) => {
+                assert_eq!(player_uuid, "00000000-0000-0000-0000-000000000001");
+                assert_eq!(player_name, "Alex");
+            }
+            other => panic!("expected ColibriPlayerJoined, got {:?}", other),
         }
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::PostSnapshot { summary }) => {
@@ -2630,6 +2753,27 @@ mod tests {
         assert_eq!(drain_events(1).len(), 1);
         assert_eq!(drain_events(16).len(), 1);
         assert_eq!(status_line(), "atmospheric: 1 new: reply from bob.test");
+
+        // M37 prompts are queued for that player, not the local chat.
+        event_tx
+            .send(ModEvent::ColibriRemoteProfileMissing {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
+                url: "https://colibri.social".into(),
+            })
+            .unwrap();
+        assert_eq!(drain_events(16).len(), 1);
+        assert_eq!(
+            drain_colibri_prompts(),
+            vec![RemoteColibriPrompt {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                lines: vec![
+                    "[Colibri] You need a Colibri profile to use the chat bridge.".into(),
+                    "[Colibri] Open Colibri: https://colibri.social".into(),
+                ],
+            }]
+        );
+        assert!(drain_colibri_prompts().is_empty());
 
         // The worker side stays usable after the game side drops it.
         drop(event_tx);
@@ -3066,6 +3210,29 @@ mod tests {
                 "[Colibri] Open Colibri: https://colibri.social".to_string(),
             ]
         );
+        assert_eq!(
+            status_text(&ModEvent::ColibriRemoteProfileMissing {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
+                url: "https://colibri.social".into(),
+            }),
+            "atmospheric: prompted Alex to set up a Colibri profile"
+        );
+        assert_eq!(
+            remote_prompt_lines("https://colibri.social"),
+            vec![
+                "[Colibri] You need a Colibri profile to use the chat bridge.".to_string(),
+                "[Colibri] Open Colibri: https://colibri.social".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn uuids_round_trip_for_targeted_prompts() {
+        let value = 1u128;
+        assert_eq!(uuid_text(value), "00000000-0000-0000-0000-000000000001");
+        assert_eq!(uuid_value(&uuid_text(value)), Some(value));
+        assert!(uuid_value("not-a-uuid").is_none());
     }
 
     #[test]
@@ -3168,6 +3335,13 @@ mod tests {
                 text: "Alex left the game".into(),
             }),
             r#"{"ColibriPresence":{"kind":"leave","text":"Alex left the game"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::ColibriPlayerJoined {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
+            }),
+            r#"{"ColibriPlayerJoined":{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}}"#
         );
         assert_eq!(
             encode_command(&GameCommand::ClaimServerLink {
@@ -3393,6 +3567,16 @@ mod tests {
         assert_eq!(
             decode_event(r#"{"ColibriProfileMissing":{"url":"https://colibri.social"}}"#),
             Some(ModEvent::ColibriProfileMissing {
+                url: "https://colibri.social".into(),
+            })
+        );
+        assert_eq!(
+            decode_event(
+                r#"{"ColibriRemoteProfileMissing":{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex","url":"https://colibri.social"}}"#
+            ),
+            Some(ModEvent::ColibriRemoteProfileMissing {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
                 url: "https://colibri.social".into(),
             })
         );

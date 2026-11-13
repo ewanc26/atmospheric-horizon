@@ -1,14 +1,16 @@
-//! Claiming a server-side identity link (M36).
+//! Claiming and reading server-side identity links (M36/M37).
 //!
 //! The optional `atmospheric-server` bound the Minecraft UUID when it issued a
 //! pairing code. The client only has to send the code and the logged-in
 //! player's DID/handle; it never sees an admin token or another player's
-//! credentials.
+//! credentials. A join uses the public side of the same map to resolve a UUID
+//! before checking that player's Colibri profile.
 
 use crate::error::{AtmosphericError, Result};
 use serde::{Deserialize, Serialize};
 
 const CLAIM_PATH: &str = "/v1/pairings/claim";
+const LINKS_PATH: &str = "/v1/links";
 
 #[derive(Debug, Serialize)]
 struct ClaimRequest<'a> {
@@ -33,15 +35,88 @@ struct ErrorBody {
     error: Option<String>,
 }
 
-/// Build and validate the claim URL from the configured service base.
-pub fn claim_url(base: &str) -> Result<String> {
+fn service_url(base: &str, path: &str) -> Result<String> {
     let base = base.trim().trim_end_matches('/');
     if !(base.starts_with("http://") || base.starts_with("https://")) {
         return Err(AtmosphericError::Message(
             "server_api_url must start with http:// or https://".into(),
         ));
     }
-    Ok(format!("{base}{CLAIM_PATH}"))
+    Ok(format!("{base}{path}"))
+}
+
+fn valid_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+
+fn service_error(status: reqwest::StatusCode, text: &str) -> String {
+    serde_json::from_str::<ErrorBody>(text)
+        .ok()
+        .and_then(|body| body.error)
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or_else(|| format!("HTTP {status}"))
+}
+
+/// Build and validate the claim URL from the configured service base.
+pub fn claim_url(base: &str) -> Result<String> {
+    service_url(base, CLAIM_PATH)
+}
+
+/// Build and validate a public link lookup URL. The UUID is the canonical
+/// lowercase hyphenated form the game-side hook produces.
+pub fn link_url(base: &str, player_uuid: &str) -> Result<String> {
+    if !valid_uuid(player_uuid) {
+        return Err(AtmosphericError::Message(
+            "player_uuid must be a canonical hyphenated Minecraft UUID".into(),
+        ));
+    }
+    service_url(base, &format!("{LINKS_PATH}/{player_uuid}"))
+}
+
+/// Resolve a player's link through the public side of the M35 service (M37).
+/// A 404 means the player has not linked an account and is not an error.
+pub async fn fetch_link(
+    http: &reqwest::Client,
+    base: &str,
+    player_uuid: &str,
+) -> Result<Option<ClaimedLink>> {
+    let url = link_url(base, player_uuid)?;
+    let response = http
+        .get(url)
+        .send()
+        .await
+        .map_err(AtmosphericError::protocol)?;
+    let status = response.status();
+    let text = response.text().await.map_err(AtmosphericError::protocol)?;
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(AtmosphericError::Message(format!(
+            "server identity service: {}",
+            service_error(status, &text)
+        )));
+    }
+    let link: ClaimedLink = serde_json::from_str(&text)?;
+    if link.player_uuid != player_uuid {
+        return Err(AtmosphericError::Message(
+            "server identity service returned a different player UUID".into(),
+        ));
+    }
+    if link.did.trim().is_empty() || link.player_name.trim().is_empty() {
+        return Err(AtmosphericError::Message(
+            "server identity service returned an incomplete link".into(),
+        ));
+    }
+    Ok(Some(link))
 }
 
 /// Claim a pairing code as `did`. The service owns the code-to-UUID binding,
@@ -74,13 +149,9 @@ pub async fn claim(
     let status = response.status();
     let text = response.text().await.map_err(AtmosphericError::protocol)?;
     if !status.is_success() {
-        let message = serde_json::from_str::<ErrorBody>(&text)
-            .ok()
-            .and_then(|body| body.error)
-            .filter(|message| !message.trim().is_empty())
-            .unwrap_or_else(|| format!("HTTP {status}"));
         return Err(AtmosphericError::Message(format!(
-            "server identity service: {message}"
+            "server identity service: {}",
+            service_error(status, &text)
         )));
     }
     let link: ClaimedLink = serde_json::from_str(&text)?;
@@ -249,5 +320,63 @@ mod tests {
     fn claim_rejects_a_non_http_base() {
         let error = claim_url("file:///tmp/identity").unwrap_err();
         assert!(error.to_string().contains("server_api_url"));
+    }
+
+    #[test]
+    fn fetch_link_reads_the_public_map() {
+        let stub = start(
+            "200 OK",
+            r#"{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex","did":"did:plc:alice","handle":"alice.test","linked_at":7}"#,
+        );
+        let link = runtime()
+            .block_on(fetch_link(
+                &reqwest::Client::new(),
+                &format!("{}/", stub.url),
+                "00000000-0000-4000-8000-000000000001",
+            ))
+            .unwrap()
+            .expect("a linked player");
+        assert_eq!(link.did, "did:plc:alice");
+        let requests = stub.requests.lock().unwrap();
+        assert_eq!(
+            requests[0].0,
+            "/v1/links/00000000-0000-4000-8000-000000000001"
+        );
+    }
+
+    #[test]
+    fn fetch_link_treats_a_missing_link_as_unlinked() {
+        let stub = start("404 Not Found", r#"{"error":"no link"}"#);
+        let link = runtime()
+            .block_on(fetch_link(
+                &reqwest::Client::new(),
+                &stub.url,
+                "00000000-0000-4000-8000-000000000001",
+            ))
+            .unwrap();
+        assert!(link.is_none());
+    }
+
+    #[test]
+    fn fetch_link_surfaces_the_service_error() {
+        let stub = start("503 Service Unavailable", r#"{"error":"disabled"}"#);
+        let error = runtime()
+            .block_on(fetch_link(
+                &reqwest::Client::new(),
+                &stub.url,
+                "00000000-0000-4000-8000-000000000001",
+            ))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("server identity service: disabled")
+        );
+    }
+
+    #[test]
+    fn a_link_lookup_needs_a_canonical_uuid() {
+        let error = link_url("http://127.0.0.1:1", "not-a-uuid").unwrap_err();
+        assert!(error.to_string().contains("canonical"));
     }
 }

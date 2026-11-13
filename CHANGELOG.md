@@ -63,8 +63,8 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   and the local player is logged in, the worker reads the player's
   `social.colibri.actor.profile` at rkey `self`. If it is absent, native chat
   shows atpcraft's two-line setup prompt with `https://colibri.social`; an
-  existing profile or a failed read stays quiet. Other players are not checked
-  yet because the mod has no server-wide player-to-ATProto mapping.
+  existing profile or a failed read stays quiet. M37 later adds the check for
+  other linked players.
 - **M31 — Colibri reconnect and send throttle (#77).** `/atmospheric colibri
   reconnect` requires an active bridge, re-mints the server account's
   service-auth token and restarts only the event stream; the channel, echo
@@ -94,14 +94,23 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   claim a link without the admin credential. Links and pending codes persist
   atomically in `links.json`, and the image has a Docker end-to-end test for
   authentication, validation, pairing, deletion and restart persistence. M36
-  adds the in-game claim; join enforcement, label issuance, RPG discovery and
-  aspect capture remain unimplemented.
+  adds the in-game claim and M37 the join-time profile check; join enforcement,
+  label issuance, RPG discovery and aspect capture remain unimplemented.
 - **M36 — in-game identity link claim (#87).** `/atmospheric link <code>`
   claims an operator-issued M35 pairing code as the logged-in player. The
   worker posts only the code, DID and optional handle to the configured
   `server_api_url`, rejects a response for a different DID, and reports the
   linked player name and UUID in the HUD. No request is made unless the command
   is used; no admin token, session token or game state is sent.
+- **M37 — server-wide Colibri profile checks (#89).** The server-side
+  `player_logged_in` hook now carries the joining player's UUID to the worker.
+  While the bridge is active, the worker resolves the UUID through the public
+  `GET <server_api_url>/v1/links/{uuid}` and reads the linked account's
+  `social.colibri.actor.profile` at rkey `self`, unauthenticated. A missing
+  profile sends atpcraft's two-line setup prompt to that player with
+  `native_tell`; unlinked players, a missing service URL, failed reads and the
+  local player (already covered by M30) stay quiet. Server ticks now attach the
+  sidecar and drain events, so the prompt does not require a client window.
 
 ### Changed
 

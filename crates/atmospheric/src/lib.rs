@@ -96,6 +96,13 @@ pub enum Command {
     /// game side has already localized `text`; the worker waits 3 seconds and
     /// writes it only when no matching broadcast line arrived.
     ColibriPresence { kind: String, text: String },
+    /// A player joined the server (M37). While the bridge is active, the
+    /// worker resolves the UUID through the optional identity service and
+    /// checks the linked account's Colibri actor profile.
+    ColibriPlayerJoined {
+        player_uuid: String,
+        player_name: String,
+    },
     /// Claim a server-side identity pairing code as the logged-in player
     /// (M36). The worker posts only the code, its DID and optional handle to
     /// `server_api_url`; success is reported as a status line.
@@ -321,6 +328,13 @@ pub enum Event {
     /// The local player has no `social.colibri.actor.profile` record (M30);
     /// the runtime shows atpcraft's setup prompt with this URL in chat.
     ColibriProfileMissing { url: String },
+    /// A linked joining player has no actor profile (M37). The runtime sends
+    /// the setup prompt to that player, not to the local HUD.
+    ColibriRemoteProfileMissing {
+        player_uuid: String,
+        player_name: String,
+        url: String,
+    },
     /// A new local-player Colibri membership needs moderator approval (M32);
     /// the runtime shows `message` in chat and the HUD.
     ColibriMembershipPending { message: String },
@@ -396,6 +410,14 @@ mod tests {
             .unwrap(),
             r#"{"ColibriPresence":{"kind":"join","text":"Alex joined the game"}}"#
         );
+        assert_eq!(
+            serde_json::to_string(&Command::ColibriPlayerJoined {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
+            })
+            .unwrap(),
+            r#"{"ColibriPlayerJoined":{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}}"#
+        );
         // SaveConfig carries the full Config; the game side sends the Settings
         // subset and container-level serde(default) fills the rest.
         let json = serde_json::to_string(&Command::SaveConfig {
@@ -434,6 +456,10 @@ mod tests {
             },
             Command::ClaimServerLink {
                 code: "ABCD-EFGH".into(),
+            },
+            Command::ColibriPlayerJoined {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
             },
             Command::PostSnapshot {
                 summary: records::SnapshotSummary {
@@ -522,6 +548,15 @@ mod tests {
             })
             .unwrap(),
             r#"{"ColibriProfileMissing":{"url":"https://colibri.social"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Event::ColibriRemoteProfileMissing {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
+                url: "https://colibri.social".into(),
+            })
+            .unwrap(),
+            r#"{"ColibriRemoteProfileMissing":{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex","url":"https://colibri.social"}}"#
         );
         assert_eq!(
             serde_json::to_string(&Event::ColibriMembershipPending {
@@ -626,6 +661,11 @@ mod tests {
                 subject: "did:plc:a".into(),
             },
             Event::ColibriProfileMissing {
+                url: "https://colibri.social".into(),
+            },
+            Event::ColibriRemoteProfileMissing {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
                 url: "https://colibri.social".into(),
             },
             Event::ColibriMembershipPending {
