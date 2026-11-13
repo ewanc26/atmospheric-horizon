@@ -804,6 +804,28 @@ Runtime tests pin the event wire shape, HUD text, and native-chat line. The
 injected game hooks themselves are not compiled by `cargo test`; no live
 Colibri AppView was contacted.
 
+### M33: Colibri incoming chat hygiene
+
+Incoming Colibri messages are remote input. atpcraft's
+`ColibriChatFormatter.clean` replaces control characters and the legacy
+section sign with spaces, collapses every whitespace run, trims, and caps the
+handle at 64 characters and the text at 512. The runtime previously removed
+unsafe characters instead, so a newline could join two words, and it used the
+512 cap for handles as well.
+
+`clean_remote(value, max)` now follows atpcraft's order: unsafe or whitespace
+characters mark a pending single space (ignored before the first visible
+character), the next visible character emits it, and the final string is capped
+only after trimming. The profile setup URL and membership-pending line use the
+text cap; incoming handles use 64 and message text uses 512. The line still
+starts with `[Colibri]`, as the native-chat bridge does not use atpcraft's
+legacy colour prefix.
+
+Verified: a runtime test covers newlines/tabs, NUL and section signs, repeated
+spaces, the 64-character handle cap, and the formatted chat line. Existing
+profile, membership and message tests remain unchanged. No live Colibri
+AppView was contacted.
+
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
 `/atmospheric skin-of <did|handle>` sends `Command::FetchPlayerSkin` — the

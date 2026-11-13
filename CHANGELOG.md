@@ -78,6 +78,11 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   approval-gated community shows atpcraft's pending line in chat and the HUD;
   existing memberships and failed writes stay quiet. The once-per-bridge guard
   resets on explicit stop and player logout/login.
+- **M33 — Colibri incoming chat hygiene (#81).** Incoming Colibri text now
+  matches atpcraft's formatter: control and colour characters become spaces,
+  whitespace runs collapse, the result is trimmed, and handles/text are capped
+  at 64/512 characters. This prevents adjacent words from merging when a
+  colour or control character is removed.
 
 ### Changed
 
