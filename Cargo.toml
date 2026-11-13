@@ -13,5 +13,5 @@ description = "AT Protocol (Bluesky) integration for Horizon, the Rust rewrite o
 path = "mixins/atmospheric/runtime.rs"
 
 [workspace]
-members = ["crates/atmospheric"]
+members = ["crates/atmospheric", "crates/atmospheric-server"]
 resolver = "2"
