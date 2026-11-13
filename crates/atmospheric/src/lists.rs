@@ -100,6 +100,22 @@ pub fn parse_list_reference(raw: &str) -> Result<ListRef> {
     }
 }
 
+/// Resolve a list reference to its canonical AT-URI, resolving a bsky.app
+/// URL's handle owner via the same directory service OAuth login uses.
+pub async fn resolve_list_reference(
+    http: &reqwest::Client,
+    resolver: &crate::oauth::Resolver,
+    raw: &str,
+) -> Result<String> {
+    match parse_list_reference(raw)? {
+        ListRef::AtUri(uri) => Ok(uri),
+        ListRef::NeedsResolve { handle, rkey } => {
+            let did = crate::oauth::resolve_handle(http, resolver, &handle).await?;
+            Ok(format!("at://{did}/app.bsky.graph.list/{rkey}"))
+        }
+    }
+}
+
 /// Fetch all member DIDs of the list at `list` (an AT-URI) from the AppView at
 /// `appview`, paginating until the cursor ends. Unauthenticated — the public
 /// AppView serves this.
@@ -136,6 +152,46 @@ pub async fn fetch_list_members(
         }
     }
     Ok(members)
+}
+
+/// The outcome of a join-gate check (M15): the resolved list AT-URI, the
+/// subject's DID, and whether the DID is on the list. Fail-closed like
+/// atpcraft's gate: any resolution or list error propagates to the caller,
+/// which reports it as a deny-with-reason — never a silent allow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateOutcome {
+    pub list: String,
+    pub subject: String,
+    pub allowed: bool,
+}
+
+/// Check whether `subject` (a DID or handle — not a record URI) is on the
+/// list referenced by `list_reference` (M15, atpcraft's
+/// `AtprotoListResolver.isMember` decision): resolve both, page the members
+/// from the AppView, and compare DIDs.
+pub async fn check_gate(
+    http: &reqwest::Client,
+    resolver: &crate::oauth::Resolver,
+    appview: &str,
+    list_reference: &str,
+    subject: &str,
+) -> Result<GateOutcome> {
+    let list = resolve_list_reference(http, resolver, list_reference).await?;
+    let reference = crate::labels::parse_subject_reference(subject)?;
+    let resolved = crate::labels::resolve_subject(http, resolver, &reference).await?;
+    if resolved.collection.is_some() {
+        return Err(AtmosphericError::Message(
+            "want an account (a DID or a handle), not a record URI".into(),
+        ));
+    }
+    let did = resolved.pattern; // the bare DID for accounts
+    let members = fetch_list_members(http, appview, &list).await?;
+    let allowed = members.iter().any(|member| member == &did);
+    Ok(GateOutcome {
+        list,
+        subject: did,
+        allowed,
+    })
 }
 
 #[cfg(test)]
@@ -222,5 +278,109 @@ mod tests {
         assert!(hits[0].contains("limit=100"));
         assert!(!hits[0].contains("cursor="));
         assert!(hits[1].contains("cursor=c2"));
+    }
+
+    #[test]
+    fn check_gate_resolves_both_sides_and_decides_membership() {
+        // The stub doubles as the handle service and the AppView.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                std::thread::spawn(move || {
+                    use std::io::{Read, Write};
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let _ = stream.read(&mut chunk);
+                    buf.extend_from_slice(&chunk);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    let path = text.split_whitespace().nth(1).unwrap_or("").to_string();
+                    let payload = if path.starts_with("/xrpc/com.atproto.identity.resolveHandle") {
+                        let handle = path.split("handle=").nth(1).unwrap_or("").to_string();
+                        let did: String = match handle.as_str() {
+                            "owner.test" => "did:plc:owner".into(),
+                            "alice.test" => "did:plc:alice".into(),
+                            other => format!("did:plc:{}", other.trim_end_matches(".test")),
+                        };
+                        format!(r#"{{"did":"{did}"}}"#)
+                    } else if path.starts_with("/xrpc/app.bsky.graph.getList") {
+                        r#"{"items":[{"subject":{"did":"did:plc:alice"}},{"subject":{"did":"did:plc:bob"}}]}"#.to_string()
+                    } else {
+                        r#"{"error":"UnknownEndpoint"}"#.to_string()
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                });
+            }
+        });
+        let resolver = crate::oauth::Resolver {
+            handle_service: url.clone(),
+            plc_directory: url.clone(),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let http = reqwest::Client::new();
+            // A bsky.app URL with a handle owner, and a handle subject: both
+            // resolve through the stub; alice is on the list.
+            let outcome = check_gate(
+                &http,
+                &resolver,
+                &url,
+                "https://bsky.app/profile/owner.test/lists/3abc",
+                "alice.test",
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                outcome,
+                GateOutcome {
+                    list: "at://did:plc:owner/app.bsky.graph.list/3abc".into(),
+                    subject: "did:plc:alice".into(),
+                    allowed: true,
+                }
+            );
+            // mallory is not on the list.
+            let outcome = check_gate(
+                &http,
+                &resolver,
+                &url,
+                "at://did:plc:owner/app.bsky.graph.list/3abc",
+                "did:plc:mallory",
+            )
+            .await
+            .unwrap();
+            assert!(!outcome.allowed);
+            assert_eq!(outcome.subject, "did:plc:mallory");
+            // A record URI is not an account: error (fail closed).
+            let error = check_gate(
+                &http,
+                &resolver,
+                &url,
+                "at://did:plc:owner/app.bsky.graph.list/3abc",
+                "at://did:plc:alice/app.bsky.feed.post/3abc",
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("want an account"), "{error}");
+            // A bad list reference errors before any list fetch.
+            assert!(
+                check_gate(
+                    &http,
+                    &resolver,
+                    &url,
+                    "https://example.com/nope",
+                    "did:plc:alice"
+                )
+                .await
+                .is_err()
+            );
+        });
     }
 }

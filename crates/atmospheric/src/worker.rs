@@ -390,6 +390,18 @@ impl Worker {
                     Err(error) => self.fail(error.to_string()),
                 }
             }
+            Command::CheckGate { list, subject } => {
+                // Public AppView read: works logged out, no token refresh.
+                // Fail-closed: an error is the deny-with-reason.
+                match self.check_gate(&list, &subject).await {
+                    Ok(outcome) => self.emit(Event::GateDecision {
+                        list: outcome.list,
+                        subject: outcome.subject,
+                        allowed: outcome.allowed,
+                    }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
             Command::FetchLabels { subject } => {
                 // Public AppView read: works logged out, no token refresh.
                 match self.fetch_labels(&subject).await {
@@ -807,15 +819,27 @@ impl Worker {
         } else {
             config.appview_url.clone()
         };
-        let list = match crate::lists::parse_list_reference(reference)? {
-            crate::lists::ListRef::AtUri(uri) => uri,
-            crate::lists::ListRef::NeedsResolve { handle, rkey } => {
-                let did = crate::oauth::resolve_handle(&self.http, &self.resolver, &handle).await?;
-                format!("at://{did}/app.bsky.graph.list/{rkey}")
-            }
-        };
+        let list =
+            crate::lists::resolve_list_reference(&self.http, &self.resolver, reference).await?;
         let members = crate::lists::fetch_list_members(&self.http, &appview, &list).await?;
         Ok((list, members))
+    }
+
+    /// The join-gate decision (M15, atpcraft's `isMember`): public AppView
+    /// read, so it works logged out. Fail-closed — errors propagate and the
+    /// handler reports them as the deny reason.
+    async fn check_gate(
+        &self,
+        list: &str,
+        subject: &str,
+    ) -> crate::error::Result<crate::lists::GateOutcome> {
+        let config = self.load_config().unwrap_or_default();
+        let appview = if config.appview_url.is_empty() {
+            crate::lists::DEFAULT_APPVIEW.to_string()
+        } else {
+            config.appview_url.clone()
+        };
+        crate::lists::check_gate(&self.http, &self.resolver, &appview, list, subject).await
     }
 
     /// Read the labels the AppView attaches to a subject's view (M12, the
@@ -2891,6 +2915,100 @@ mod tests {
         assert_eq!(hits.len(), 2, "two pages fetched: {hits:?}");
         assert!(hits[0].path.contains("limit=100"));
         assert!(hits[1].path.contains("cursor=c2"));
+    }
+
+    #[test]
+    fn check_gate_decides_membership_and_fails_closed() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("check-gate");
+        let mut config = test_config(pds.url.clone());
+        config.appview_url = pds.url.clone(); // the stub doubles as the AppView
+        write_config(&dir, &config);
+
+        let (command_tx, event_rx, handle) =
+            spawn_worker_with_resolver(dir.clone(), stub_resolver(&pds.url));
+        // did:plc:alice is on the stub list (two pages: alice, bob, carol).
+        command_tx
+            .send(Command::CheckGate {
+                list: "at://did:plc:owner/app.bsky.graph.list/3abc".into(),
+                subject: "did:plc:alice".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::GateDecision { .. })) {
+            Event::GateDecision {
+                list,
+                subject,
+                allowed,
+            } => {
+                assert_eq!(list, "at://did:plc:owner/app.bsky.graph.list/3abc");
+                assert_eq!(subject, "did:plc:alice");
+                assert!(allowed);
+            }
+            other => panic!("expected GateDecision, got {other:?}"),
+        }
+
+        // A bsky.app URL list (handle owner resolves via the stub to
+        // did:plc:stubuser) and a handle subject (also did:plc:stubuser,
+        // which is not on the list) → denied.
+        command_tx
+            .send(Command::CheckGate {
+                list: "https://bsky.app/profile/owner.test/lists/3abc".into(),
+                subject: "stub.test".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::GateDecision { .. })) {
+            Event::GateDecision {
+                list,
+                subject,
+                allowed,
+            } => {
+                assert_eq!(
+                    list, "at://did:plc:stubuser/app.bsky.graph.list/3abc",
+                    "the URL's handle owner was resolved"
+                );
+                assert_eq!(subject, "did:plc:stubuser");
+                assert!(!allowed);
+            }
+            other => panic!("expected GateDecision, got {other:?}"),
+        }
+        // The getList reads went out unauthenticated.
+        assert!(
+            pds.requests()
+                .iter()
+                .filter(|r| r.path.starts_with("/xrpc/app.bsky.graph.getList"))
+                .all(|r| !r.authorized),
+            "the gate read is unauthenticated"
+        );
+
+        // Fail closed: a record-URI subject or a bad list reference is an
+        // error (the deny-with-reason), never a silent allow.
+        command_tx
+            .send(Command::CheckGate {
+                list: "at://did:plc:owner/app.bsky.graph.list/3abc".into(),
+                subject: "at://did:plc:alice/app.bsky.feed.post/1".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("want an account"), "{message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        command_tx
+            .send(Command::CheckGate {
+                list: "https://example.com/nope".into(),
+                subject: "did:plc:alice".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("not a list reference"), "{message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
     }
 
     #[test]

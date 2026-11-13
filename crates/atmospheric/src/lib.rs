@@ -72,6 +72,11 @@ pub enum Command {
     /// atpcraft's join gate (M11). The reference is an
     /// `at://…/app.bsky.graph.list/<rkey>` URI or a bsky.app list URL.
     FetchList { reference: String },
+    /// The join-gate decision (M15): is `subject` (a DID or handle) on the
+    /// list `list` (an AT-URI or bsky.app list URL)? Fail-closed like
+    /// atpcraft's gate: any error is reported as a deny-with-reason.
+    /// Unauthenticated AppView read — works logged out.
+    CheckGate { list: String, subject: String },
     /// Read the labels on a subject (M12, labeler read side): an AT-URI, a
     /// DID, a handle, or a bsky.app profile/post/list URL. Labels come from
     /// the subject's AppView view (`labels` field). Works logged out.
@@ -125,6 +130,13 @@ pub enum Event {
     /// The members of a fetched Bluesky list (M11): the AT-URI and the
     /// member DIDs, in page order.
     ListMembers { list: String, members: Vec<String> },
+    /// The join-gate decision (M15): the resolved list AT-URI, the subject's
+    /// DID, and whether the DID is on the list.
+    GateDecision {
+        list: String,
+        subject: String,
+        allowed: bool,
+    },
     /// The labels found on a subject (M12, labeler read side): the subject
     /// (AT-URI or DID), where the labels came from (`via`: the AppView URL or
     /// the labeler's endpoint), and the labels themselves.
