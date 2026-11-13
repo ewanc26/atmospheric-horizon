@@ -44,8 +44,14 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   records and creates one for the bridged community when absent, using
   `createRecord` so a second start creates no duplicate. The socket closes at
   45 minutes and the worker mints a fresh service-auth token and reconnects,
-  keeping the one-hour token ahead of expiry. Server event notices, approval
-  prompts and the Colibri profile prompt remain.
+  keeping the one-hour token ahead of expiry.
+- **M28 — Colibri server event notices (#71).** The server-side
+  `broadcast_message` hook classifies translation keys and forwards join,
+  leave, death and advancement lines to the worker, which writes them into the
+  bridged channel as the server account. `colibri_server_events_enabled`
+  defaults to true; ordinary chat and unknown lines are ignored. Notice
+  fallbacks for rewritten lines, approval prompts and the profile prompt
+  remain.
 
 ### Changed
 

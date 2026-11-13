@@ -41,6 +41,9 @@ crates, no game imports. Its only job is channel plumbing:
   each into the HUD status line (`status_line()`), bounded so the game
   thread never stalls. Colibri message events are also queued for
   `drain_colibri_chat()`, which the tick hook prints to native chat.
+- The server-side `broadcast_message` injection (`colibri_notice.rs`) reads
+  the line's translation key and forwards only join/leave/death/advancement
+  lines to the worker, which writes them as the server account.
 
 ### The protocol library: `crates/atmospheric`
 
@@ -639,6 +642,37 @@ Verified: a worker test logs an agent into the stub PDS, runs
 `community` and no duplicate. The full gate covers the rotation code's types;
 time itself is not accelerated in a test, so no test waits 45 minutes. No live
 Colibri AppView was contacted.
+
+### M28: Colibri server event notices
+
+Horizon's server-side `broadcast_message` hook (`hook_version = 1`, the
+`broadcast_message` name from `native-hooks.json`) runs before a server system
+line is logged and sent. `mixins/atmospheric/colibri_notice.rs` takes the
+line's `Text`, reads its `translate` key and asks the std-only runtime
+`is_colibri_notice` classifier. That accepts exactly atpcraft's categories:
+`multiplayer.player.joined`, `multiplayer.player.joined.renamed`,
+`multiplayer.player.left`,
+`chat.type.advancement.task|goal|challenge`, and any `death.*` key. Ordinary
+`chat.type.text`, command output and unknown keys are dropped.
+
+The runtime then sends `GameCommand::ColibriNotice { text }`. The worker
+loads `colibri_server_events_enabled` (default true), strips control and
+legacy colour characters, caps the text at the lexicon limit, and writes the
+localised line as `social.colibri.message` under the **server account**. It
+uses the same echo guard as player sends. The path is deliberately quiet: a
+missing bridge, a disabled setting or an automatic write failure never
+interrupts the game.
+
+This observes vanilla broadcast lines only. If another mod rewrites or hides
+a join/leave line, there is no fallback notice yet; the hook also does not
+cover a client connected to a remote server that does not run the mod. Those
+remain M29+ work, along with approval and profile prompts.
+
+Verified: the runtime classifier test covers all accepted and rejected keys;
+the runtime forwarding test asserts the `ColibriNotice` command and the codec
+pins its wire shape. The worker's write path reuses the already-tested
+`colibri::message_record` and `create_record_json`; no live server or AppView
+was contacted.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
