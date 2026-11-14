@@ -1222,6 +1222,16 @@ The new `list_cache_seconds` setting (default 300; `0` always refreshes) control
 
 Verified: config tests pin the default and a non-default TTL; a worker unit test covers the TTL boundary, `0` and key mismatch. The M11 test repeats a list read and asserts it still fetched only the original two pages; the M15 test asserts two pages for the first check, two more for a fresh cache miss, and two more for a different list. No live AppView was contacted. No endpoint, credential or record shape changed.
 
+### M53: configurable OAuth scope
+
+atpcraft exposes its requested scope as `bluesky-scope`: `effectiveScope` falls back to its granular default when the setting is blank, and the client metadata declares the same value. This mod always requested `atproto transition:generic` and only varied it by appending the Colibri grants, so an operator whose authorization server expects a narrower or granular scope had no setting for it.
+
+`Config.oauth_scope` (default empty) is the new base. `oauth::scope_for(base, bridge_enabled, appview_did)` trims it, falls back to `DEFAULT_SCOPE` when blank, returns it unchanged when the bridge is off, and otherwise appends each Colibri repo/RPC grant only when the base does not already declare it, so a repeated build is idempotent. `scope_for_colibri` remains as the default-base wrapper. `start_oauth` now uses the configured base; `DEFAULT_SCOPE` itself is unchanged, preserving existing logins and the loopback client metadata shape.
+
+A hosted `oauth_client_id` metadata document must declare the same custom scope, because the authorization server checks the client's declared scope against the pushed request. No endpoint, credential or stored record changes; a login made under a different scope may need to be repeated if the authorization server granted only the old one.
+
+Verified: config tests pin the empty default and a non-default round-trip; OAuth unit tests cover the default fallback, trimming, a custom base without the bridge, and append-once behaviour. The existing stub flow tests still request `DEFAULT_SCOPE`. No live authorization server was contacted.
+
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
 `/atmospheric skin-of <did|handle>` sends `Command::FetchPlayerSkin` — the

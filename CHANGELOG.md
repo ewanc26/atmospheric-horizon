@@ -67,6 +67,11 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   and a fresh gate miss refreshes once before denying. Explicit list reads,
   gate decisions and the sweep reuse the cache; failures stay fail-closed and
   keep the last successful cache. No endpoint or record shape changes.
+- **M53 — configurable OAuth scope (#128).** `oauth_scope` replaces the
+  requested base scope (empty keeps `atproto transition:generic`), and the
+  Colibri repo/RPC grants are still appended — once each — when the bridge is
+  enabled. A hosted client-metadata document must declare a custom scope. No
+  endpoint, credential or record shape changes.
 
 ## [0.3.1] — 2026-11-14
 
