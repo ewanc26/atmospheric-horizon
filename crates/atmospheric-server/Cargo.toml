@@ -9,6 +9,10 @@ description = "Server-side player identity linking for atmospheric-horizon"
 [dependencies]
 axum = "0.8"
 base64 = "0.22"
+# Label signing (M56): secp256k1 ECDSA and multibase did:key encoding for the
+# labeler's #atproto_label key. RustCrypto, MIT OR Apache-2.0.
+k256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
+bs58 = "0.5"
 p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }

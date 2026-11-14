@@ -8,6 +8,7 @@
 pub mod api;
 pub mod browser;
 pub mod error;
+pub mod labeler;
 pub mod model;
 pub mod oauth;
 mod page;
