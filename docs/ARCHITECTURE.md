@@ -15,13 +15,13 @@ How atmospheric-horizon is put together, for reviewers, contributors, and coding
 └──────────────────────────────┘                          └──────────────────────────┘
 ```
 
-The optional `atmospheric-server` binary is not in this diagram: it is a separate HTTP process run by the Minecraft server operator, with no game imports. It owns the shared player UUID-to-DID map described under M35 below; browser linking adds the outbound OAuth requests described under M39.
+The optional `atmospheric-server` binary is not in this diagram: it is a separate HTTP process run by the Minecraft server operator, with no game imports. It owns the shared player UUID-to-DID map described under M35 below; browser linking adds the outbound OAuth requests described under M39, and M46 publishes the public `at.atpcraft.*` lexicons.
 
 ## Source layout
 
 All Rust source follows `<scope>/[<subscope>/]<atom>.rs`: the directory names the domain scope, the final file is a single-word atom, and `mod.rs` only declares the scope. The injected module and Cargo entry points keep their required paths, and crate-root re-exports preserve the public protocol module paths. `scripts/check-layout.sh` is the dependency-free CI guard: it rejects non-atom Rust filenames everywhere, requires scope placement and `mod.rs` in both Rust crates, and keeps explicit exceptions for Cargo target paths such as `atmospheric-worker.rs`.
 
-`crates/atmospheric-server` uses the same rule: `api/` holds the router, state and handler atoms; `browser/` the one-time link state; `error/` the HTTP error mapping; `model/` the wire types and validation; `oauth/` the client, DPoP, resolver and encoding atoms; `page/` the browser HTML; and `store/` the in-memory store plus atomic file persistence. The public `app`, `ServerConfig`, `model`, `oauth` and `store` paths are unchanged.
+`crates/atmospheric-server` uses the same rule: `api/` holds the router, state and handler atoms (including M46's `lexicon` handler); `browser/` the one-time link state; `error/` the HTTP error mapping; `model/` the wire types and validation; `oauth/` the client, DPoP, resolver and encoding atoms; `page/` the browser HTML; and `store/` the in-memory store plus atomic file persistence. The compile-time lexicon documents live in `crates/atmospheric-server/lexicons/`. The public `app`, `ServerConfig`, `model`, `oauth` and `store` paths are unchanged.
 
 `crates/atmospheric` now follows the same rule: `account/` holds `identity`, `oauth` and `session`; `base/` holds `config`, `error`, `records`, `signing` and `tid`; `social/` holds the Bluesky read/write and digest atoms; `colibri/bridge.rs` holds the bridge; and `worker/service.rs` owns the worker. Public paths such as `atmospheric::oauth`, `atmospheric::records` and `atmospheric::worker` are unchanged.
 
@@ -1163,6 +1163,14 @@ check: `pds_check` with `ATMOSPHERIC_RECORDS="<did|handle>|<collection>"`.
 `profiles::nickname_for` composes the name atpcraft shows for a linked player: the display name when non-empty (the Minecraft name otherwise) plus ` (pronouns)` when the profile has usable pronouns. Control characters are replaced with spaces, whitespace collapses, and the result is capped at `NICKNAME_MAX_LEN` (32) characters; an empty result or one equal to the Minecraft name emits nothing. The worker then emits `Event::PlayerProfile { player_uuid, player_name, nickname }`. The runtime queues it as `RemoteNickname` (bounded, 32 entries); the tick hook applies each with Horizon's `native_set_nickname(uuid, Some(name))`, which updates chat and the player list for the session. That helper is plain text, so atpcraft's gray chat-only pronoun suffix is not reproduced — the same values appear in both places. Every failure (unlinked player, failed link or profile read, unusable profile) is quiet and leaves the vanilla name untouched.
 
 Verified: profile-unit tests pin display-name+pronoun composition, the vanilla fallback for pronouns only, no event when nothing changes, control/whitespace cleanup and the 32-character cap; runtime tests pin the command and event wire shapes, the empty HUD line and the nickname queue; a worker test against the stub identity service and AppView asserts the composed nickname for a linked player and silence for an unlinked one, reusing the M37 link path and M24 profile path. No live identity service, AppView or PDS was contacted.
+
+### M46: lexicon documents on the identity service
+
+`atmospheric-server` serves the five owned lexicon documents at `GET /lexicons` (an HTML index) and `GET /lexicons/{nsid}.json` (the schema). The documents are `at.atpcraft.player.chat`, `at.atpcraft.player.defs`, `at.atpcraft.player.skin`, `at.atpcraft.player.snapshot` and `at.atpcraft.server.profile`; they are compiled into the binary with `include_str!`, so a request performs no filesystem read and no network call. Only an exact base NSID resolves; unknown files, a missing `.json` suffix and traversal-looking names are 404. Responses carry `Access-Control-Allow-Origin: *` because browser ATProto tools read public lexicons cross-origin.
+
+The schemas are authored from this project's record types (`records::ChatRecord`, `SnapshotRecord`, `SkinRecord` and `ServerProfileRecord`), so they describe the fields the M5/M6/M9/M10 writers emit: chat `sentAt`/`message`/`server`, the shared summary/aspect/endorsement definitions, snapshot version/aspects/endorsements, skin blobs/model/timestamp, and the server descriptor plus signing key. They are wire-compatible with atpcraft's published documents; no atpcraft file is copied. atpcraft prefixes the served NSID with its per-server signing key id because its web server holds that key; this service has no game signing key, so it publishes the base NSIDs.
+
+Verified: integration tests fetch the index and every document through the real router, assert the JSON `id` and `lexicon` version, the content types and CORS header, and 404 for unknown, suffix-less and traversal paths. No new outbound request, credential or stored data.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 

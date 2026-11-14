@@ -29,6 +29,7 @@ Not yet: launcher registry distribution, which waits on third-party native-mod s
 - **atpcraft-compatible records.** Chat messages, Ed25519-endorsed snapshots and skins with blob uploads, and a server descriptor at rkey `self`.
 - **Read the public side.** List membership (with a fail-closed gate decision), labels and labeler queries, player presence, skins, chat history, arbitrary public collections (M44), server profiles, profiles with display names and pronouns, and follows/followers/blocks/mutes.
 - **Show linked players' Bluesky names.** On a server, a joining player linked through the identity service gets their Bluesky display name and pronouns as their in-game name — plain text in chat and the player list, the server-side equivalent of atpcraft's display-name behaviour (M45). Unlinked players keep their Minecraft name.
+- **Publish the schemas.** The optional identity service serves the five `at.atpcraft.*` lexicon documents at `/lexicons`, so other clients and servers can fetch the record shapes this mod writes (M46).
 - **Shape your social graph.** Follow, unfollow, block, unblock, mute or unmute an account from its DID or handle.
 - **Sign in properly.** OAuth in the system browser (PAR + PKCE + DPoP, loopback redirect), with app passwords as the fallback.
 - **Run a server account.** `/atmospheric server-account login <handle>` gives the server its own persisted OAuth identity, separate from the player, and can publish the server descriptor from that account.
@@ -204,6 +205,8 @@ The sweep closes the gap a list edit leaves behind: every `join_gate_sweep_secon
 | `POST /v1/pairings/claim` | pairing code | Bind the code's player to a DID and handle |
 | `POST /v1/browser/pairings` | link token | Create a one-time browser link for an online player |
 | `GET /oauth-client-metadata.json` | public | OAuth client metadata, at the URL used as the client id |
+| `GET /lexicons` | public | HTML index of the five published `at.atpcraft.*` lexicons (M46) |
+| `GET /lexicons/{nsid}.json` | public | One bundled lexicon document (M46) |
 | `GET /link/{token}` | link token | Browser sign-in form |
 | `POST /link/{token}` | link token | Start the Bluesky authorization request |
 | `GET /link/callback` | OAuth state | Finish sign-in and save the link |
@@ -239,7 +242,7 @@ M35 supplies the mapping, M36 lets a player claim a link in game, M37 checks a l
 
 ## Roadmap
 
-M1–M21 shipped through v0.1.0 and v0.2.0, and M23 (social-graph writes) through M42 (online whitelist sweep) shipped in v0.3.1, with M44 (generic record browser) and M45 (linked-player names) on `main` for the next release; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, labeler issuance, RPG discovery, aspect capture/restore, and the next read/write surfaces.
+M1–M21 shipped through v0.1.0 and v0.2.0, and M23 (social-graph writes) through M42 (online whitelist sweep) shipped in v0.3.1, with M44 (generic record browser), M45 (linked-player names) and M46 (lexicon hosting) on `main` for the next release; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, labeler issuance, RPG discovery, aspect capture/restore, and the next read/write surfaces.
 
 ### Porting atpcraft
 
@@ -262,11 +265,11 @@ atpcraft is a server-side Fabric mod, while Horizon native mods can hook the ser
 | Server account | **M25**: `/atmospheric server-account login <handle>` runs a separate localhost OAuth flow and keeps the result in `server-session.json`; `status`, `logout` and `publish` manage it. The server profile can then be published as that account (`/atmospheric server-account publish`), as atpcraft's server does. It is the identity foundation for the remaining server-side work |
 | Server-wide player identity map | **M35–M40**: optional `atmospheric-server` process with public UUID reads, admin-token writes, one-time pairing claims, browser OAuth linking and atomic persistence. `/atmospheric link <code>` claims a code; `/atmospheric link` starts a one-time browser flow bound to the online player's UUID, and **M40** issues the same link from an unlinked gate refusal. A join uses the public map for the Colibri profile check and, with the gate armed, for the login-phase list decision. Player-data consumers are not implemented yet |
 | Labeler issuance | **M12** covers reads only; issuance still needs the labeler service record, signed labels, an HTTP endpoint and a PLC identity update, so it is not implemented yet |
-| Web server for login pages / lexicons | **M39** hosts the browser link pages and OAuth client metadata in `atmospheric-server`; a full lexicons/labeler service remains unimplemented |
+| Web server for login pages / lexicons | **M39** hosts the browser link pages and OAuth client metadata in `atmospheric-server`; **M46** serves the five `at.atpcraft.*` lexicon documents and an index at `/lexicons`. A full labeler service remains unimplemented |
 
 ## Network use
 
-This mod talks to the network **by design**: the AT Protocol services needed to reach and authenticate with your account's PDS, plus the public AppView, labelers, and the optional identity service you configure for link claims, browser link creation and join-time profile checks — nothing else. All game-side network I/O happens in the spawned local `atmospheric-worker` process, never in the game; the game and the worker exchange plain JSON commands and events over a local pipe only. The separate `atmospheric-server` listener performs browser OAuth as described below.
+This mod talks to the network **by design**: the AT Protocol services needed to reach and authenticate with your account's PDS, plus the public AppView, labelers, and the optional identity service you configure for link claims, browser link creation and join-time profile checks — nothing else. All game-side network I/O happens in the spawned local `atmospheric-worker` process, never in the game; the game and the worker exchange plain JSON commands and events over a local pipe only. The separate `atmospheric-server` listener performs browser OAuth and serves the public lexicon documents as described below.
 
 ### Identity and login
 
@@ -328,7 +331,7 @@ The files that hold secrets are written with owner-only permissions (0600 on uni
 
 ### Server-side identity service (M35–M40)
 
-The optional `atmospheric-server` process listens only on `ATMOSPHERIC_SERVER_ADDR`. `GET /healthz`, `GET /v1/links/{uuid}` and the OAuth client metadata are public; listing, direct link writes, deletion and pairing creation require `Authorization: Bearer $ATMOSPHERIC_SERVER_TOKEN`; browser-link creation requires `Authorization: Bearer $ATMOSPHERIC_SERVER_LINK_TOKEN`. Claiming a pairing code and opening a browser link are public because the one-time token is the credential. The service stores `links.json` in its own data folder: canonical player UUIDs, player names, DIDs, optional handles, first-link timestamps and pending codes with their expiry. Browser link tokens, PKCE verifiers and DPoP keys stay in memory and are not persisted. It has no telemetry. M36's `/atmospheric link <code>` posts the code, the player's DID and optional handle to `<server_api_url>/v1/pairings/claim`; it does not send a session token or game data. M39's `/atmospheric link` posts `{player_uuid, player_name}` with the server-only link token. The browser service resolves the handle and DID, discovers the PDS and authorization server, pushes PAR, and exchanges the callback; no game data beyond the UUID/name binding is sent. M37 reads `GET /v1/links/{uuid}` when a player joins, to check the linked account's Colibri profile, and M38 reads the same public route at login to enforce the configured list. M40's gate refusal additionally creates a browser link through `POST /v1/browser/pairings`, carrying only the UUID and player name.
+The optional `atmospheric-server` process listens only on `ATMOSPHERIC_SERVER_ADDR`. `GET /healthz`, `GET /v1/links/{uuid}` and the OAuth client metadata are public; listing, direct link writes, deletion and pairing creation require `Authorization: Bearer $ATMOSPHERIC_SERVER_TOKEN`; browser-link creation requires `Authorization: Bearer $ATMOSPHERIC_SERVER_LINK_TOKEN`. Claiming a pairing code and opening a browser link are public because the one-time token is the credential. The service stores `links.json` in its own data folder: canonical player UUIDs, player names, DIDs, optional handles, first-link timestamps and pending codes with their expiry. Browser link tokens, PKCE verifiers and DPoP keys stay in memory and are not persisted. It has no telemetry. It also serves the public `at.atpcraft.*` lexicon documents; those responses read no player data. M36's `/atmospheric link <code>` posts the code, the player's DID and optional handle to `<server_api_url>/v1/pairings/claim`; it does not send a session token or game data. M39's `/atmospheric link` posts `{player_uuid, player_name}` with the server-only link token. The browser service resolves the handle and DID, discovers the PDS and authorization server, pushes PAR, and exchanges the callback; no game data beyond the UUID/name binding is sent. M37 reads `GET /v1/links/{uuid}` when a player joins, to check the linked account's Colibri profile, and M38 reads the same public route at login to enforce the configured list. M40's gate refusal additionally creates a browser link through `POST /v1/browser/pairings`, carrying only the UUID and player name.
 
 ### Nothing else
 

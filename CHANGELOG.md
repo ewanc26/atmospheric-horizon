@@ -26,6 +26,11 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   reads already used by `/atmospheric profile`. Unlinked players and failed
   reads leave the vanilla name alone; no new endpoint, credential or stored
   data.
+- **M46 — lexicon documents (#114).** `atmospheric-server` publishes the five
+  owned `at.atpcraft.*` lexicon documents at `/lexicons` and
+  `/lexicons/{nsid}.json`, with an HTML index and permissive CORS. The schemas
+  match the records the mod writes and are compiled into the binary; no
+  filesystem read, outbound request, credential or stored player data is added.
 
 ## [0.3.1] — 2026-11-14
 
