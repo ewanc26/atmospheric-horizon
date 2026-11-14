@@ -24,9 +24,7 @@ is_target_exception() {
   return 1
 }
 
-# Every tracked or new Rust file must use an atom filename. The protocol crate
-# is still being migrated, so its flat modules are allowed for now, but a new
-# multi-word name is not.
+# Every tracked or new Rust file must use an atom filename.
 while IFS= read -r -d '' file; do
   if is_target_exception "$file"; then
     continue
@@ -58,12 +56,20 @@ for root in "${scope_roots[@]}"; do
   done < <(find "$root" -type d -print0)
 done
 
-# The server crate is fully migrated: implementation atoms live in scopes,
-# and each scope directory has its mod.rs declaration.
-server_root="crates/atmospheric-server/src"
-if [[ -d "$server_root" ]]; then
+# Both Rust crates are fully migrated: implementation atoms live in scopes,
+# and each scope directory has its mod.rs declaration. Cargo's `bin/` target
+# directory is not a Rust module scope.
+migrated_roots=(
+  "crates/atmospheric/src"
+  "crates/atmospheric-server/src"
+)
+for root in "${migrated_roots[@]}"; do
+  if [[ ! -d "$root" ]]; then
+    continue
+  fi
+
   while IFS= read -r -d '' file; do
-    rel="${file#"$server_root"/}"
+    rel="${file#"$root"/}"
     case "$rel" in
       lib.rs | main.rs)
         continue
@@ -73,17 +79,17 @@ if [[ -d "$server_root" ]]; then
         ;;
     esac
     report "$file: crate-root modules must live in a scope directory"
-  done < <(git ls-files --cached --others --exclude-standard -z -- "$server_root")
+  done < <(git ls-files --cached --others --exclude-standard -z -- "$root")
 
   while IFS= read -r -d '' dir; do
-    if [[ "$dir" == "$server_root" ]]; then
+    if [[ "$dir" == "$root" || "$dir" == "$root/bin" ]]; then
       continue
     fi
     if [[ ! -f "$dir/mod.rs" ]]; then
       report "$dir/: every source scope needs a mod.rs"
     fi
-  done < <(find "$server_root" -mindepth 1 -type d -print0)
-fi
+  done < <(find "$root" -mindepth 1 -type d -print0)
+done
 
 if ((violations > 0)); then
   printf 'layout: %d violation(s); see the source layout rules in AGENTS.md\n' "$violations" >&2
