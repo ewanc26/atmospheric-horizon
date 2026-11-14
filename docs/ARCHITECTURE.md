@@ -23,7 +23,7 @@ All Rust source follows `<scope>/[<subscope>/]<atom>.rs`: the directory names th
 
 `crates/atmospheric-server` uses the same rule: `api/` holds the router, state and handler atoms (including M46's `lexicon` handler); `browser/` the one-time link state; `error/` the HTTP error mapping; `labeler/` the M56–M58 signing, key, log, state, query and stream atoms; `model/` the wire types and validation; `oauth/` the client, DPoP, resolver and encoding atoms; `page/` the browser HTML; and `store/` the in-memory store plus atomic file persistence. The compile-time lexicon documents live in `crates/atmospheric-server/lexicons/`. The public `app`, `ServerConfig`, `model`, `oauth` and `store` paths are unchanged.
 
-`crates/atmospheric` now follows the same rule: `account/` holds `identity`, `oauth` and `session`; `base/` holds `config`, `error`, `records`, `signing` and `tid`; `social/` holds the Bluesky read/write and digest atoms; `colibri/bridge.rs` holds the bridge; and `worker/service.rs` owns the worker. Public paths such as `atmospheric::oauth`, `atmospheric::records` and `atmospheric::worker` are unchanged.
+`crates/atmospheric` now follows the same rule: `account/` holds `identity`, `oauth`, `plc` and `session`; `base/` holds `config`, `error`, `records`, `signing` and `tid`; `social/` holds the Bluesky read/write and digest atoms; `colibri/bridge.rs` holds the bridge; and `worker/service.rs` owns the worker. Public paths such as `atmospheric::oauth`, `atmospheric::records` and `atmospheric::worker` are unchanged.
 
 The mixin helpers now follow the same rule: `colibri/` holds `join`, `leave` and `notice`; `gate/` holds `login`; the remaining helpers are single-word atoms at the mixin scope root.
 
@@ -547,13 +547,14 @@ stored on disk. The direct profile record is read from the PDS; its avatar is
 a blob reference, so only the AppView's avatar URL is carried in the digest.
 
 atpcraft's remaining server-side surfaces (RPG item discovery, full aspect
-capture/restore and the labeler's PLC identity and game triggers) are not
-implemented yet; the README port table records each one. M56–M59 cover label
-signing, durable storage, querying, streaming and the server-account declaration.
-M25 supplies the separate server account, M26/M27 run the operational Colibri
-bridge, M35 supplies the shared player-to-DID map, M36 claims links from the game,
-M37 checks linked players on join and M38 enforces the configured list; the
-remaining labeler identity, game triggers and capture remain separate milestones.
+capture/restore and the labeler's game triggers) are not implemented yet; the
+README port table records each one. M56–M60 cover label signing, durable
+storage, querying, streaming, the server-account declaration and its PLC
+identity publication. M25 supplies the separate server account, M26/M27 run the
+operational Colibri bridge, M35 supplies the shared player-to-DID map, M36 claims
+links from the game, M37 checks linked players on join and M38 enforces the
+configured list; the remaining game triggers and capture remain separate
+milestones.
 
 Verified: `profiles` unit tests (whitespace normalisation, direct-record
 precedence, clearing on a successful record without pronouns, AppView
@@ -587,8 +588,8 @@ and the mod's persisted Ed25519 endorsement key; `createdAt` is preserved.
 The session file contains a DPoP private key and a refresh token, so it is a
 secret exactly like `session.json`; the README's Network use section records
 it. The account is the foundation, not the whole server-side feature: the
-labeler's PLC identity and game triggers and aspect sync still need their own
-milestones; M56–M59 add the labeler service and declaration, and M38 supplies
+labeler's game triggers and aspect sync still need their own milestones;
+M56–M60 add the labeler service, declaration and PLC identity, and M38 supplies
 linked-account join enforcement. M26 builds the first Colibri surface on this
 account.
 
@@ -906,9 +907,9 @@ per data directory, not for multiple replicas sharing a volume.
 M36 wires the explicit `/atmospheric link <code>` claim, M37 wires the
 public join-time link lookup, M38 consumes the same map for login-gate
 enforcement, and M39 adds browser OAuth link creation and callback routes.
-The service is still the foundation for the remaining labeler identity work and
-for RPG/player-data work; those consumers remain separate and must not be
-described as delivered.
+The service is still the foundation for the labeler's game triggers and for
+RPG/player-data work; those consumers remain separate and must not be described
+as delivered.
 
 Verified: `model` unit tests cover UUID, name, DID, handle, code and TTL
 validation; store tests cover reopen persistence, `linked_at` preservation,
@@ -1245,7 +1246,7 @@ Verified: config tests pin the empty default and a non-default round-trip; OAuth
 
 atpcraft's `effectiveScope()` appends the snapshot, skin and chat repo grants plus `blob:*/*` to any configured base, adds the RPG item grant while item discovery is on, and adds the Colibri message/membership grants while the bridge is on. Its server login uses `clientMetadataScope()`, which adds the server-profile repo grant, the RPG attestation grant, the Colibri stream grant and, when the labeler is on, the labeler-service and `identity:*` grants. M53 made the base configurable but appended only the Colibri message/membership grants, so a narrow custom scope could log in and then fail snapshot, skin, chat or descriptor writes; player logins also requested the stream grant they never use.
 
-`scope_for` now appends `at.atpcraft.player.snapshot`, `at.atpcraft.player.skin` and `at.atpcraft.player.chat` (create/update/delete) and `blob:*/*` to a non-default base, once each, and keeps appending the Colibri message/membership grants when the bridge is on. `scope_for_server` adds `at.atpcraft.server.profile` (create/update/delete) and, when the bridge is on, `social.colibri.sync.subscribeEvents?aud=…`; it now also takes `labeler_enabled` and adds the M59 labeler-service declaration grant. `start_oauth` picks it for `OAuthTarget::Server`. The mod's default `atproto transition:generic` already covers those repo and blob writes, so the grants are not appended to it and the default scope string is unchanged (atpcraft instead defaults to a granular scope). The RPG grant remains absent until #111.
+`scope_for` now appends `at.atpcraft.player.snapshot`, `at.atpcraft.player.skin` and `at.atpcraft.player.chat` (create/update/delete) and `blob:*/*` to a non-default base, once each, and keeps appending the Colibri message/membership grants when the bridge is on. `scope_for_server` adds `at.atpcraft.server.profile` (create/update/delete) and, when the bridge is on, `social.colibri.sync.subscribeEvents?aud=…`; it now also takes `labeler_enabled` and adds the M59 labeler-service declaration grant (M60 adds `identity:*` beside it). `start_oauth` picks it for `OAuthTarget::Server`. The mod's default `atproto transition:generic` already covers those repo and blob writes, so the grants are not appended to it and the default scope string is unchanged (atpcraft instead defaults to a granular scope). The RPG grant remains absent until #111.
 
 A hosted `oauth_client_id` metadata document must declare the union used by its logins: the custom base plus these grants. No endpoint, credential or record shape changes; an existing session keeps its granted scope until it logs in again.
 
@@ -1267,7 +1268,7 @@ atpcraft signs every emitted label with a secp256k1 (K-256) key over the label's
 
 `atmospheric-server`'s new `labeler` scope adds `Label` (`com.atproto.label.defs#label`) and `LabelSigner`. The signer loads a 32-byte secret or generates one, exposes the compressed public key and its multibase `did:key` (`0xe7 0x01` multicodec + base58btc), signs the SHA-256 digest of the unsigned canonical CBOR map and normalizes the 64-byte compact signature to low-S, and verifies it. The encoder writes only the subset a label uses (definite-length maps, text, unsigned integers, booleans) and sorts keys length-first then bytewise: `cts`, optional `cid`/`exp`, `neg` only when true, `src`, `uri`, `val`, `ver`. The `sig` field is deliberately not part of the signing input.
 
-No endpoint, PLC operation or declaration record is added in M56; M57 adds the durable log, key persistence and the query/emit routes on top, M58 adds the live subscription stream, and M59 adds the server-account declaration. The PLC identity update and game triggers remain in #112.
+No endpoint, PLC operation or declaration record is added in M56; M57 adds the durable log, key persistence and the query/emit routes on top, M58 adds the live subscription stream, and M59 adds the server-account declaration. The game triggers remain in #112; M60 later adds the PLC identity update.
 
 Verified: exact canonical byte vectors for a minimal label and one with all optionals (including key order and `neg`), the secp256k1 generator-point public key for secret 1, `did:key` prefix and multicodec round-trip, secret validation, deterministic 64-byte low-S signatures, tamper rejection and cross-key rejection. No network was used.
 
@@ -1330,13 +1331,60 @@ verification method, and no game trigger emits labels, so the declaration exists
 but clients cannot yet discover the labeler through the account identity. The
 record lives on the PDS; nothing new is stored locally. Wire shapes come from
 the public lexicon and the vocabulary IDs from atpcraft's configuration; no
-atpcraft source was copied (its repository has no licence).
+atpcraft source was copied (its repository has no licence).Verified: unit tests pin the 11 IDs, every definition shape, `$type` and an existing `createdAt`; the worker's stub-OAuth login test asserts the declaration `putRecord` alongside the descriptor; OAuth tests pin the grant, its absence on the default broad scope and idempotence; config and capability tests pin the default-off flag and the conditional capability. No live PDS was contacted.
 
-Verified: unit tests pin the 11 IDs, every definition shape, `$type` and an
-existing `createdAt`; the worker's stub-OAuth login test asserts the declaration
-`putRecord` alongside the descriptor; OAuth tests pin the grant, its absence on
-the default broad scope and idempotence; config and capability tests pin the
-default-off flag and the conditional capability. No live PDS was contacted.
+### M60: labeler PLC identity publication (labeler part 5)
+
+The M59 declaration gives clients the vocabulary, but a labeler is discovered
+through its account's DID document: `#atproto_label` publishes the K-256 key
+that verifies each label and `#atproto_labeler` publishes the HTTP endpoint that
+serves `com.atproto.label.*`. atpcraft merges both entries into its server
+account's PLC operation. M59 deliberately stopped at the record, so this was the
+last missing half of labeler discovery.
+
+`atmospheric-server` now serves the labeler's public half at
+`GET /v1/labeler/identity`: the service DID, the signing key's multibase
+`did:key` and the public endpoint (null when `ATMOSPHERIC_SERVER_PUBLIC_URL` is
+unset). All three are already public — the key verifies published labels and the
+endpoint is what the DID document names — so the route carries no player data and
+needs no admin token. It is disabled with the rest of the labeler when
+`ATMOSPHERIC_SERVER_LABELER_DID` is unset.
+
+`account/plc.rs` implements the update. The worker reads that identity, checks
+the service DID matches the logged-in server account (a mismatch would rewrite
+the wrong document), then reads the account's current operation from
+`https://plc.directory/{did}/data`. It keeps every rotation key, alias,
+verification method and service, adds or overwrites `atproto_label` and
+`atproto_labeler`, and sends the operation to
+`com.atproto.identity.signPlcOperation` on the account's PDS. The PDS signs it
+with the account's identity key; the signed operation then goes to
+`submitPlcOperation`. Empty arrays are omitted from the signing request so an
+operation never clears an entry it did not set. A `did:web` account is rejected
+with a clear error because its document is not updated through PLC.
+
+Three commands expose the flow: `/atmospheric labeler-identity status` (a public
+read of the current document, reporting whether each entry exists and whether
+the published values match the service), `request` (asks the PDS to email a
+one-time PLC token) and `submit <token>` (the write; an empty token is omitted,
+for PDSs that do not require one). A narrow server-account OAuth scope now also
+requests `identity:*` while `labeler_enabled` is on, because the PDS's
+`signPlcOperation` authorizer requires it; the broad `transition:generic`
+default already covers it. M59's note that no `identity:*` grant was added is
+superseded by this milestone.
+
+No new local storage and no label emission. The declaration stays on the PDS;
+the DID document change is public identity data. Wire shapes come from the
+public lexicons and the PLC specification; no atpcraft code is copied.
+
+Verified: unit tests pin the merge (preservation of the PDS service, rotation
+key and alias, overwrite of stale labeler entries, omitted empty arrays,
+`did:plc` enforcement, identity validation and the generated request types);
+the router test pins the public identity route and its null endpoint; the worker
+test drives a login against the stub PDS and asserts the sign request carries
+the token plus both labeler entries alongside the existing ones, the signed
+operation is submitted, and the status event follows; another worker test pins
+the missing-server-account failure. No live PLC directory or PDS was
+contacted.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
