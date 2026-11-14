@@ -996,10 +996,10 @@ fails, the generic refusal is returned. With no sidecar attached the runtime
 cannot know the gate is armed and stays out of the way. The gate runs on the
 server thread only; the worker keeps all network and disk I/O.
 
-This does not implement atpcraft's IP-bound `/mc` gate sessions or the
-periodic sweep that kicks online players removed from the list. M39 supplies
+This does not implement atpcraft's IP-bound `/mc` gate sessions. M39 supplies
 the browser OAuth flow and M40 runs it from the refusal path, so an unlinked
-player can link before being placed.
+player can link before being placed. M42 adds the periodic sweep that
+disconnects an online player removed from the list.
 
 Verified: a worker test links one UUID to a member, one to a non-member and
 one to nothing, then asserts allow, refusal, the browser URL in the refusal
@@ -1088,6 +1088,46 @@ Verified: the worker gate test asserts the URL appears in the refusal and that
 player-name field; the new `oauth` integration test covers the complete
 browser flow and persistence. No live identity service, PDS or authorization
 server was contacted.
+
+### M42: online whitelist sweep
+
+M38 only checks the list when a player logs in, so a player admitted before a
+list edit stays until they reconnect. M42 is atpcraft's `startWhitelistSweep` /
+`computeWhitelistKicks`: a periodic re-read that disconnects an online player
+whose linked DID has left the list.
+
+The sweep period is the new `join_gate_sweep_seconds` config key (default 60,
+`0` disables). `emit_join_gate_state` now sends
+`JoinGateState { enabled, list, sweep_seconds }`; a positive value is floored
+at 60 seconds to match atpcraft's list-cache floor. The runtime caches the
+period and, in the once-a-tick hook, throttles the sweep locally — the worker
+never schedules it, so a server tick is the only clock. `join_gate_sweep_due`
+is the pure throttle (armed, period positive, elapsed since the last send);
+`join_gate_sweep(players)` records the time even for an empty server and sends
+`Command::JoinGateSweep { players: [{player_uuid, player_name}, …] }` from
+Horizon's `native_server_players()` helper.
+
+The worker's `join_gate_sweep` re-reads the list once with the existing
+`fetch_list`, then resolves each online UUID through
+`GET <server_api_url>/v1/links/{uuid}` and compares the DID to the members. It
+emits `Event::JoinGateKicks { players }` only when the list is non-empty and
+the whole read finished inside a 30-second budget. A failed list read (or a
+timeout) propagates and kicks nobody; a per-player lookup error or an unlinked
+player skips that player. The tick hook drains the kicks and runs vanilla
+`kick <name> Removed from the server's Bluesky whitelist.` through Horizon's
+`native_run_command`, matching atpcraft's disconnect reason. The sweep reuses
+the M38 public reads — no new endpoint, and no new stored data.
+
+Verified: a worker test against the stub identity service and AppView sweeps a
+member, a linked non-member and an unlinked player, asserting only the
+non-member is reported, that a clean sweep and an empty player list are
+silent, that a failed list read kicks nobody and that a disabled gate is a
+no-op; a worker test pins the 60-second floor on the emitted period; runtime
+tests pin `sweep_due` (off switch, inside/at/past the period), the kick queue
+and the new command/event wire shapes. The injected `tick` helper was compiled
+in the staged pinned Horizon tree, where the `native_server_players` and
+`native_run_command` helpers resolve as `pub(super)`. No live identity service
+or AppView was contacted.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
