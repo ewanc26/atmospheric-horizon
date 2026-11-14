@@ -10,6 +10,7 @@ pub mod browser;
 pub mod error;
 pub mod model;
 pub mod oauth;
+mod page;
 pub mod store;
 
 pub use api::{ServerConfig, app};
