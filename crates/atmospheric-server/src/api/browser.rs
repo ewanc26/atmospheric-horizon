@@ -3,7 +3,7 @@ use crate::{
     error::ApiError,
     model::{
         BrowserPairingInput, BrowserPairingResponse, LinkInput, normalize_player_name,
-        normalize_uuid, unix_now,
+        normalize_uuid, pairing_ttl, unix_now,
     },
     oauth::{self, Identity},
     page::{browser_page, html_escape},
@@ -24,7 +24,8 @@ pub(super) async fn create_browser_pairing(
     state.authorize_link(&headers)?;
     let player_uuid = normalize_uuid(&input.player_uuid)?;
     let player_name = normalize_player_name(&input.player_name)?;
-    let (token, expires_at) = state.browser.create(&player_uuid, &player_name);
+    let ttl = pairing_ttl(input.ttl_seconds)?;
+    let (token, expires_at) = state.browser.create(&player_uuid, &player_name, ttl);
     let public_url = state
         .public_url
         .as_deref()

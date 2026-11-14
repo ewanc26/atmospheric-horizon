@@ -105,6 +105,10 @@ pub struct Config {
     /// a player starts a browser link (M39). Empty disables the browser flow;
     /// it is a server-only secret and should never be published.
     pub server_link_token: String,
+    /// Lifetime of a one-time browser link in seconds (M55). Default 600,
+    /// matching atpcraft's ten-minute pairing token. The identity service
+    /// accepts 60 through 3600 seconds.
+    pub browser_link_ttl_seconds: u64,
     /// Enforce the join gate at the server login phase (M38). A joining
     /// player's UUID must resolve through `server_api_url` to a linked DID on
     /// `join_gate_list`. Off by default. When on, an empty list or an
@@ -171,6 +175,7 @@ impl Default for Config {
             appview_url: crate::lists::DEFAULT_APPVIEW.into(),
             server_api_url: String::new(),
             server_link_token: String::new(),
+            browser_link_ttl_seconds: 600,
             join_gate_enabled: false,
             join_gate_list: String::new(),
             join_gate_sweep_seconds: 60,
@@ -245,6 +250,7 @@ mod tests {
             appview_url: crate::lists::DEFAULT_APPVIEW.into(),
             server_api_url: "https://identity.example".into(),
             server_link_token: "server-link-secret".into(),
+            browser_link_ttl_seconds: 900,
             join_gate_enabled: true,
             join_gate_list: "at://did:plc:owner/app.bsky.graph.list/3gate".into(),
             join_gate_sweep_seconds: 120,
@@ -280,6 +286,7 @@ mod tests {
         assert_eq!(back.colibri_appview_url, "https://appview.example");
         assert_eq!(back.server_api_url, "https://identity.example");
         assert_eq!(back.server_link_token, "server-link-secret");
+        assert_eq!(back.browser_link_ttl_seconds, 900);
         assert!(back.join_gate_enabled);
         assert_eq!(
             back.join_gate_list,
@@ -323,6 +330,7 @@ mod tests {
         assert!(config.oauth_scope.is_empty());
         assert_eq!(config.colibri_appview_url, "https://api.colibri.social");
         assert!(config.server_api_url.is_empty());
+        assert_eq!(config.browser_link_ttl_seconds, 600);
         assert!(config.colibri_server_events_fallback_enabled);
     }
 

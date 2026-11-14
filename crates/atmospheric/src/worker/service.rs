@@ -1449,12 +1449,14 @@ impl Worker {
             &config.server_link_token,
             player_uuid,
             player_name,
+            config.browser_link_ttl_seconds,
         )
         .await
         {
             Ok(link) => format!(
-                "{JOIN_GATE_UNLINKED} Open {} within 10 minutes to link, then reconnect.",
-                link.url
+                "{JOIN_GATE_UNLINKED} Open {} within {} minutes to link, then reconnect.",
+                link.url,
+                config.browser_link_ttl_seconds.div_ceil(60)
             ),
             Err(_) => JOIN_GATE_UNLINKED.into(),
         }
@@ -2006,6 +2008,7 @@ impl Worker {
             &config.server_link_token,
             player_uuid,
             player_name,
+            config.browser_link_ttl_seconds,
         )
         .await
         {
@@ -3129,6 +3132,7 @@ mod tests {
             appview_url: "https://public.api.bsky.app".into(),
             server_api_url: String::new(),
             server_link_token: String::new(),
+            browser_link_ttl_seconds: 600,
             join_gate_enabled: false,
             join_gate_list: String::new(),
             join_gate_sweep_seconds: 60,
@@ -4230,12 +4234,14 @@ mod tests {
                     message.contains("https://links.test/link/browser-token"),
                     "the gate refusal carries the browser link: {message}"
                 );
-                assert!(
-                    pds.requests()
-                        .iter()
-                        .any(|request| request.path == "/v1/browser/pairings"),
-                    "the worker asks the identity service for a browser link"
-                );
+                let requests = pds.requests();
+                let browser_request = requests
+                    .iter()
+                    .find(|request| request.path == "/v1/browser/pairings")
+                    .expect("the worker asks the identity service for a browser link");
+                let link_body: serde_json::Value =
+                    serde_json::from_str(&browser_request.body).unwrap();
+                assert_eq!(link_body["ttl_seconds"], 600);
             }
             other => panic!("expected an unlinked refusal, got {other:?}"),
         }
@@ -4727,6 +4733,7 @@ mod tests {
             appview_url: "https://public.api.bsky.app".into(),
             server_api_url: String::new(),
             server_link_token: String::new(),
+            browser_link_ttl_seconds: 900,
             join_gate_enabled: false,
             join_gate_list: String::new(),
             join_gate_sweep_seconds: 90,
@@ -4757,6 +4764,7 @@ mod tests {
         assert_eq!(back.chat_server_id, "my-server");
         assert!(back.persist_session);
         assert_eq!(back.join_gate_sweep_seconds, 90);
+        assert_eq!(back.browser_link_ttl_seconds, 900);
     }
 
     #[test]

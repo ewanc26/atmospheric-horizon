@@ -5,6 +5,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// Lifetime of an in-flight browser OAuth attempt. The one-time link itself
+/// uses the lifetime requested at creation (M55).
 pub const BROWSER_TTL_SECS: u64 = 600;
 
 #[derive(Debug, Clone)]
@@ -39,9 +41,9 @@ fn now() -> u64 {
 }
 
 impl BrowserLinks {
-    pub fn create(&self, player_uuid: &str, player_name: &str) -> (String, u64) {
+    pub fn create(&self, player_uuid: &str, player_name: &str, ttl_secs: u64) -> (String, u64) {
         let token = crate::oauth::random_token(24);
-        let expires_at = now().saturating_add(BROWSER_TTL_SECS);
+        let expires_at = now().saturating_add(ttl_secs);
         let mut state = self.state.lock().unwrap();
         prune(&mut state);
         state.links.insert(
@@ -94,4 +96,21 @@ fn prune(state: &mut State) {
     let now = now();
     state.links.retain(|_, link| link.expires_at > now);
     state.auths.retain(|_, auth| auth.expires_at > now);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_browser_link_uses_the_requested_lifetime() {
+        let links = BrowserLinks::default();
+        let before = now();
+        let (token, expires_at) = links.create("00000000-0000-4000-8000-000000000001", "Alex", 120);
+        assert!(expires_at >= before + 120);
+        assert!(expires_at <= now() + 120);
+        assert_eq!(links.pending(&token).unwrap().expires_at, expires_at);
+        assert_eq!(links.take_link(&token).unwrap().player_name, "Alex");
+        assert!(links.pending(&token).is_none());
+    }
 }

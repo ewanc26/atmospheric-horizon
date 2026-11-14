@@ -190,6 +190,56 @@ async fn raw_request(
 }
 
 #[tokio::test]
+async fn browser_link_lifetime_is_bounded_and_applied() {
+    let path = temp_path("browser-ttl");
+    let store = LinkStore::open(&path).unwrap();
+    let router = app(store, config());
+    let clock = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+
+    let before = clock();
+    let (status, body) = request(
+        &router,
+        "POST",
+        "/v1/browser/pairings",
+        Some(LINK_TOKEN),
+        Some(json!({ "player_uuid": UUID_2, "player_name": "Bob", "ttl_seconds": 120 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let after = clock();
+    let expires_at = body["expires_at"].as_u64().unwrap();
+    assert!(expires_at >= before + 120);
+    assert!(expires_at <= after + 120);
+
+    let (status, body) = request(
+        &router,
+        "POST",
+        "/v1/browser/pairings",
+        Some(LINK_TOKEN),
+        Some(json!({ "player_uuid": UUID_2, "player_name": "Bob", "ttl_seconds": 59 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("ttl_seconds"));
+
+    let (status, _) = request(
+        &router,
+        "POST",
+        "/v1/browser/pairings",
+        Some(LINK_TOKEN),
+        Some(json!({ "player_uuid": UUID_2, "player_name": "Bob", "ttl_seconds": 3_601 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[tokio::test]
 async fn browser_links_need_the_shared_game_server_token() {
     let path = temp_path("browser");
     let store = LinkStore::open(&path).unwrap();
