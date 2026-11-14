@@ -60,6 +60,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         admin_token,
         link_token,
         public_url,
+        oauth_resolver: None,
     };
     axum::serve(listener, app(store, config))
         .with_graceful_shutdown(shutdown_signal())

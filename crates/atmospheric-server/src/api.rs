@@ -41,6 +41,10 @@ pub struct ServerConfig {
     /// Public base URL of this service, used for OAuth client metadata and
     /// redirects (for example `https://links.example`).
     pub public_url: Option<String>,
+    /// Optional resolver override. Production uses the public Bluesky
+    /// services; integration tests point handle and DID resolution at a stub.
+    #[doc(hidden)]
+    pub oauth_resolver: Option<Resolver>,
 }
 
 #[derive(Clone)]
@@ -66,9 +70,10 @@ impl AppState {
             .map(|url| url.trim().trim_end_matches('/').to_owned())
             .filter(|url| !url.is_empty())
             .map(Arc::from);
+        let resolver = config.oauth_resolver.unwrap_or_default();
         let oauth = public_url
             .as_deref()
-            .map(|url| OAuthClient::new(url, Resolver::default()));
+            .map(|url| OAuthClient::new(url, resolver));
         Self {
             store,
             browser: BrowserLinks::default(),
