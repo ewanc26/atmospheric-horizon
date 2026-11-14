@@ -1526,11 +1526,11 @@ longer needed. Upstream horizon-rust/horizon#9394 carries the routing fix.
 ### Releases (M18)
 
 `CHANGELOG.md` is the human-readable release history; releases are annotated
-tags (`v0.1.0`, `v0.2.0`, `v0.3.0`). A release is cut from `main`:
+tags (`v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.3.1`). A release is cut from `main`:
 
 ```sh
-git tag -a v0.3.0 -m "atmospheric-horizon 0.3.0"
-git push origin v0.3.0
+git tag -a v0.3.1 -m "atmospheric-horizon 0.3.1"
+git push origin v0.3.1
 ```
 
 `.github/workflows/release.yml` then (tag `v*` only):
