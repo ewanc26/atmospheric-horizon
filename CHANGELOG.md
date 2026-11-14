@@ -20,6 +20,15 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ### Added
 
+- **M40 — browser link from the gate refusal.** An unlinked player refused by
+  the M38 join gate now gets a one-time browser URL on the disconnect screen,
+  so they can link and reconnect without an operator code. The worker creates
+  the link through the existing M39 endpoint inside the gate's 5-second
+  budget and falls back to the generic refusal if creation fails. The joining
+  player's name is carried on `JoinGateCheck` for that request. A new
+  router-level OAuth integration test exercises link creation, the browser
+  form, PAR, PKCE, DPoP, the callback and persistence. `docker/.env.example`
+  and the README now provide a copyable Docker plus `config.json` setup.
 - **M39 — browser self-service linking.** `/atmospheric link` without a code
   asks the identity service for a one-time browser URL, authenticated with the
   new server-only `server_link_token`. The service publishes OAuth client
@@ -37,7 +46,8 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   a failed read and a timeout are refused with a disconnect reason. The
   worker publishes the gate state at startup and after settings saves. This
   is enforcement for already-linked accounts; M39 adds the browser linking
-  flow, while the online whitelist sweep remains separate.
+  flow and M40 puts it on the refusal screen, while the online whitelist
+  sweep remains separate.
 - **M23 — social-graph writes (#60).** `/atmospheric follow`, `unfollow`,
   `block`, `unblock`, `mute` and `unmute` take a DID or handle. Follows and
   blocks are TID-keyed `app.bsky.graph.follow` / `block` records in your own
@@ -119,8 +129,9 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   atomically in `links.json`, and the image has a Docker end-to-end test for
   authentication, validation, pairing, deletion and restart persistence. M36
   adds the in-game claim, M37 the join-time profile check, M38 linked-account
-  join enforcement and M39 browser self-service linking; label issuance, RPG
-  discovery and aspect capture remain unimplemented.
+  join enforcement, M39 browser self-service linking and M40 the link on an
+  unlinked gate refusal; label issuance, RPG discovery and aspect capture
+  remain unimplemented.
 - **M36 — in-game identity link claim (#87).** `/atmospheric link <code>`
   claims an operator-issued M35 pairing code as the logged-in player. The
   worker posts only the code, DID and optional handle to the configured
@@ -244,9 +255,10 @@ unless it writes to your own repo.
   native-mod bundles; the `horizon-ctl` `command` bypass (#8) is upstream
   horizon-rust/horizon#15691.
 - Label issuance remains a server concern (#29). Join-gate enforcement is
-  available for linked accounts (M38) and browser-based self-service linking is
-  available while the player is connected (M39); the online whitelist sweep
-  remains to be implemented.
+  available for linked accounts (M38); browser-based self-service linking is
+  available while the player is connected (M39) and an unlinked gate refusal
+  can issue the same link (M40). The online whitelist sweep remains to be
+  implemented.
 
 [Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.2.0
