@@ -112,6 +112,7 @@ fn main() {
         server_link_token: env::var("ATMOSPHERIC_SERVER_LINK_TOKEN").unwrap_or_default(),
         join_gate_enabled: false,
         join_gate_list: String::new(),
+        join_gate_sweep_seconds: 60,
         // M13: trusted endorsement keys for presence reads, as
         // "keyId=publicKeyB64" pairs separated by commas (an empty keyId is
         // derived from the public key).

@@ -95,7 +95,7 @@ fn handshake_login_bad_line_then_shutdown() {
     assert_eq!(worker.event(), serde_json::json!({"Session": "LoggedOut"}));
     assert_eq!(
         worker.event(),
-        serde_json::json!({"JoinGateState": {"enabled": false, "list": ""}})
+        serde_json::json!({"JoinGateState": {"enabled": false, "list": "", "sweep_seconds": 60}})
     );
 
     // Login with no settings file: LoggingIn, then Failed — no network call.
@@ -184,7 +184,7 @@ fn save_config_writes_the_settings_file() {
     // A successful save republishes the gate arm state.
     assert_eq!(
         worker.event(),
-        serde_json::json!({"JoinGateState": {"enabled": false, "list": ""}})
+        serde_json::json!({"JoinGateState": {"enabled": false, "list": "", "sweep_seconds": 60}})
     );
 
     worker.finish();

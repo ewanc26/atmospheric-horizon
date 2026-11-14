@@ -152,6 +152,12 @@ pub enum GameCommand {
         player_uuid: String,
         player_name: String,
     },
+    /// Sweep the online players against the join gate (M42). The worker
+    /// re-reads the configured list once and resolves each player's UUID
+    /// through the identity service, then reports the linked players whose DID
+    /// has left the list. The game side throttles this to the sweep period on
+    /// `JoinGateState`.
+    JoinGateSweep { players: Vec<SweepPlayer> },
     /// Read a player's `at.atpcraft.player.chat` records (their mirrored
     /// in-game chat history) from their own PDS (M16, read side of the M5
     /// chat mirror). Unsigned records by design — no endorsement to verify.
@@ -410,6 +416,14 @@ pub struct ServerDigest {
     pub verdict: ServerVerdict,
 }
 
+/// One online player in an M42 whitelist sweep. Plain data: the worker side
+/// has the same struct in the `atmospheric` crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SweepPlayer {
+    pub player_uuid: String,
+    pub player_name: String,
+}
+
 /// Events the worker thread reports back to the game side.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -442,8 +456,13 @@ pub enum ModEvent {
         subject: String,
         allowed: bool,
     },
-    /// Whether the server join gate is armed (M38), and the configured list.
-    JoinGateState { enabled: bool, list: String },
+    /// Whether the server join gate is armed (M38), the configured list, and
+    /// how often the online sweep re-reads it (M42, seconds; `0` is off).
+    JoinGateState {
+        enabled: bool,
+        list: String,
+        sweep_seconds: u64,
+    },
     /// The admission decision for one `JoinGateCheck` (M38). `message` is the
     /// refusal shown on the disconnect screen; empty when allowed.
     JoinGateDecision {
@@ -451,6 +470,10 @@ pub enum ModEvent {
         allowed: bool,
         message: String,
     },
+    /// Linked online players whose DID has left the join-gate list (M42). The
+    /// game side disconnects each. Nothing is sent when the sweep is clean or
+    /// the list read failed.
+    JoinGateKicks { players: Vec<SweepPlayer> },
     /// A player's chat history (M16): the DID (`subject`), the PDS it was
     /// read from (`via`), the total parseable record count, and the newest
     /// few messages (oldest first). Unsigned records by design.
@@ -598,7 +621,9 @@ pub fn status_text(event: &ModEvent) -> String {
             "atmospheric: gate {list} — {subject} {}",
             if *allowed { "ALLOWED" } else { "DENIED" }
         ),
-        ModEvent::JoinGateState { .. } | ModEvent::JoinGateDecision { .. } => String::new(),
+        ModEvent::JoinGateState { .. }
+        | ModEvent::JoinGateDecision { .. }
+        | ModEvent::JoinGateKicks { .. } => String::new(),
         ModEvent::ChatHistory {
             subject,
             total,
@@ -858,6 +883,14 @@ static JOIN_GATE_KNOWN: AtomicBool = AtomicBool::new(false);
 static JOIN_GATE_ENABLED: AtomicBool = AtomicBool::new(false);
 static JOIN_GATE_SEQ: AtomicU64 = AtomicU64::new(0);
 static JOIN_GATE_DECISION: OnceLock<Mutex<Option<(u64, bool, String)>>> = OnceLock::new();
+/// The M42 sweep period (seconds; `0` is off) and the time of the last sweep
+/// the game side sent. The worker never schedules the sweep itself — the tick
+/// hook throttles it locally so a server tick is the only clock.
+static JOIN_GATE_SWEEP_SECS: AtomicU64 = AtomicU64::new(0);
+static JOIN_GATE_LAST_SWEEP: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
+/// Kicks the worker returned for online players who left the list (M42),
+/// drained by the tick hook to run `kick`.
+static JOIN_GATE_KICKS: OnceLock<Mutex<Vec<SweepPlayer>>> = OnceLock::new();
 
 /// How many status lines the HUD shows at once.
 pub const STATUS_LINES_MAX: usize = 3;
@@ -885,11 +918,24 @@ fn join_gate_decision_slot() -> &'static Mutex<Option<(u64, bool, String)>> {
     JOIN_GATE_DECISION.get_or_init(|| Mutex::new(None))
 }
 
+fn join_gate_last_sweep_slot() -> &'static Mutex<Option<std::time::Instant>> {
+    JOIN_GATE_LAST_SWEEP.get_or_init(|| Mutex::new(None))
+}
+
+fn join_gate_kicks_slot() -> &'static Mutex<Vec<SweepPlayer>> {
+    JOIN_GATE_KICKS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
 /// Cache worker gate events. They are control messages, not HUD lines.
 fn note_join_gate(event: &ModEvent) {
     match event {
-        ModEvent::JoinGateState { enabled, .. } => {
+        ModEvent::JoinGateState {
+            enabled,
+            sweep_seconds,
+            ..
+        } => {
             JOIN_GATE_ENABLED.store(*enabled, Ordering::Release);
+            JOIN_GATE_SWEEP_SECS.store(*sweep_seconds, Ordering::Release);
             JOIN_GATE_KNOWN.store(true, Ordering::Release);
         }
         ModEvent::JoinGateDecision {
@@ -899,6 +945,11 @@ fn note_join_gate(event: &ModEvent) {
         } => {
             if let Ok(mut slot) = join_gate_decision_slot().lock() {
                 *slot = Some((*request_id, *allowed, message.clone()));
+            }
+        }
+        ModEvent::JoinGateKicks { players } => {
+            if let Ok(mut slot) = join_gate_kicks_slot().lock() {
+                slot.extend(players.iter().cloned());
             }
         }
         _ => {}
@@ -1456,6 +1507,63 @@ pub fn join_gate_refusal(player_uuid: &str, player_name: &str) -> Option<String>
     }
 }
 
+/// The sweep throttle decision, kept pure so it is testable without the
+/// process-wide statics. True when the gate is armed with a positive period
+/// and the last sweep is at least that old (or there has been none).
+fn sweep_due(
+    enabled: bool,
+    secs: u64,
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    if !enabled || secs == 0 {
+        return false;
+    }
+    match last {
+        None => true,
+        Some(at) => now.saturating_duration_since(at) >= std::time::Duration::from_secs(secs),
+    }
+}
+
+/// Is the M42 online sweep due? True only when a worker has reported an armed
+/// gate with a positive period and at least that long has passed since the
+/// last sweep. The tick hook calls this once per tick; the worker never
+/// schedules the sweep itself.
+pub fn join_gate_sweep_due() -> bool {
+    if !JOIN_GATE_KNOWN.load(Ordering::Acquire) {
+        return false;
+    }
+    let enabled = JOIN_GATE_ENABLED.load(Ordering::Acquire);
+    let secs = JOIN_GATE_SWEEP_SECS.load(Ordering::Acquire);
+    let last = join_gate_last_sweep_slot()
+        .lock()
+        .ok()
+        .and_then(|slot| *slot);
+    sweep_due(enabled, secs, last, std::time::Instant::now())
+}
+
+/// Send the online players to the worker for an M42 sweep. The time is
+/// recorded even when nobody is online, so an empty server does not re-arm the
+/// timer every tick; nothing is sent when the list is empty.
+pub fn join_gate_sweep(players: Vec<SweepPlayer>) {
+    if let Ok(mut slot) = join_gate_last_sweep_slot().lock() {
+        *slot = Some(std::time::Instant::now());
+    }
+    if players.is_empty() {
+        return;
+    }
+    send(GameCommand::JoinGateSweep { players });
+}
+
+/// Take the M42 kicks the worker returned, oldest first. The tick hook drains
+/// these and disconnects each player.
+pub fn drain_join_gate_kicks() -> Vec<SweepPlayer> {
+    join_gate_kicks_slot()
+        .lock()
+        .map(|mut slot| std::mem::take(&mut *slot))
+        .unwrap_or_default()
+}
+
 /// Ask the worker to read a player's chat history (M16). `subject` is a DID
 /// or a handle.
 pub fn fetch_chat(subject: &str) {
@@ -1777,6 +1885,21 @@ fn jopt_str(value: &Option<String>) -> Json {
 }
 fn jobj(pairs: Vec<(&str, Json)>) -> Json {
     Json::Obj(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+}
+/// A JSON array of M42 sweep players, matching the serde shape of
+/// `Vec<SweepPlayer>`: `[{"player_uuid":…,"player_name":…}, …]`.
+fn sweep_players_json(players: &[SweepPlayer]) -> Json {
+    Json::Arr(
+        players
+            .iter()
+            .map(|p| {
+                jobj(vec![
+                    ("player_uuid", jstr(&p.player_uuid)),
+                    ("player_name", jstr(&p.player_name)),
+                ])
+            })
+            .collect(),
+    )
 }
 /// Serialize a JSON value (compact, like serde_json::to_string).
 fn write_json(value: &Json, out: &mut String) {
@@ -2193,6 +2316,10 @@ fn encode_command(command: &GameCommand) -> String {
                 ("player_name", jstr(player_name)),
             ]),
         )]),
+        GameCommand::JoinGateSweep { players } => jobj(vec![(
+            "JoinGateSweep",
+            jobj(vec![("players", sweep_players_json(players))]),
+        )]),
         GameCommand::FetchChat { subject } => {
             jobj(vec![("FetchChat", jobj(vec![("subject", jstr(subject))]))])
         }
@@ -2331,6 +2458,16 @@ fn decode_chat_digest(value: &Json) -> Option<ChatDigest> {
         sent_at: req_str(obj, "sent_at")?,
         server: req_str(obj, "server")?,
         message: req_str(obj, "message")?,
+    })
+}
+
+/// One M42 sweep player, from the worker's JSON: `{"player_uuid":…,
+/// "player_name":…}`.
+fn decode_sweep_player(value: &Json) -> Option<SweepPlayer> {
+    let obj = as_obj(value)?;
+    Some(SweepPlayer {
+        player_uuid: req_str(obj, "player_uuid")?,
+        player_name: req_str(obj, "player_name")?,
     })
 }
 
@@ -2507,6 +2644,8 @@ fn decode_event(line: &str) -> Option<ModEvent> {
             Some(ModEvent::JoinGateState {
                 enabled: jget(obj, "enabled").and_then(as_bool)?,
                 list: req_str(obj, "list")?,
+                // Older workers omit the field; `0` means the sweep is off.
+                sweep_seconds: jget(obj, "sweep_seconds").and_then(as_int).unwrap_or(0) as u64,
             })
         }
         "JoinGateDecision" => {
@@ -2516,6 +2655,14 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 allowed: jget(obj, "allowed").and_then(as_bool)?,
                 message: req_str(obj, "message")?,
             })
+        }
+        "JoinGateKicks" => {
+            let obj = payload_obj()?;
+            let players = as_arr(jget(obj, "players")?)?
+                .iter()
+                .map(decode_sweep_player)
+                .collect::<Option<Vec<_>>>()?;
+            Some(ModEvent::JoinGateKicks { players })
         }
         "ChatHistory" => {
             let obj = payload_obj()?;
@@ -3008,6 +3155,7 @@ mod tests {
             .send(ModEvent::JoinGateState {
                 enabled: true,
                 list: "at://did:plc:owner/app.bsky.graph.list/3gate".into(),
+                sweep_seconds: 60,
             })
             .unwrap();
         let gate_uuid = "00000000-0000-4000-8000-000000000001".to_string();
@@ -3067,6 +3215,43 @@ mod tests {
         prune_expired(&mut status, now);
         assert_eq!(status.len(), 1);
         assert_eq!(status[0].0, "fresh");
+    }
+
+    #[test]
+    fn sweep_due_honors_period_and_off_switch() {
+        let now = std::time::Instant::now();
+        // Armed with a period: the first sweep is due at once.
+        assert!(sweep_due(true, 60, None, now));
+        // A disabled gate and a zero period are never due.
+        assert!(!sweep_due(false, 60, None, now));
+        assert!(!sweep_due(true, 0, None, now));
+        // Inside the period: not due; at or past it: due.
+        let inside = now - std::time::Duration::from_secs(59);
+        assert!(!sweep_due(true, 60, Some(inside), now));
+        let at = now - std::time::Duration::from_secs(60);
+        assert!(sweep_due(true, 60, Some(at), now));
+        let past = now - std::time::Duration::from_secs(600);
+        assert!(sweep_due(true, 60, Some(past), now));
+    }
+
+    #[test]
+    fn join_gate_kicks_queue_and_drain() {
+        // Only this test touches the kicks slot.
+        let _ = drain_join_gate_kicks();
+        note_join_gate(&ModEvent::JoinGateKicks {
+            players: vec![SweepPlayer {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
+            }],
+        });
+        assert_eq!(
+            drain_join_gate_kicks(),
+            vec![SweepPlayer {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
+            }]
+        );
+        assert!(drain_join_gate_kicks().is_empty());
     }
 
     #[test]
@@ -3189,7 +3374,17 @@ mod tests {
         assert_eq!(
             status_text(&ModEvent::JoinGateState {
                 enabled: true,
-                list: "l".into()
+                list: "l".into(),
+                sweep_seconds: 60,
+            }),
+            ""
+        );
+        assert_eq!(
+            status_text(&ModEvent::JoinGateKicks {
+                players: vec![SweepPlayer {
+                    player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                    player_name: "Alex".into(),
+                }],
             }),
             ""
         );
@@ -3693,6 +3888,15 @@ mod tests {
             r#"{"JoinGateCheck":{"request_id":7,"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}}"#
         );
         assert_eq!(
+            encode_command(&GameCommand::JoinGateSweep {
+                players: vec![SweepPlayer {
+                    player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                    player_name: "Alex".into(),
+                }],
+            }),
+            r#"{"JoinGateSweep":{"players":[{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}]}}"#
+        );
+        assert_eq!(
             encode_command(&GameCommand::FetchChat {
                 subject: "did:plc:z".into()
             }),
@@ -3957,10 +4161,20 @@ mod tests {
             })
         );
         assert_eq!(
+            decode_event(r#"{"JoinGateState":{"enabled":true,"list":"l","sweep_seconds":60}}"#),
+            Some(ModEvent::JoinGateState {
+                enabled: true,
+                list: "l".into(),
+                sweep_seconds: 60
+            })
+        );
+        // An older worker that omits the period decodes as off (0).
+        assert_eq!(
             decode_event(r#"{"JoinGateState":{"enabled":true,"list":"l"}}"#),
             Some(ModEvent::JoinGateState {
                 enabled: true,
-                list: "l".into()
+                list: "l".into(),
+                sweep_seconds: 0
             })
         );
         assert_eq!(
@@ -3969,6 +4183,17 @@ mod tests {
                 request_id: 7,
                 allowed: false,
                 message: "no".into()
+            })
+        );
+        assert_eq!(
+            decode_event(
+                r#"{"JoinGateKicks":{"players":[{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}]}}"#
+            ),
+            Some(ModEvent::JoinGateKicks {
+                players: vec![SweepPlayer {
+                    player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                    player_name: "Alex".into(),
+                }]
             })
         );
         assert_eq!(
