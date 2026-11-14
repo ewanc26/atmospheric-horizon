@@ -7,7 +7,7 @@
 //! redirect on a loopback listener (`http://127.0.0.1:<port>/`), and exchange
 //! the code at the token endpoint with a DPoP proof. Access tokens are
 //! DPoP-bound: every request carries `Authorization: DPoP <token>` plus a `DPoP`
-//! proof JWT (ES256) — that part lives in `session.rs` (`DpopClient`), which
+//! proof JWT (ES256) — that part lives in `account/session.rs` (`DpopClient`), which
 //! reuses [`DpopKey`] from here.
 //!
 //! The mod registers as a loopback "development" client: `client_id` is
