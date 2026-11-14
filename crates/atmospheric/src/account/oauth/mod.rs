@@ -46,6 +46,11 @@ const PLAYER_GRANTS: [&str; 4] = [
 const SERVER_PROFILE_GRANT: &str =
     "repo:at.atpcraft.server.profile?action=create&action=update&action=delete";
 
+/// The server account's labeler declaration write (M59), requested only when
+/// the labeler is enabled on a narrow custom scope.
+const LABELER_SERVICE_GRANT: &str =
+    "repo:app.bsky.labeler.service?action=create&action=update&action=delete";
+
 /// Whether the scope carries the broad transitional grant, which already
 /// permits every repo write and blob upload the mod needs.
 fn has_transition_generic(scope: &str) -> bool {
@@ -96,12 +101,21 @@ pub fn scope_for(base: &str, bridge_enabled: bool, _appview_did: &str) -> String
 }
 
 /// Build the server account's OAuth scope: the player scope plus its own
-/// descriptor grant and, when the bridge is enabled, the Colibri stream grant
-/// whose `rpc:` audience the PDS checks before minting a service-auth token.
-pub fn scope_for_server(base: &str, bridge_enabled: bool, appview_did: &str) -> String {
+/// descriptor grant, the labeler declaration grant when enabled, and, when
+/// the bridge is enabled, the Colibri stream grant whose `rpc:` audience the
+/// PDS checks before minting a service-auth token.
+pub fn scope_for_server(
+    base: &str,
+    bridge_enabled: bool,
+    appview_did: &str,
+    labeler_enabled: bool,
+) -> String {
     let mut scope = scope_for(base, bridge_enabled, appview_did);
     if !has_transition_generic(&scope) {
         append_missing(&mut scope, SERVER_PROFILE_GRANT);
+        if labeler_enabled {
+            append_missing(&mut scope, LABELER_SERVICE_GRANT);
+        }
     }
     if bridge_enabled {
         let aud = crate::colibri::appview_service_ref(appview_did);

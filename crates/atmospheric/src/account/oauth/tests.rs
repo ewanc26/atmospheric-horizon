@@ -845,13 +845,13 @@ fn colibri_player_scope_has_message_grants_but_only_the_server_scope_has_the_str
         DEFAULT_SCOPE
     );
 
-    let server = scope_for_server(DEFAULT_SCOPE, true, "did:web:api.colibri.social");
+    let server = scope_for_server(DEFAULT_SCOPE, true, "did:web:api.colibri.social", false);
     assert!(server.contains(
         "rpc:social.colibri.sync.subscribeEvents?aud=did:web:api.colibri.social#colibri_appview"
     ));
     // The broad default base already covers the descriptor write.
     assert_eq!(
-        scope_for_server(DEFAULT_SCOPE, false, "did:web:api.colibri.social"),
+        scope_for_server(DEFAULT_SCOPE, false, "did:web:api.colibri.social", false),
         DEFAULT_SCOPE
     );
 }
@@ -908,7 +908,7 @@ fn a_custom_base_gets_the_required_player_grants_once() {
         1
     );
     assert!(!player.contains("rpc:social.colibri.sync.subscribeEvents"));
-    let server = scope_for_server(base, true, "did:web:api.colibri.social");
+    let server = scope_for_server(base, true, "did:web:api.colibri.social", false);
     assert_eq!(
         server
             .matches(
@@ -918,20 +918,20 @@ fn a_custom_base_gets_the_required_player_grants_once() {
         1
     );
     assert_eq!(
-        scope_for_server(&server, true, "did:web:api.colibri.social"),
+        scope_for_server(&server, true, "did:web:api.colibri.social", false),
         server
     );
 }
 
 #[test]
-fn the_server_scope_adds_the_descriptor_grant_and_a_broad_base_needs_none() {
+fn the_server_scope_adds_its_grants_and_a_broad_base_needs_none() {
     let base = "atproto";
     let player = scope_for(base, false, "did:web:api.colibri.social");
     assert!(!player.contains(SERVER_PROFILE_GRANT));
-    let server = scope_for_server(base, false, "did:web:api.colibri.social");
+    let server = scope_for_server(base, false, "did:web:api.colibri.social", false);
     assert_eq!(server.matches(SERVER_PROFILE_GRANT).count(), 1);
     assert_eq!(
-        scope_for_server(&server, false, "did:web:api.colibri.social"),
+        scope_for_server(&server, false, "did:web:api.colibri.social", false),
         server
     );
 
@@ -942,8 +942,21 @@ fn the_server_scope_adds_the_descriptor_grant_and_a_broad_base_needs_none() {
         DEFAULT_SCOPE
     );
     assert_eq!(
-        scope_for_server(DEFAULT_SCOPE, false, "did:web:api.colibri.social"),
+        scope_for_server(DEFAULT_SCOPE, false, "did:web:api.colibri.social", false),
         DEFAULT_SCOPE
+    );
+
+    // Enabling the labeler adds only its declaration grant to a narrow scope.
+    let labeler = scope_for_server(base, false, "did:web:api.colibri.social", true);
+    assert_eq!(labeler.matches(LABELER_SERVICE_GRANT).count(), 1);
+    assert_eq!(
+        scope_for_server(&labeler, false, "did:web:api.colibri.social", true),
+        labeler
+    );
+    assert_eq!(
+        scope_for_server(DEFAULT_SCOPE, false, "did:web:api.colibri.social", true),
+        DEFAULT_SCOPE,
+        "the broad scope already covers the declaration write"
     );
 }
 

@@ -15,8 +15,8 @@ pub mod worker;
 pub use account::{identity, oauth, session};
 pub use base::{config, error, records, signing, tid};
 pub use social::{
-    actions, chats, graph, interactions, labels, lists, notifications, presence, profiles, servers,
-    skins,
+    actions, chats, graph, interactions, labeler, labels, lists, notifications, presence, profiles,
+    servers, skins,
 };
 
 pub use config::Config;

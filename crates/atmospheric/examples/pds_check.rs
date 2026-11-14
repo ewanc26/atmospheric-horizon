@@ -94,6 +94,7 @@ fn main() {
         app_password: env::var("ATMOSPHERIC_APP_PASSWORD").unwrap_or_default(),
         poll_interval_secs: 60,
         server_account_token_refresh_seconds: 60,
+        labeler_enabled: false,
         list_cache_seconds: 300,
         post_death_messages: false,
         post_chat_messages: false,
