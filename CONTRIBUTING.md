@@ -13,6 +13,7 @@ Thanks for considering a contribution.
 - Read `README.md` and `docs/ARCHITECTURE.md` first; `AGENTS.md` has the working rules (they apply to humans too).
 - Use feature branches and pull requests against `main`. Keep the branch linear: rebase onto `main` instead of merging it in, and expect PRs to be merged with `--rebase` (atomic, scoped commits only — see AGENTS.md's hard rules).
 - Keep the layer boundary: the injected `runtime.rs` stays std-only; everything else goes in `crates/atmospheric` with tests.
+- New or migrated Rust modules follow `<scope>/[<subscope>/]<atom>.rs`: directories are scopes, files are single-word atoms, and `mod.rs` only declares a scope. `crates/atmospheric-server` is the first completed slice; move the remaining flat modules incrementally.
 - Any change that adds an endpoint, a field sent over the wire, or a new kind of stored data must update the README's "Network use" section in the same pull request.
 - Run before opening a PR:
 
