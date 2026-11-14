@@ -19,13 +19,15 @@ The optional `atmospheric-server` binary is not in this diagram: it is a separat
 
 ## Source layout
 
-New and migrated Rust source follows `<scope>/[<subscope>/]<atom>.rs`: the directory names the domain scope, the final file is a single-word atom, and `mod.rs` only declares the scope. The layout is being migrated incrementally rather than in one repository-wide move, because the injected module and public paths are build inputs. `scripts/check-layout.sh` is the dependency-free CI guard: it rejects non-atom Rust filenames everywhere, requires scope placement and `mod.rs` in the migrated server crate, and keeps explicit exceptions for Cargo target paths such as `atmospheric-worker.rs`.
+All Rust source follows `<scope>/[<subscope>/]<atom>.rs`: the directory names the domain scope, the final file is a single-word atom, and `mod.rs` only declares the scope. The injected module and Cargo entry points keep their required paths, and crate-root re-exports preserve the public protocol module paths. `scripts/check-layout.sh` is the dependency-free CI guard: it rejects non-atom Rust filenames everywhere, requires scope placement and `mod.rs` in both Rust crates, and keeps explicit exceptions for Cargo target paths such as `atmospheric-worker.rs`.
 
-`crates/atmospheric-server` is the first complete slice: `api/` holds the router, state and handler atoms; `browser/` the one-time link state; `error/` the HTTP error mapping; `model/` the wire types and validation; `oauth/` the client, DPoP, resolver and encoding atoms; `page/` the browser HTML; and `store/` the in-memory store plus atomic file persistence. The public `app`, `ServerConfig`, `model`, `oauth` and `store` paths are unchanged.
+`crates/atmospheric-server` uses the same rule: `api/` holds the router, state and handler atoms; `browser/` the one-time link state; `error/` the HTTP error mapping; `model/` the wire types and validation; `oauth/` the client, DPoP, resolver and encoding atoms; `page/` the browser HTML; and `store/` the in-memory store plus atomic file persistence. The public `app`, `ServerConfig`, `model`, `oauth` and `store` paths are unchanged.
+
+`crates/atmospheric` now follows the same rule: `account/` holds `identity`, `oauth` and `session`; `base/` holds `config`, `error`, `records`, `signing` and `tid`; `social/` holds the Bluesky read/write and digest atoms; `colibri/bridge.rs` holds the bridge; and `worker/service.rs` owns the worker. Public paths such as `atmospheric::oauth`, `atmospheric::records` and `atmospheric::worker` are unchanged.
 
 The mixin helpers now follow the same rule: `colibri/` holds `join`, `leave` and `notice`; `gate/` holds `login`; the remaining helpers are single-word atoms at the mixin scope root.
 
-Entry points (`lib.rs`, `main.rs`) and the injected `runtime.rs` keep their required paths. The worker and protocol modules remain flat until their scopes are migrated.
+Entry points (`lib.rs`, `main.rs`), the injected `runtime.rs` and the Cargo target files keep their required paths.
 
 ### The injected module: `mixins/atmospheric/runtime.rs`
 
@@ -200,11 +202,11 @@ see "Manual check" below.
 
 ### M5: atpcraft port start — chat records (`at.atpcraft.player.chat`)
 
-- `records.rs` reimplements atpcraft's `at.atpcraft.player.chat` lexicon as a
+- `base/records.rs` reimplements atpcraft's `at.atpcraft.player.chat` lexicon as a
   plain `ChatRecord { sentAt, message, server }` (message truncated to the
   lexicon's 1024 cap). atpcraft's repo carries no licence, so no code is
   copied — only the wire format is matched, which is the point of a lexicon.
-  `tid.rs` generates the TID record keys atpcraft uses (53-bit microsecond
+  `base/tid.rs` generates the TID record keys atpcraft uses (53-bit microsecond
   timestamp + 10-bit clock id, sortable base32, 13 chars, strictly monotonic
   per worker), so a player's chat records accumulate as a time-sorted,
   append-only history.
@@ -230,14 +232,14 @@ see "Manual check" below.
 
 ### M6: player-state snapshots (`at.atpcraft.player.snapshot`)
 
-- `records.rs` adds the `defs` shapes (`Position`, `Score`, `TeamSummary`,
+- `base/records.rs` adds the `defs` shapes (`Position`, `Score`, `TeamSummary`,
   `SnapshotSummary`), `Aspect`, `Endorsement`, and `SnapshotRecord`, plus
   `canonical_json` — the deterministic JSON (recursively sorted keys, only
   `\"`/`\\` escaped) that atpcraft signs. `SnapshotRecord::signable_payload`
   builds the exact payload atpcraft's `signablePayload` builds:
   `{did, version, issuedAt, server, summary, aspects[]}` (aspects name-sorted
   as `{name, blob: cid}`).
-- `signing.rs` is the Ed25519 endorsement key (pure-Rust `ed25519-dalek`,
+- `base/signing.rs` is the Ed25519 endorsement key (pure-Rust `ed25519-dalek`,
   BSD-3-Clause; `sha2`/`base64`/`rand_core` MIT OR Apache-2.0 — all
   AGPL-compatible). The key id is the first 16 base64url chars of SHA-256
   over the SPKI encoding (prefix `302a300506032b6570032100` + 32-byte key),
@@ -296,7 +298,7 @@ see "Manual check" below.
 
 `/atmospheric login <handle>` sends `Command::LoginOAuth`; bare
 `/atmospheric login` keeps the app-password flow as a fallback. The flow
-lives in `crates/atmospheric/src/oauth.rs` and follows the atproto OAuth
+lives in `crates/atmospheric/src/account/oauth/mod.rs` and follows the atproto OAuth
 profile (atproto.com/specs/oauth), reimplemented from the spec:
 
 1. resolve handle → DID (`com.atproto.identity.resolveHandle` on bsky.social)
@@ -325,7 +327,7 @@ repo's `oauth-client-metadata.json` is served via GitHub Pages at
 (#21); set `oauth_client_id` in `config.json` to that URL.
 
 DPoP binding: a per-install P-256 key (ES256 proofs, persisted as a private
-JWK in `session.json`) signs every request. `session.rs` has a custom
+JWK in `session.json`) signs every request. `account/session.rs` has a custom
 `SessionStore` whose `authorization_token` answers `AuthorizationToken::Dpop`
 while DPoP state is installed (Bearer otherwise), and a `DpopClient`
 wrapping the reqwest XRPC client that adds the `DPoP` proof header
@@ -418,7 +420,7 @@ labels on a subject, and (b) resolving a labeler's DID-document service
 endpoint. Label issuance stays server-side (a client mod cannot host the
 labeler HTTP endpoint).
 
-- `labels.rs` parses a subject reference — an `at://` URI (account or
+- `social/labels.rs` parses a subject reference — an `at://` URI (account or
   record), a bare DID, a handle, or a bsky.app profile/post/list URL — and
   resolves handles to DIDs via the same `resolveHandle` service OAuth login
   uses. Account labels carry the bare DID as their `uri`; record labels the
@@ -461,7 +463,7 @@ labeler HTTP endpoint).
 `/atmospheric player <did|handle>` sends `Command::FetchPlayer` — the read
 side of atpcraft's player-state sync, so a client can see where a player
 last was, with the record's server endorsement checked. The flow, in
-`presence.rs`:
+`social/presence.rs`:
 
 1. `resolve_player` parses the subject (reusing the M12 subject parser;
    record URIs are rejected — a player is an account), resolves handles via
@@ -513,7 +515,7 @@ trusted-key verification).
 
 `/atmospheric profile <did|handle>` sends `Command::FetchProfile` — the
 client-side half of atpcraft's profile pronouns, with the same fallback rule
-atpcraft uses during OAuth. The flow, in `profiles.rs`:
+atpcraft uses during OAuth. The flow, in `social/profiles.rs`:
 
 1. `resolve_profile` parses the subject with the M12 subject parser (record
    URIs are rejected — a profile is an account), resolves handles through the
@@ -1413,7 +1415,7 @@ eurosky.social and bsky.social.
 Credentials come from the environment only; the example writes them to the
 temp settings file the worker reads and nothing else. Expected output: a
 `Session(LoggedIn { did })` event, then `Posted { uri }`, then a clean
-shutdown. The offline tests in `worker.rs` cover the same paths against a
+shutdown. The offline tests in `worker/service.rs` cover the same paths against a
 stub PDS on loopback (`cargo test --workspace --locked --offline`).
 
 ## Build and validation
