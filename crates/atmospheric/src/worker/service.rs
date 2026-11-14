@@ -378,6 +378,32 @@ fn colibri_send_allowed(hits: &mut VecDeque<Instant>, now: Instant) -> bool {
     true
 }
 
+/// The server profile's display name (M49): `server_name`, or atpcraft's
+/// client-name fallback when it is blank.
+fn server_profile_name(config: &Config) -> String {
+    if config.server_name.is_empty() {
+        config.client_name.clone()
+    } else {
+        config.server_name.clone()
+    }
+}
+
+/// The server profile's capabilities (M49): an explicit override wins;
+/// otherwise derive the features that are actually implemented. `skin-sync`
+/// is always present (M9/M14); `join-gate` appears when the gate is armed.
+/// `player-data-sync` and `labeler` stay absent until #111/#112.
+fn server_profile_capabilities(config: &Config) -> Vec<String> {
+    if !config.server_capabilities.is_empty() {
+        return config.server_capabilities.clone();
+    }
+    let mut capabilities = Vec::new();
+    if config.join_gate_enabled {
+        capabilities.push("join-gate".into());
+    }
+    capabilities.push("skin-sync".into());
+    capabilities
+}
+
 impl Worker {
     fn new(
         options: WorkerOptions,
@@ -1125,11 +1151,7 @@ impl Worker {
         .and_then(|value| serde_json::to_value(&value).ok())
         .and_then(|value| serde_json::from_value::<records::ServerProfileRecord>(value).ok())
         .and_then(|existing| existing.created_at);
-        let name = if config.server_name.is_empty() {
-            account_handle.to_string()
-        } else {
-            config.server_name.clone()
-        };
+        let name = server_profile_name(config);
         // First publish stamps createdAt too (atpcraft: existing ?: now).
         let now = atrium_api::types::string::Datetime::now();
         let now_str = serde_json::to_value(&now)
@@ -1148,7 +1170,7 @@ impl Worker {
                 public_key: signing::public_key_spki_b64(&key.verifying_key()),
                 alg: signing::ALG_ED25519.into(),
             },
-            config.server_capabilities.clone(),
+            server_profile_capabilities(config),
             Some(records::ProfileOperator {
                 did: did.to_string(),
                 handle: account_handle.to_string(),
@@ -2946,6 +2968,7 @@ mod tests {
             skin_path: String::new(),
             cape_path: String::new(),
             skin_model: "default".into(),
+            client_name: "atmospheric-horizon".into(),
             server_name: String::new(),
             server_description: String::new(),
             server_address: String::new(),
@@ -4540,6 +4563,7 @@ mod tests {
             skin_path: String::new(),
             cape_path: String::new(),
             skin_model: "default".into(),
+            client_name: "atmospheric-horizon".into(),
             server_name: String::new(),
             server_description: String::new(),
             server_address: String::new(),
@@ -4580,6 +4604,32 @@ mod tests {
         assert_eq!(back.chat_server_id, "my-server");
         assert!(back.persist_session);
         assert_eq!(back.join_gate_sweep_seconds, 90);
+    }
+
+    #[test]
+    fn server_profile_name_falls_back_to_the_client_name() {
+        let mut config = Config::default();
+        assert_eq!(server_profile_name(&config), "atmospheric-horizon");
+        config.client_name = "Custom Client".into();
+        assert_eq!(server_profile_name(&config), "Custom Client");
+        config.server_name = "My Server".into();
+        assert_eq!(server_profile_name(&config), "My Server");
+    }
+
+    #[test]
+    fn server_profile_capabilities_follow_atpcraft_feature_rules() {
+        let mut config = Config::default();
+        assert_eq!(server_profile_capabilities(&config), vec!["skin-sync"]);
+        config.join_gate_enabled = true;
+        assert_eq!(
+            server_profile_capabilities(&config),
+            vec!["join-gate", "skin-sync"]
+        );
+        config.server_capabilities = vec!["labeler".into(), "skin-sync".into()];
+        assert_eq!(
+            server_profile_capabilities(&config),
+            vec!["labeler", "skin-sync"]
+        );
     }
 
     /// A minimal PNG header (magic + IHDR with 2560x1440) for image tests.

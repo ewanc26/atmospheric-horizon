@@ -101,6 +101,7 @@ fn main() {
         skin_path: String::new(),
         cape_path: String::new(),
         skin_model: "default".into(),
+        client_name: "atmospheric-horizon".into(),
         server_name: env::var("ATMOSPHERIC_SERVER_NAME").unwrap_or_default(),
         server_description: String::new(),
         server_address: String::new(),
