@@ -71,6 +71,16 @@ pub enum GameCommand {
     ServerAccountStatus,
     /// Drop the server account session and delete its persisted token (M25).
     LogoutServerAccount,
+    /// Report whether the server account's DID document publishes the labeler
+    /// key and endpoint, and whether they match the service's current identity
+    /// (M60).
+    LabelerIdentityStatus,
+    /// Ask the server account's PDS to email a one-time PLC operation token
+    /// (M60).
+    RequestLabelerPlcSignature,
+    /// Sign and submit the PLC operation that publishes the labeler identity in
+    /// the server account's DID document (M60).
+    SubmitLabelerPlcUpdate { token: String },
     /// Replace the settings file with these settings.
     SaveConfig { settings: Settings },
     /// Post plain text to Bluesky.
@@ -1537,6 +1547,25 @@ pub fn post_server_profile_as_server() {
     send(GameCommand::PostServerProfileAsServer);
 }
 
+/// Ask the worker to report the labeler identity published in the server
+/// account's DID document (M60).
+pub fn labeler_identity_status() {
+    send(GameCommand::LabelerIdentityStatus);
+}
+
+/// Ask the worker to request a one-time PLC operation token by email (M60).
+pub fn request_labeler_plc_signature() {
+    send(GameCommand::RequestLabelerPlcSignature);
+}
+
+/// Ask the worker to submit the labeler PLC update with the emailed token
+/// (M60).
+pub fn submit_labeler_plc_update(token: &str) {
+    send(GameCommand::SubmitLabelerPlcUpdate {
+        token: token.into(),
+    });
+}
+
 /// Ask the worker to fetch a public Bluesky list's members (M11).
 pub fn fetch_list(reference: &str) {
     send(GameCommand::FetchList {
@@ -2297,6 +2326,12 @@ fn encode_command(command: &GameCommand) -> String {
         )]),
         GameCommand::ServerAccountStatus => jstr("ServerAccountStatus"),
         GameCommand::LogoutServerAccount => jstr("LogoutServerAccount"),
+        GameCommand::LabelerIdentityStatus => jstr("LabelerIdentityStatus"),
+        GameCommand::RequestLabelerPlcSignature => jstr("RequestLabelerPlcSignature"),
+        GameCommand::SubmitLabelerPlcUpdate { token } => jobj(vec![(
+            "SubmitLabelerPlcUpdate",
+            jobj(vec![("token", jstr(token))]),
+        )]),
         GameCommand::SaveConfig { settings } => jobj(vec![(
             "SaveConfig",
             jobj(vec![(
@@ -3971,6 +4006,20 @@ mod tests {
         assert_eq!(
             encode_command(&GameCommand::LogoutServerAccount),
             r#""LogoutServerAccount""#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::LabelerIdentityStatus),
+            r#""LabelerIdentityStatus""#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::RequestLabelerPlcSignature),
+            r#""RequestLabelerPlcSignature""#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::SubmitLabelerPlcUpdate {
+                token: "email-token".into()
+            }),
+            r#"{"SubmitLabelerPlcUpdate":{"token":"email-token"}}"#
         );
         assert_eq!(
             encode_command(&GameCommand::SaveConfig {

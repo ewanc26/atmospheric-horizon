@@ -12,7 +12,7 @@ pub mod colibri;
 mod social;
 pub mod worker;
 
-pub use account::{identity, oauth, session};
+pub use account::{identity, oauth, plc, session};
 pub use base::{config, error, records, signing, tid};
 pub use social::{
     actions, chats, graph, interactions, labeler, labels, lists, notifications, presence, profiles,
@@ -50,6 +50,18 @@ pub enum Command {
     LoginServerOAuth { handle: String },
     /// Report the server account's session state (M25).
     ServerAccountStatus,
+    /// Report whether the server account's DID document publishes the labeler
+    /// key (`#atproto_label`) and endpoint (`#atproto_labeler`), and whether
+    /// they match the labeler service's announced identity (M60).
+    LabelerIdentityStatus,
+    /// Ask the server account's PDS to email a one-time PLC operation token
+    /// (`com.atproto.identity.requestPlcOperationSignature`, M60).
+    RequestLabelerPlcSignature,
+    /// Sign and submit the PLC operation that publishes the labeler identity
+    /// in the server account's DID document (M60). `token` is the one-time
+    /// token from the account's email; it may be empty when the PDS does not
+    /// require one.
+    SubmitLabelerPlcUpdate { token: String },
     /// Drop the server account session and delete its persisted refresh token
     /// (M25).
     LogoutServerAccount,
@@ -467,6 +479,21 @@ mod tests {
             r#""ColibriReconnect""#
         );
         assert_eq!(
+            serde_json::to_string(&Command::LabelerIdentityStatus).unwrap(),
+            r#""LabelerIdentityStatus""#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::RequestLabelerPlcSignature).unwrap(),
+            r#""RequestLabelerPlcSignature""#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::SubmitLabelerPlcUpdate {
+                token: "tok".into()
+            })
+            .unwrap(),
+            r#"{"SubmitLabelerPlcUpdate":{"token":"tok"}}"#
+        );
+        assert_eq!(
             serde_json::to_string(&Command::ClaimServerLink {
                 code: "ABCD-EFGH".into()
             })
@@ -535,6 +562,11 @@ mod tests {
             Command::Login,
             Command::LoginOAuth {
                 handle: "a.test".into(),
+            },
+            Command::LabelerIdentityStatus,
+            Command::RequestLabelerPlcSignature,
+            Command::SubmitLabelerPlcUpdate {
+                token: "tok".into(),
             },
             Command::SaveConfig {
                 config: Box::new(Config::default()),

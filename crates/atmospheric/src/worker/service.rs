@@ -13,6 +13,7 @@ use crate::{
     graph, identity, interactions, labeler,
     notifications::{self, SeenCursor},
     oauth::{self, DpopState, SharedDpop},
+    plc,
     presence::{self, PlayerDigest},
     profiles,
     records::{self, SnapshotRecord},
@@ -109,6 +110,9 @@ pub struct WorkerOptions {
     /// Whether OAuth logins may spawn the system browser. Tests turn this
     /// off so `cargo test` never opens windows on the dev machine.
     pub launch_browser: bool,
+    /// The public PLC directory the M60 labeler identity update reads. The
+    /// default is `https://plc.directory`; tests point it at a stub.
+    pub plc_directory: String,
 }
 
 impl WorkerOptions {
@@ -117,6 +121,7 @@ impl WorkerOptions {
             storage_dir: storage_dir.into(),
             resolver: oauth::Resolver::default(),
             launch_browser: true,
+            plc_directory: plc::PLC_DIRECTORY.into(),
         }
     }
 
@@ -356,6 +361,8 @@ struct Worker {
     resolver: oauth::Resolver,
     /// Whether OAuth logins may spawn the system browser.
     launch_browser: bool,
+    /// Where the M60 labeler identity update reads the account's PLC operation.
+    plc_directory: String,
     /// Where spawned OAuth logins report their result and target.
     oauth_tx:
         tokio::sync::mpsc::UnboundedSender<(OAuthTarget, crate::error::Result<oauth::OAuthLogin>)>,
@@ -521,6 +528,7 @@ impl Worker {
             list_cache: None,
             resolver: options.resolver.clone(),
             launch_browser: options.launch_browser,
+            plc_directory: options.plc_directory.clone(),
             oauth_tx,
             events,
             colibri_tx,
@@ -586,6 +594,16 @@ impl Worker {
             Command::LoginServerOAuth { handle } => self.start_server_login_oauth(handle),
             Command::ServerAccountStatus => self.emit_server_account_status(),
             Command::LogoutServerAccount => self.logout_server_account(),
+            Command::LabelerIdentityStatus => self.emit_labeler_identity_status().await,
+            Command::RequestLabelerPlcSignature => self.request_labeler_plc_signature().await,
+            Command::SubmitLabelerPlcUpdate { token } => {
+                match self.submit_labeler_plc_update(&token).await {
+                    Ok(did) => self.emit(Event::Status(format!(
+                        "atmospheric: PLC update submitted for {did}; the labeler is now discoverable through its DID document"
+                    ))),
+                    Err(error) => self.fail(format!("could not update the labeler identity: {error}")),
+                }
+            }
             Command::ColibriStart => self.start_colibri().await,
             Command::ColibriReconnect => self.reconnect_colibri().await,
             Command::ColibriStop => self.stop_colibri(true),
@@ -2369,6 +2387,123 @@ impl Worker {
         self.emit_server_account(SessionState::LoggedOut);
     }
 
+    /// Read the labeler's public identity from the identity service, merge its
+    /// key and endpoint into the server account's current PLC operation, and
+    /// submit the signed operation (M60). Every existing rotation key, alias,
+    /// verification method and service is preserved; the labeler entries are
+    /// overwritten so a rotated key or changed URL refreshes the document.
+    async fn submit_labeler_plc_update(&mut self, token: &str) -> crate::error::Result<String> {
+        self.ensure_server_oauth_fresh().await;
+        let config = self.load_config().unwrap_or_default();
+        if config.server_api_url.trim().is_empty() {
+            return Err(AtmosphericError::Message(
+                "server_api_url is not configured: set the identity service URL in config.json"
+                    .into(),
+            ));
+        }
+        let (Some(agent), Some(did)) = (&self.server_agent, &self.server_did) else {
+            return Err(AtmosphericError::Message(
+                "no server account is logged in — run /atmospheric server-account login <handle>"
+                    .into(),
+            ));
+        };
+        plc::ensure_plc_did(did)?;
+        let service = plc::fetch_labeler_service(&self.http, &config.server_api_url).await?;
+        if service.did != *did {
+            return Err(AtmosphericError::Message(format!(
+                "the labeler service runs as {}, but the logged-in server account is {did}",
+                service.did
+            )));
+        }
+        let endpoint = service.endpoint.clone().ok_or_else(|| {
+            AtmosphericError::Message(
+                "the labeler service has no public URL: set ATMOSPHERIC_SERVER_PUBLIC_URL".into(),
+            )
+        })?;
+        let data = plc::fetch_plc_data(&self.http, &self.plc_directory, did).await?;
+        let mut operation = plc::PlcOperation::from_plc_data(&data)?;
+        operation.token = Some(token.trim().to_owned()).filter(|token| !token.is_empty());
+        let operation = operation.with_labeler(service.signing_key, endpoint);
+        plc::sign_and_submit(agent, &operation).await?;
+        Ok(did.clone())
+    }
+
+    /// Report whether the server account's DID document publishes the labeler
+    /// key and endpoint, and whether they match the labeler service's current
+    /// identity (M60). A public read: no token refresh and no write.
+    async fn emit_labeler_identity_status(&mut self) {
+        let config = self.load_config().unwrap_or_default();
+        if config.server_api_url.trim().is_empty() {
+            self.fail(
+                "server_api_url is not configured: set the identity service URL in config.json",
+            );
+            return;
+        }
+        let Some(did) = self.server_did.clone() else {
+            self.fail(
+                "no server account is logged in — run /atmospheric server-account login <handle>",
+            );
+            return;
+        };
+        let service = match plc::fetch_labeler_service(&self.http, &config.server_api_url).await {
+            Ok(service) => service,
+            Err(error) => {
+                self.fail(format!("could not read the labeler identity: {error}"));
+                return;
+            }
+        };
+        if service.did != did {
+            self.fail(format!(
+                "the labeler service runs as {}, but the logged-in server account is {did}",
+                service.did
+            ));
+            return;
+        }
+        let data = match plc::fetch_plc_data(&self.http, &self.plc_directory, &did).await {
+            Ok(data) => data,
+            Err(error) => {
+                self.fail(format!("could not read the PLC document: {error}"));
+                return;
+            }
+        };
+        let operation = match plc::PlcOperation::from_plc_data(&data) {
+            Ok(operation) => operation,
+            Err(error) => {
+                self.fail(format!("could not read the PLC document: {error}"));
+                return;
+            }
+        };
+        let (has_key, has_service) = operation.has_labeler_entries();
+        let (key_matches, endpoint_matches) = operation.matches_labeler(&service);
+        let present = |value: bool| if value { "present" } else { "missing" };
+        self.emit(Event::Status(format!(
+            "atmospheric: labeler identity {did} — #atproto_label {}, #atproto_labeler {}; published values match: key {}, endpoint {}",
+            present(has_key),
+            present(has_service),
+            present(key_matches),
+            present(endpoint_matches)
+        )));
+    }
+
+    /// Ask the PDS to email the one-time token a PLC operation signature needs
+    /// (M60). Best-effort: the operator reads the token and runs
+    /// `/atmospheric labeler-identity submit <token>`.
+    async fn request_labeler_plc_signature(&mut self) {
+        self.ensure_server_oauth_fresh().await;
+        let Some(agent) = &self.server_agent else {
+            self.fail(
+                "no server account is logged in — run /atmospheric server-account login <handle>",
+            );
+            return;
+        };
+        match plc::request_signature(agent).await {
+            Ok(()) => self.emit(Event::Status(
+                "atmospheric: PLC signature requested — check the email linked to the server account, then run /atmospheric labeler-identity submit <token>".into(),
+            )),
+            Err(error) => self.fail(format!("could not request a PLC signature: {error}")),
+        }
+    }
+
     /// Refresh the OAuth access token when it is close to expiry. The agent's
     /// own ExpiredToken auto-refresh only knows the app-password
     /// `refreshSession` endpoint, which an OAuth session cannot use, so the
@@ -3591,6 +3726,21 @@ mod tests {
                         )
                     }
                 }
+                "/v1/labeler/identity" => (
+                    "200 OK",
+                    r#"{"did":"did:plc:stubuser","signingKey":"did:key:zQ3shlabel","endpoint":"https://labels.example"}"#
+                        .to_string(),
+                ),
+                "/did:plc:stubuser/data" => (
+                    "200 OK",
+                    r#"{"did":"did:plc:stubuser","rotationKeys":["did:key:zQ3shrotation"],"alsoKnownAs":["at://stub.test"],"verificationMethods":{"atproto_pds":"did:key:zQ3shpds"},"services":{"atproto_pds":{"type":"AtprotoPersonalDataServer","endpoint":"https://pds.example"}}}"#
+                        .to_string(),
+                ),
+                "/xrpc/com.atproto.identity.signPlcOperation" => (
+                    "200 OK",
+                    r#"{"operation":{"type":"plc_operation","verificationMethods":{"atproto_label":"did:key:zQ3shlabel"},"services":{"atproto_labeler":{"type":"AtprotoLabeler","endpoint":"https://labels.example"}}}}"#
+                        .to_string(),
+                ),
                 "/xrpc/app.bsky.graph.getFollows" => {
                     // Two pages: cursor "c2" on the first, none on the second.
                     if path.contains("cursor=c2") {
@@ -3826,6 +3976,16 @@ mod tests {
                 ),
             }
         };
+        if path.starts_with("/xrpc/com.atproto.identity.submitPlcOperation")
+            || path.starts_with("/xrpc/com.atproto.identity.requestPlcOperationSignature")
+        {
+            // No output schema and no JSON content type: atrium maps the
+            // response to `()` but still parses its body, so send `null`.
+            let response = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnull";
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+            return;
+        }
         // The mute procedures have no output schema: answer with an empty
         // body and no content type so the generated client sees a raw
         // response and maps it to `()`.
@@ -3923,6 +4083,7 @@ mod tests {
             storage_dir,
             resolver,
             launch_browser: false,
+            plc_directory: plc::PLC_DIRECTORY.into(),
         };
         let handle = spawn(command_rx, event_tx, options);
         (command_tx, event_rx, handle)
@@ -7282,9 +7443,114 @@ mod tests {
             storage_dir,
             resolver: stub.resolver(),
             launch_browser: false,
+            plc_directory: plc::PLC_DIRECTORY.into(),
         };
         let handle = spawn(command_rx, event_tx, options);
         (command_tx, event_rx, handle)
+    }
+
+    #[test]
+    fn labeler_plc_update_merges_the_identity_into_the_account_document() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let pds = StubPds::start(false);
+        let dir = temp_dir("labeler-plc");
+        let mut config = test_config(pds.url.clone());
+        config.server_api_url = pds.url.clone();
+        write_config(&dir, &config);
+        let (agent, _) = runtime
+            .block_on(session::login(&config, oauth::new_shared_dpop()))
+            .unwrap();
+        let (events, event_rx) = std::sync::mpsc::channel();
+        let (oauth_tx, _oauth_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (colibri_tx, _colibri_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut worker = Worker::new(WorkerOptions::new(dir), events, oauth_tx, colibri_tx);
+        worker.server_agent = Some(agent);
+        worker.server_did = Some("did:plc:stubuser".into());
+        worker.plc_directory = pds.url.clone();
+
+        runtime.block_on(worker.handle(Command::SubmitLabelerPlcUpdate {
+            token: "email-token".into(),
+        }));
+
+        match wait_for(&event_rx, |_| true) {
+            Event::Status(message) => {
+                assert!(message.contains("PLC update submitted"), "{message}")
+            }
+            other => panic!(
+                "expected a status, got {other:?}; requests: {:?}",
+                pds.requests()
+                    .iter()
+                    .map(|request| request.path.clone())
+                    .collect::<Vec<_>>()
+            ),
+        }
+
+        let requests = pds.non_poll_requests();
+        let sign = requests
+            .iter()
+            .find(|request| request.path == "/xrpc/com.atproto.identity.signPlcOperation")
+            .expect("the worker signs the merged operation");
+        let body: serde_json::Value = serde_json::from_str(&sign.body).unwrap();
+        assert_eq!(body["token"], "email-token");
+        assert_eq!(body["rotationKeys"][0], "did:key:zQ3shrotation");
+        assert_eq!(body["alsoKnownAs"][0], "at://stub.test");
+        assert_eq!(
+            body["verificationMethods"]["atproto_pds"],
+            "did:key:zQ3shpds"
+        );
+        assert_eq!(
+            body["verificationMethods"]["atproto_label"],
+            "did:key:zQ3shlabel"
+        );
+        assert_eq!(
+            body["services"]["atproto_pds"]["endpoint"],
+            "https://pds.example"
+        );
+        assert_eq!(
+            body["services"]["atproto_labeler"]["type"],
+            "AtprotoLabeler"
+        );
+        assert_eq!(
+            body["services"]["atproto_labeler"]["endpoint"],
+            "https://labels.example"
+        );
+
+        let submit = requests
+            .iter()
+            .find(|request| request.path == "/xrpc/com.atproto.identity.submitPlcOperation")
+            .expect("the worker submits the signed operation");
+        let body: serde_json::Value = serde_json::from_str(&submit.body).unwrap();
+        assert_eq!(body["operation"]["type"], "plc_operation");
+    }
+
+    #[test]
+    fn labeler_plc_update_needs_a_logged_in_server_account() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = temp_dir("labeler-plc-no-account");
+        let mut config = test_config("http://127.0.0.1:1".into());
+        config.server_api_url = "http://127.0.0.1:1".into();
+        write_config(&dir, &config);
+        let (events, event_rx) = std::sync::mpsc::channel();
+        let (oauth_tx, _oauth_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (colibri_tx, _colibri_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut worker = Worker::new(WorkerOptions::new(dir), events, oauth_tx, colibri_tx);
+
+        runtime.block_on(worker.handle(Command::SubmitLabelerPlcUpdate {
+            token: String::new(),
+        }));
+
+        match wait_for(&event_rx, |event| matches!(event, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("no server account"), "{message}")
+            }
+            other => panic!("expected a failure, got {other:?}"),
+        }
     }
 
     /// Drive the browser side of an OAuth login: the worker emitted the

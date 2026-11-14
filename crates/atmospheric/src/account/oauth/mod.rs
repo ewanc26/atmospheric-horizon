@@ -51,6 +51,11 @@ const SERVER_PROFILE_GRANT: &str =
 const LABELER_SERVICE_GRANT: &str =
     "repo:app.bsky.labeler.service?action=create&action=update&action=delete";
 
+/// The identity control the M60 PLC update needs. The PDS's
+/// `signPlcOperation` authorizer requires `identity:*`, so a narrow custom
+/// scope must request it explicitly; `transition:generic` already covers it.
+const IDENTITY_GRANT: &str = "identity:*";
+
 /// Whether the scope carries the broad transitional grant, which already
 /// permits every repo write and blob upload the mod needs.
 fn has_transition_generic(scope: &str) -> bool {
@@ -101,9 +106,9 @@ pub fn scope_for(base: &str, bridge_enabled: bool, _appview_did: &str) -> String
 }
 
 /// Build the server account's OAuth scope: the player scope plus its own
-/// descriptor grant, the labeler declaration grant when enabled, and, when
-/// the bridge is enabled, the Colibri stream grant whose `rpc:` audience the
-/// PDS checks before minting a service-auth token.
+/// descriptor grant, the labeler declaration and `identity:*` grants when
+/// enabled, and, when the bridge is enabled, the Colibri stream grant whose
+/// `rpc:` audience the PDS checks before minting a service-auth token.
 pub fn scope_for_server(
     base: &str,
     bridge_enabled: bool,
@@ -115,6 +120,7 @@ pub fn scope_for_server(
         append_missing(&mut scope, SERVER_PROFILE_GRANT);
         if labeler_enabled {
             append_missing(&mut scope, LABELER_SERVICE_GRANT);
+            append_missing(&mut scope, IDENTITY_GRANT);
         }
     }
     if bridge_enabled {

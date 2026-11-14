@@ -937,6 +937,7 @@ fn the_server_scope_adds_its_grants_and_a_broad_base_needs_none() {
 
     // `transition:generic` already covers the writes, so the default string
     // stays exactly as before.
+    assert!(!scope_for(base, false, "did:web:api.colibri.social").contains("identity:*"));
     assert_eq!(
         scope_for(DEFAULT_SCOPE, false, "did:web:api.colibri.social"),
         DEFAULT_SCOPE
@@ -946,9 +947,11 @@ fn the_server_scope_adds_its_grants_and_a_broad_base_needs_none() {
         DEFAULT_SCOPE
     );
 
-    // Enabling the labeler adds only its declaration grant to a narrow scope.
+    // Enabling the labeler adds its declaration and identity grants to a
+    // narrow scope; the PLC update cannot be signed without identity:*.
     let labeler = scope_for_server(base, false, "did:web:api.colibri.social", true);
     assert_eq!(labeler.matches(LABELER_SERVICE_GRANT).count(), 1);
+    assert_eq!(labeler.matches("identity:*").count(), 1);
     assert_eq!(
         scope_for_server(&labeler, false, "did:web:api.colibri.social", true),
         labeler
