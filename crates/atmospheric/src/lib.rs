@@ -165,6 +165,9 @@ pub enum Command {
     /// M5 chat mirror). Chat records are unsigned by design, so there is no
     /// endorsement to verify. Unauthenticated — works logged out.
     FetchChat { subject: String },
+    /// Read generic records from any collection in a subject's own PDS
+    /// (M44). Works logged out, unauthenticated.
+    FetchRecords { subject: String, collection: String },
     /// Read the labels on a subject (M12, labeler read side): an AT-URI, a
     /// DID, a handle, or a bsky.app profile/post/list URL. Labels come from
     /// the subject's AppView view (`labels` field). Works logged out.
@@ -295,6 +298,16 @@ pub enum Event {
         via: String,
         total: usize,
         items: Vec<chats::ChatDigest>,
+    },
+    /// Generic records from any collection in a subject's PDS (M44):
+    /// the DID (`subject`), the PDS (`via`), the collection, the total record
+    /// count, and the newest few records as compact JSON strings (oldest first).
+    RecordsHistory {
+        subject: String,
+        via: String,
+        collection: String,
+        total: usize,
+        items: Vec<String>,
     },
     /// The labels found on a subject (M12, labeler read side): the subject
     /// (AT-URI or DID), where the labels came from (`via`: the AppView URL or
@@ -743,6 +756,13 @@ mod tests {
                     server: "srv".into(),
                     message: "hi".into(),
                 }],
+            },
+            Event::RecordsHistory {
+                subject: "s".into(),
+                via: "v".into(),
+                collection: "app.bsky.feed.post".into(),
+                total: 1,
+                items: vec![r#"{"text":"hi"}"#.into()],
             },
             Event::Labels {
                 subject: "s".into(),

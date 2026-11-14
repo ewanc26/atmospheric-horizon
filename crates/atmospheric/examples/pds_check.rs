@@ -25,6 +25,7 @@
 //! ATMOSPHERIC_GATE="at://…/app.bsky.graph.list/<rkey> | URL" \  # optional, M15
 //! ATMOSPHERIC_GATE_SUBJECT="did:plc:… | handle" \               # optional, M15 (default: own DID)
 //! ATMOSPHERIC_FETCH_CHAT="did:plc:… | handle" \                 # optional, M16
+//! ATMOSPHERIC_RECORDS="did:plc:… | handle|<collection>" \      # optional, M44
 //! ATMOSPHERIC_FETCH_SERVER="did:plc:… | handle" \               # optional, M19
 //! ATMOSPHERIC_GRAPH="follows:did:plc:…" \                      # optional, M20
 //! ATMOSPHERIC_LIKE="at://…/app.bsky.feed.post/<rkey>" \        # optional, M21
@@ -539,6 +540,45 @@ fn main() {
                         }
                         Event::Failed { message } => {
                             eprintln!("chat fetch failed: {message}");
+                            exit(1);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(error) => {
+                    eprintln!("no event from the worker: {error}");
+                    exit(1);
+                }
+            }
+        }
+    }
+
+    // Optionally browse any public collection (M44, generic record browser):
+    // unauthenticated listRecords on the subject's own PDS, newest records.
+    if let Some(spec) = env::var("ATMOSPHERIC_RECORDS")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        let (subject, collection) = spec
+            .split_once('|')
+            .expect("ATMOSPHERIC_RECORDS wants <did|handle>|<collection>");
+        command_tx
+            .send(Command::FetchRecords {
+                subject: subject.to_string(),
+                collection: collection.to_string(),
+            })
+            .expect("send FetchRecords");
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(event) => {
+                    println!("event: {event:?}");
+                    match event {
+                        Event::RecordsHistory { total, items, .. } => {
+                            println!("records: {total} record(s), newest: {items:?}");
+                            break;
+                        }
+                        Event::Failed { message } => {
+                            eprintln!("record fetch failed: {message}");
                             exit(1);
                         }
                         _ => {}
