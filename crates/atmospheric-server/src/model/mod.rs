@@ -3,6 +3,7 @@
 
 mod browser;
 mod health;
+mod labeler;
 mod link;
 mod pairing;
 mod time;
@@ -10,6 +11,7 @@ mod validate;
 
 pub use browser::{BrowserPairingInput, BrowserPairingResponse};
 pub use health::Health;
+pub use labeler::EmitLabelInput;
 pub use link::{Link, LinkInput, LinksResponse};
 pub(crate) use pairing::new_pairing_code;
 pub use pairing::{

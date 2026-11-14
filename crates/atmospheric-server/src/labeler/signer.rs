@@ -24,6 +24,7 @@ pub enum LabelError {
 }
 
 /// A K-256 key that signs and verifies `com.atproto.label.defs#label` values.
+#[derive(Clone)]
 pub struct LabelSigner {
     key: SigningKey,
 }
@@ -49,6 +50,16 @@ impl LabelSigner {
         let mut secret = [0u8; 32];
         secret.copy_from_slice(&self.key.to_bytes());
         secret
+    }
+
+    /// The compressed public key bytes (33 bytes).
+    pub fn public_key_bytes(&self) -> [u8; 33] {
+        self.key
+            .verifying_key()
+            .to_encoded_point(true)
+            .as_bytes()
+            .try_into()
+            .expect("a compressed secp256k1 key is 33 bytes")
     }
 
     /// The compressed public key as lowercase hex (33 bytes).

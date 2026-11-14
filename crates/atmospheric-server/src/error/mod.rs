@@ -21,6 +21,8 @@ pub enum ApiError {
         "browser linking is disabled; set ATMOSPHERIC_SERVER_PUBLIC_URL and ATMOSPHERIC_SERVER_LINK_TOKEN"
     )]
     BrowserDisabled,
+    #[error("labeler is disabled; set ATMOSPHERIC_SERVER_LABELER_DID")]
+    LabelerDisabled,
     #[error("missing or invalid admin bearer token")]
     Unauthorized,
     #[error("internal server error")]
@@ -40,7 +42,9 @@ impl ApiError {
         match self {
             Self::Invalid(_) => StatusCode::BAD_REQUEST,
             Self::NotFound(_) | Self::PairingUnavailable => StatusCode::NOT_FOUND,
-            Self::AdminDisabled | Self::BrowserDisabled => StatusCode::SERVICE_UNAVAILABLE,
+            Self::AdminDisabled | Self::BrowserDisabled | Self::LabelerDisabled => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Internal | Self::Io(_) | Self::Json(_) | Self::Join(_) | Self::Corrupt(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
