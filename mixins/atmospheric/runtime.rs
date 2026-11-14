@@ -150,6 +150,7 @@ pub enum GameCommand {
     JoinGateCheck {
         request_id: u64,
         player_uuid: String,
+        player_name: String,
     },
     /// Read a player's `at.atpcraft.player.chat` records (their mirrored
     /// in-game chat history) from their own PDS (M16, read side of the M5
@@ -1398,7 +1399,7 @@ pub fn check_gate(list: &str, subject: &str) {
 /// 6 seconds for the link plus list read. An attached worker that never
 /// answers is fail-closed; with no worker at all the mod cannot know the gate
 /// is armed and stays out of the way.
-pub fn join_gate_refusal(player_uuid: &str) -> Option<String> {
+pub fn join_gate_refusal(player_uuid: &str, player_name: &str) -> Option<String> {
     if !ensure_attached() {
         return None;
     }
@@ -1424,6 +1425,7 @@ pub fn join_gate_refusal(player_uuid: &str) -> Option<String> {
     send(GameCommand::JoinGateCheck {
         request_id,
         player_uuid: player_uuid.into(),
+        player_name: player_name.into(),
     });
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
     loop {
@@ -2182,11 +2184,13 @@ fn encode_command(command: &GameCommand) -> String {
         GameCommand::JoinGateCheck {
             request_id,
             player_uuid,
+            player_name,
         } => jobj(vec![(
             "JoinGateCheck",
             jobj(vec![
                 ("request_id", juint(*request_id)),
                 ("player_uuid", jstr(player_uuid)),
+                ("player_name", jstr(player_name)),
             ]),
         )]),
         GameCommand::FetchChat { subject } => {
@@ -3008,13 +3012,15 @@ mod tests {
             .unwrap();
         let gate_uuid = "00000000-0000-4000-8000-000000000001".to_string();
         let waiter_uuid = gate_uuid.clone();
-        let waiter = std::thread::spawn(move || join_gate_refusal(&waiter_uuid));
+        let waiter = std::thread::spawn(move || join_gate_refusal(&waiter_uuid, "Alex"));
         let request_id = match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::JoinGateCheck {
                 request_id,
                 player_uuid,
+                player_name,
             }) => {
                 assert_eq!(player_uuid, gate_uuid);
+                assert_eq!(player_name, "Alex");
                 request_id
             }
             other => panic!("expected JoinGateCheck, got {other:?}"),
@@ -3032,7 +3038,7 @@ mod tests {
         );
 
         let waiter_uuid = gate_uuid.clone();
-        let waiter = std::thread::spawn(move || join_gate_refusal(&waiter_uuid));
+        let waiter = std::thread::spawn(move || join_gate_refusal(&waiter_uuid, "Alex"));
         let request_id = match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::JoinGateCheck { request_id, .. }) => request_id,
             other => panic!("expected JoinGateCheck, got {other:?}"),
@@ -3682,8 +3688,9 @@ mod tests {
             encode_command(&GameCommand::JoinGateCheck {
                 request_id: 7,
                 player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
             }),
-            r#"{"JoinGateCheck":{"request_id":7,"player_uuid":"00000000-0000-4000-8000-000000000001"}}"#
+            r#"{"JoinGateCheck":{"request_id":7,"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}}"#
         );
         assert_eq!(
             encode_command(&GameCommand::FetchChat {

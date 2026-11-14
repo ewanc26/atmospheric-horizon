@@ -148,9 +148,12 @@ pub enum Command {
     /// Decide one joining player's gate admission (M38): resolve the UUID
     /// through the identity service and check the linked DID against the
     /// configured list. The runtime waits for the matching decision at login.
+    /// An unlinked player also gets a one-time browser link URL when the
+    /// server has `server_link_token` configured (M40).
     JoinGateCheck {
         request_id: u64,
         player_uuid: String,
+        player_name: String,
     },
     /// Read a player's `at.atpcraft.player.chat` records (their mirrored
     /// in-game chat history) from their own PDS (M16, the read side of the
@@ -534,6 +537,7 @@ mod tests {
             Command::JoinGateCheck {
                 request_id: 7,
                 player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
             },
             Command::FetchChat {
                 subject: "did:plc:z".into(),
