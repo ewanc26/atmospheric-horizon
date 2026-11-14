@@ -153,10 +153,10 @@ pub enum GameCommand {
         player_name: String,
     },
     /// Sweep the online players against the join gate (M42). The worker
-    /// re-reads the configured list once and resolves each player's UUID
-    /// through the identity service, then reports the linked players whose DID
-    /// has left the list. The game side throttles this to the sweep period on
-    /// `JoinGateState`.
+    /// reads the configured list through its M52 cache, refreshing when stale,
+    /// and resolves each player's UUID through the identity service, then
+    /// reports the linked players whose DID has left the list. The game side
+    /// throttles this to the sweep period on `JoinGateState`.
     JoinGateSweep { players: Vec<SweepPlayer> },
     /// Read a player's `at.atpcraft.player.chat` records (their mirrored
     /// in-game chat history) from their own PDS (M16, read side of the M5

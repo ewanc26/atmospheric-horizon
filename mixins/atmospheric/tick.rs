@@ -44,10 +44,11 @@ fn atmospheric_tick(game: &mut crate::game::Game<'_>) {
             )),
         );
     }
-    // M42: sweep the online players against the join gate. The worker
-    // re-reads the list and reports the linked players whose DID has left it;
-    // each is disconnected with atpcraft's reason. The worker never schedules
-    // this itself, so the tick is the only clock.
+    // M42: sweep the online players against the join gate. The worker checks
+    // the list through its M52 cache, refreshing when stale, and reports the
+    // linked players whose DID has left it; each is disconnected with
+    // atpcraft's reason. The worker never schedules this itself, so the tick is
+    // the only clock.
     if m::join_gate_sweep_due() {
         let players: Vec<m::SweepPlayer> = game
             .native_server_players()
