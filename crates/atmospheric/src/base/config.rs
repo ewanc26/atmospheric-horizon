@@ -67,8 +67,9 @@ pub struct Config {
     pub oauth_client_id: String,
     /// The OAuth scope requested at login (M53). Empty requests the mod's
     /// default (`atproto transition:generic`); a configured value replaces the
-    /// base scope, and the Colibri grants are still appended when the bridge
-    /// is enabled. atpcraft exposes the same knob as `bluesky-scope`.
+    /// base scope, and the grants the implemented features need are appended
+    /// (M54), as are the Colibri grants when the bridge is enabled. atpcraft
+    /// exposes the same knob as `bluesky-scope`.
     pub oauth_scope: String,
     /// Path of the player's skin PNG used by `/atmospheric skin` when the
     /// command gets no explicit path (M9). Empty means "not configured".

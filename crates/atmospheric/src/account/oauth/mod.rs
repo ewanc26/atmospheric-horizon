@@ -30,34 +30,85 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// third-party PDS authorization servers reliably support today.
 pub const DEFAULT_SCOPE: &str = "atproto transition:generic";
 
-/// Build the OAuth scope from a configured base plus the Colibri grants.
+/// The repo grants the implemented player-write features need: snapshots
+/// (M6), skins (M9) and chat (M5), plus blob uploads (M3/M9). `transition:generic`
+/// already covers these, so they are appended only to a narrow custom base
+/// (M54), matching atpcraft's `effectiveScope`.
+const PLAYER_GRANTS: [&str; 4] = [
+    "repo:at.atpcraft.player.snapshot?action=create&action=update&action=delete",
+    "repo:at.atpcraft.player.skin?action=create&action=update&action=delete",
+    "repo:at.atpcraft.player.chat?action=create&action=update&action=delete",
+    "blob:*/*",
+];
+
+/// The server account's descriptor write (M10/M25/M51). Only the server login
+/// requests it; a player login never writes `at.atpcraft.server.profile`.
+const SERVER_PROFILE_GRANT: &str =
+    "repo:at.atpcraft.server.profile?action=create&action=update&action=delete";
+
+/// Whether the scope carries the broad transitional grant, which already
+/// permits every repo write and blob upload the mod needs.
+fn has_transition_generic(scope: &str) -> bool {
+    scope
+        .split_ascii_whitespace()
+        .any(|token| token == "transition:generic")
+}
+
+/// Append `grant` unless the scope already declares it verbatim.
+fn append_missing(scope: &mut String, grant: &str) {
+    if !scope.split_ascii_whitespace().any(|token| token == grant) {
+        scope.push(' ');
+        scope.push_str(grant);
+    }
+}
+
+/// Build the player OAuth scope from a configured base plus the required
+/// grants.
 ///
-/// An empty (or whitespace-only) `base` uses [`DEFAULT_SCOPE`]. The Colibri
-/// grants are appended only when the bridge is enabled: the PDS only mints a
-/// service-auth token when the session carries the matching `rpc:` grant, and
-/// Colibri message/membership records need their repo grants. Without the
-/// bridge the base is returned unchanged, so ordinary logins request no more
-/// than before. Each grant is added at most once, so a base that already
-/// declares one does not duplicate it.
-pub fn scope_for(base: &str, bridge_enabled: bool, appview_did: &str) -> String {
+/// An empty (or whitespace-only) `base` uses [`DEFAULT_SCOPE`]. A narrow base
+/// gains the repo/blob grants the implemented player writes need; the broad
+/// `transition:generic` grant already covers them, so the default scope string
+/// is unchanged. The Colibri message/membership grants are appended when the
+/// bridge is enabled. The stream grant is server-only (see
+/// [`scope_for_server`]). Each grant is added at most once, so a base that
+/// already declares one does not duplicate it.
+pub fn scope_for(base: &str, bridge_enabled: bool, _appview_did: &str) -> String {
     let mut scope = base.trim().to_owned();
     if scope.is_empty() {
         scope = DEFAULT_SCOPE.into();
     }
-    if !bridge_enabled {
-        return scope;
-    }
-    let aud = crate::colibri::appview_service_ref(appview_did);
-    let grants = [
-        "repo:social.colibri.message?action=create&action=delete".to_owned(),
-        "repo:social.colibri.membership?action=create&action=delete".to_owned(),
-        format!("rpc:social.colibri.sync.subscribeEvents?aud={aud}"),
-    ];
-    for grant in grants {
-        if !scope.split_ascii_whitespace().any(|token| token == grant) {
-            scope.push(' ');
-            scope.push_str(&grant);
+    if !has_transition_generic(&scope) {
+        for grant in PLAYER_GRANTS {
+            append_missing(&mut scope, grant);
         }
+    }
+    if bridge_enabled {
+        append_missing(
+            &mut scope,
+            "repo:social.colibri.message?action=create&action=delete",
+        );
+        append_missing(
+            &mut scope,
+            "repo:social.colibri.membership?action=create&action=delete",
+        );
+    }
+    scope
+}
+
+/// Build the server account's OAuth scope: the player scope plus its own
+/// descriptor grant and, when the bridge is enabled, the Colibri stream grant
+/// whose `rpc:` audience the PDS checks before minting a service-auth token.
+pub fn scope_for_server(base: &str, bridge_enabled: bool, appview_did: &str) -> String {
+    let mut scope = scope_for(base, bridge_enabled, appview_did);
+    if !has_transition_generic(&scope) {
+        append_missing(&mut scope, SERVER_PROFILE_GRANT);
+    }
+    if bridge_enabled {
+        let aud = crate::colibri::appview_service_ref(appview_did);
+        append_missing(
+            &mut scope,
+            &format!("rpc:social.colibri.sync.subscribeEvents?aud={aud}"),
+        );
     }
     scope
 }
