@@ -137,7 +137,7 @@ All commands are under `/atmospheric`:
 | `persist_session` | `true` | Keep the refresh token in `session.json` across restarts |
 | `post_death_messages` | `false` | Post a text post when you die |
 | `post_chat_messages` | `false` | Mirror every chat line to your repo |
-| `chat_server_id` | `horizon-client` | The `server` field on chat records |
+| `chat_server_id` | empty | Optional override for the chat record's `server` field; empty uses the signing key id, matching atpcraft |
 | `skin_path`, `cape_path` | empty | Default PNGs for `/atmospheric skin` |
 | `skin_model` | `default` | Skin model: `default` or `slim` |
 | `oauth_client_id` | empty | Hosted client-metadata URL when loopback registration is unsupported |
@@ -242,7 +242,7 @@ M35 supplies the mapping, M36 lets a player claim a link in game, M37 checks a l
 
 ## Roadmap
 
-M1–M21 shipped through v0.1.0 and v0.2.0, and M23 (social-graph writes) through M42 (online whitelist sweep) shipped in v0.3.1, with M44 (generic record browser), M45 (linked-player names), M46 (lexicon hosting) and M47 (atpcraft-compatible name sanitization) on `main` for the next release; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, labeler issuance, RPG discovery, aspect capture/restore, and the next read/write surfaces.
+M1–M21 shipped through v0.1.0 and v0.2.0, and M23 (social-graph writes) through M42 (online whitelist sweep) shipped in v0.3.1, with M44 (generic record browser), M45 (linked-player names), M46 (lexicon hosting), M47 (atpcraft-compatible name sanitization) and M48 (signing-key chat server id) on `main` for the next release; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, labeler issuance, RPG discovery, aspect capture/restore, and the next read/write surfaces.
 
 ### Porting atpcraft
 
@@ -252,7 +252,7 @@ atpcraft is a server-side Fabric mod, while Horizon native mods can hook the ser
 | --- | --- |
 | Bluesky sign-in | **M8**: localhost OAuth login (`/atmospheric login <handle>` — PAR + PKCE + DPoP with a loopback redirect); app-password login remains the fallback via bare `/atmospheric login` |
 | Profile pronouns and display names | **M24**: `/atmospheric profile <did\|handle>` reads the AppView's `app.bsky.actor.getProfile` and the direct `app.bsky.actor.profile` record at rkey `self`. The direct record's pronouns win when that read succeeds (even when the field is absent); a failed record read falls back to the AppView, matching atpcraft's precedence. Both reads are unauthenticated. **M45** composes the same display name and pronouns into a linked joining player's in-game name on a server; **M47** first reduces the display name to atpcraft's valid 16-character Minecraft name (handle username fallback) and keeps the suffix plain text, so atpcraft's gray chat-only suffix is not reproduced |
-| Chat messages as records (`at.atpcraft.player.chat`) | **M5**: the chat hook mirrors each line, and the worker publishes TID-keyed records when `post_chat_messages` is on; `/atmospheric chat <text>` always publishes one. **M16** (read side): `/atmospheric chat-of <did\|handle>` lists the collection on the subject's own PDS, unauthenticated, and reports the count plus the newest messages — chat records are unsigned by design |
+| Chat messages as records (`at.atpcraft.player.chat`) | **M5**: the chat hook mirrors each line, and the worker publishes TID-keyed records when `post_chat_messages` is on; `/atmospheric chat <text>` always publishes one. **M16** (read side): `/atmospheric chat-of <did\|handle>` lists the collection on the subject's own PDS, unauthenticated, and reports the count plus the newest messages — chat records are unsigned by design. **M48** writes the server's Ed25519 key id into the `server` field by default (an explicit `chat_server_id` overrides it), matching atpcraft's chat writer |
 | Player state snapshots (`at.atpcraft.player.snapshot`, `defs`) | **M6**: the keybind or `/atmospheric snapshot` publishes a self-endorsed record (the worker generates and persists an Ed25519 key; rkey = key id, monotonic version). **M13** (read side): `/atmospheric player <did\|handle>` pages `com.atproto.repo.listRecords`, takes the highest `version`, and verifies the endorsement against your own key or `trusted_server_keys` |
 | Reading other players' snapshots (presence) | **M13**: as above — the client-side half of atpcraft's player-data sync |
 | Skins and capes as blobs on the PDS | **M9**: skin/cape PNGs are uploaded as blobs and published as an Ed25519-endorsed `at.atpcraft.player.skin` record (rkey = key id, `putRecord` upsert) via `/atmospheric skin [path] [default\|slim]`. **M14** (read side): `/atmospheric skin-of <did\|handle>` verifies the endorsement against your own key or `trusted_server_keys`, then downloads the skin/cape blobs into the mod's `skins/` folder — only when the record verifies |
