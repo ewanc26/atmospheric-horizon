@@ -15,13 +15,11 @@ This is the successor to [jollywhoppers-socialsync](https://github.com/ewanc26/j
 
 ## Status
 
-**v0.2.0** (13 November 2026) is the current release. The mod is usable in-game today through the `atmospheric-worker` sidecar: the injected runtime is std-only, and every network or disk operation happens in the worker. Public reads work signed out; posting and record writes need a Bluesky account.
+**v0.3.0** (14 November 2026) is the current release. The mod is usable in-game today through the `atmospheric-worker` sidecar: the injected runtime is std-only, and every network or disk operation happens in the worker. Public reads work signed out; posting and record writes need a Bluesky account.
 
-Shipped in v0.2.0: OAuth and app-password login, text and screenshot posts, notifications, atpcraft-compatible chat, signed snapshots and skins, a server profile, read sides for lists, labels, presence, skins, chat history and server profiles, social-graph reads, and reply/like/repost.
+Shipped in v0.3.0: OAuth and app-password login, text and screenshot posts, notifications, atpcraft-compatible chat, signed snapshots and skins, a server profile, read sides for lists, labels, presence, skins, chat history and server profiles, social-graph reads and writes, reply/like/repost, profile reads, a separate server account, the Colibri chat bridge and its follow-ups, and the optional server-side identity service with in-game and browser linking (M23–M40).
 
-On `main` for the next release: social-graph writes — follow/unfollow, block/unblock and mute/unmute (`M23`) — Bluesky profile reads with atpcraft's pronoun precedence (`M24`), a separate, persisted server account with its own OAuth session and server-profile publishing (`M25`), the Colibri chat-bridge core (`M26`), its membership/rotation repair (`M27`), server event notices (`M28`), the presence fallback/pending-approval notice (`M29`), the local Colibri profile prompt (`M30`), Colibri reconnect/send throttling (`M31`), local player Colibri membership (`M32`), Colibri incoming chat hygiene (`M33`), Colibri status detail (`M34`), the optional server-side identity service (`M35`), the in-game link claim (`M36`), the server-wide Colibri profile check (`M37`), the linked-account join gate (`M38`), browser self-service linking (`M39`) and browser linking from the join-gate refusal (`M40`).
-
-Not yet: launcher registry distribution, which waits on third-party native-mod support upstream ([#28](https://github.com/ewanc26/atmospheric-horizon/issues/28)); the online whitelist sweep, label issuance, RPG item discovery and full player-data aspect capture/restore. M25 supplies the server account, M26/M27 run the Colibri bridge, M35 supplies the shared UUID-to-DID map, M36 lets a player claim a link in game, M37 prompts a linked player who joins without a Colibri profile, M38 refuses a linked player who is not on the configured gate list, M39 completes the link in the browser, and M40 puts a fresh link on the refusal screen for an unlinked player. Issuance, capture and RPG discovery remain separate milestones.
+Not yet: launcher registry distribution, which waits on third-party native-mod support upstream ([#28](https://github.com/ewanc26/atmospheric-horizon/issues/28)); the online whitelist sweep, label issuance, RPG item discovery and full player-data aspect capture/restore. The separate server account (M25), the Colibri bridge (M26–M34) and the shared UUID-to-DID map (M35–M40) are the foundations those remaining milestones build on; issuance, capture and RPG discovery remain separate milestones.
 
 ## Features
 
@@ -235,7 +233,7 @@ M35 supplies the mapping, M36 lets a player claim a link in game, M37 checks a l
 
 ## Roadmap
 
-M1–M21 are shipped, through v0.1.0 and v0.2.0, and M23 (social-graph writes), M24 (profile reads), M25 (server account), M26 (Colibri bridge core), M27 (Colibri membership/rotation), M28 (server event notices), M29 (presence fallback/pending-approval notice), M30 (local Colibri profile prompt), M31 (Colibri reconnect/send throttle), M32 (local Colibri player membership), M33 (Colibri chat hygiene), M34 (Colibri status detail), M35 (server-side identity service), M36 (in-game link claim), M37 (server-wide Colibri profile checks), M38 (linked-account join gate), M39 (browser self-service linking) and M40 (browser link from the gate refusal) are on `main` for the next release; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, the online whitelist sweep, labeler issuance, RPG discovery, aspect capture/restore, and the next read/write surfaces.
+M1–M21 shipped through v0.1.0 and v0.2.0, and M23 (social-graph writes) through M40 (browser link from the gate refusal) shipped in v0.3.0; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, the online whitelist sweep, labeler issuance, RPG discovery, aspect capture/restore, and the next read/write surfaces.
 
 ### Porting atpcraft
 
