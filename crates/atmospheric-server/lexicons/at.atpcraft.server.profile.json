@@ -1,0 +1,125 @@
+{
+  "lexicon": 1,
+  "id": "at.atpcraft.server.profile",
+  "description": "Self-published descriptor of an ATPcraft Minecraft server.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "literal:self",
+      "description": "The server's self-description, written to the server account's own repository at rkey self.",
+      "record": {
+        "type": "object",
+        "required": [
+          "name",
+          "minecraftVersion",
+          "atpcraftVersion",
+          "signingKey",
+          "updatedAt"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "address": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "minecraftVersion": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "atpcraftVersion": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "signingKey": {
+            "type": "ref",
+            "ref": "#signingKey"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 64,
+              "knownValues": [
+                "join-gate",
+                "player-data-sync",
+                "skin-sync",
+                "labeler"
+              ]
+            },
+            "maxLength": 32,
+            "description": "Enabled features, sorted and unique."
+          },
+          "operator": {
+            "type": "ref",
+            "ref": "#operator"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    },
+    "signingKey": {
+      "type": "object",
+      "description": "The server's Ed25519 endorsement public key.",
+      "required": [
+        "keyId",
+        "publicKey",
+        "alg"
+      ],
+      "properties": {
+        "keyId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "publicKey": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Base64 (standard) X.509/SPKI-encoded Ed25519 public key."
+        },
+        "alg": {
+          "type": "string",
+          "maxLength": 32,
+          "knownValues": [
+            "ed25519"
+          ]
+        }
+      }
+    },
+    "operator": {
+      "type": "object",
+      "description": "Optional operator/contact details.",
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did"
+        },
+        "handle": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "website": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 2048
+        },
+        "contact": {
+          "type": "string",
+          "maxLength": 256
+        }
+      }
+    }
+  }
+}

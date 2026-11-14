@@ -1,0 +1,190 @@
+{
+  "lexicon": 1,
+  "id": "at.atpcraft.player.defs",
+  "description": "Shared definitions for ATPcraft player-data records.",
+  "defs": {
+    "summary": {
+      "type": "object",
+      "description": "Human-readable summary of the player's state at snapshot time.",
+      "required": [
+        "username",
+        "dimension",
+        "position",
+        "health",
+        "food",
+        "xpLevel",
+        "gameMode"
+      ],
+      "properties": {
+        "username": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "dimension": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "position": {
+          "type": "ref",
+          "ref": "#position"
+        },
+        "health": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Health as a decimal string; the atproto data model has no floats."
+        },
+        "food": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "xpLevel": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "gameMode": {
+          "type": "string",
+          "maxLength": 32,
+          "knownValues": [
+            "survival",
+            "creative",
+            "adventure",
+            "spectator"
+          ]
+        },
+        "team": {
+          "type": "ref",
+          "ref": "#teamSummary"
+        },
+        "scores": {
+          "type": "array",
+          "items": {
+            "type": "ref",
+            "ref": "#score"
+          },
+          "maxLength": 1024,
+          "description": "Scoreboard scores, sorted by objective name."
+        }
+      }
+    },
+    "position": {
+      "type": "object",
+      "description": "Floored block coordinates.",
+      "required": [
+        "x",
+        "y",
+        "z"
+      ],
+      "properties": {
+        "x": {
+          "type": "integer"
+        },
+        "y": {
+          "type": "integer"
+        },
+        "z": {
+          "type": "integer"
+        }
+      }
+    },
+    "score": {
+      "type": "object",
+      "required": [
+        "objective",
+        "value"
+      ],
+      "properties": {
+        "objective": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "value": {
+          "type": "integer"
+        }
+      }
+    },
+    "teamSummary": {
+      "type": "object",
+      "description": "The player's team at snapshot time, as plain text.",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "prefix": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "suffix": {
+          "type": "string",
+          "maxLength": 256
+        }
+      }
+    },
+    "aspect": {
+      "type": "object",
+      "description": "One opaque player-data aspect; the payload is uploaded as a blob.",
+      "required": [
+        "name",
+        "blob"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 64,
+          "knownValues": [
+            "core",
+            "advancements",
+            "stats",
+            "ops",
+            "scoreboard",
+            "team",
+            "inventory",
+            "ender_chest",
+            "equipment",
+            "effects",
+            "respawn",
+            "recipes",
+            "chat"
+          ]
+        },
+        "blob": {
+          "type": "blob",
+          "accept": [
+            "application/octet-stream"
+          ],
+          "maxSize": 16777216
+        }
+      }
+    },
+    "endorsement": {
+      "type": "object",
+      "required": [
+        "server",
+        "alg",
+        "sig"
+      ],
+      "properties": {
+        "server": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Signing server key id."
+        },
+        "alg": {
+          "type": "string",
+          "maxLength": 32,
+          "knownValues": [
+            "ed25519"
+          ]
+        },
+        "sig": {
+          "type": "bytes",
+          "maxLength": 64,
+          "description": "Ed25519 signature over the canonical payload."
+        }
+      }
+    }
+  }
+}
