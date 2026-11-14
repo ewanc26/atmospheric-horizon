@@ -1156,6 +1156,14 @@ listRecords was unauthenticated; runtime tests pin the command/event wire
 shapes, the HUD summary and the empty-collection wording. Real-PDS wire
 check: `pds_check` with `ATMOSPHERIC_RECORDS="<did|handle>|<collection>"`.
 
+### M45: linked-player display names and pronouns
+
+`player_logged_in` sends `Command::CheckPlayerProfile { player_uuid, player_name }` next to M37's Colibri check (new runtime helper `check_player_profile`). On the worker, `check_player_profile` resolves the UUID with the M35 identity-service read used by M37 (`GET <server_api_url>/v1/links/{uuid}`), then reads the profile with M24's `profiles::fetch_profile`: `app.bsky.actor.getProfile` against `appview_url` plus the direct `app.bsky.actor.profile` record at rkey `self`, with the direct record's pronouns preferred. Both reads are unauthenticated and carry only the DID, so the feature works logged out and needs no per-player write token.
+
+`profiles::nickname_for` composes the name atpcraft shows for a linked player: the display name when non-empty (the Minecraft name otherwise) plus ` (pronouns)` when the profile has usable pronouns. Control characters are replaced with spaces, whitespace collapses, and the result is capped at `NICKNAME_MAX_LEN` (32) characters; an empty result or one equal to the Minecraft name emits nothing. The worker then emits `Event::PlayerProfile { player_uuid, player_name, nickname }`. The runtime queues it as `RemoteNickname` (bounded, 32 entries); the tick hook applies each with Horizon's `native_set_nickname(uuid, Some(name))`, which updates chat and the player list for the session. That helper is plain text, so atpcraft's gray chat-only pronoun suffix is not reproduced — the same values appear in both places. Every failure (unlinked player, failed link or profile read, unusable profile) is quiet and leaves the vanilla name untouched.
+
+Verified: profile-unit tests pin display-name+pronoun composition, the vanilla fallback for pronouns only, no event when nothing changes, control/whitespace cleanup and the 32-character cap; runtime tests pin the command and event wire shapes, the empty HUD line and the nickname queue; a worker test against the stub identity service and AppView asserts the composed nickname for a linked player and silence for an unlinked one, reusing the M37 link path and M24 profile path. No live identity service, AppView or PDS was contacted.
+
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
 `/atmospheric skin-of <did|handle>` sends `Command::FetchPlayerSkin` — the

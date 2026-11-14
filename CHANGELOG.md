@@ -20,6 +20,12 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   newest five records as compact JSON in the HUD (collapsed to one line and
   truncated). Reuses the M13/M16 read path: no new endpoint and no new stored
   data.
+- **M45 — linked-player display names and pronouns (#109).** A linked player's
+  Bluesky display name and pronouns are applied as their in-game name when they
+  join a server (plain text in chat and the player list), using the profile
+  reads already used by `/atmospheric profile`. Unlinked players and failed
+  reads leave the vanilla name alone; no new endpoint, credential or stored
+  data.
 
 ## [0.3.1] — 2026-11-14
 
