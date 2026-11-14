@@ -1,6 +1,6 @@
 //! End-to-end HTTP tests against the real router, without opening a TCP port.
 
-use atmospheric_server::{ServerConfig, app, store::LinkStore};
+use atmospheric_server::{ServerConfig, app, labeler::Labeler, store::LinkStore};
 use axum::{
     Router,
     body::Body,
@@ -26,6 +26,7 @@ fn config() -> ServerConfig {
         link_token: Some(LINK_TOKEN.into()),
         public_url: Some("https://links.example".into()),
         oauth_resolver: None,
+        labeler: None,
     }
 }
 
@@ -447,6 +448,147 @@ async fn lexicons_are_public_and_unknown_documents_are_not_found() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
     }
+
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn labeler_emits_and_serves_query_labels() {
+    let path = temp_path("labeler");
+    let store = LinkStore::open(&path).unwrap();
+    let labeler = Labeler::open(path.parent().unwrap().join("labeler"), "did:plc:labeler").unwrap();
+    let mut config = config();
+    config.labeler = Some(labeler);
+    let router = app(store, config);
+
+    let (status, _) = request(
+        &router,
+        "POST",
+        "/v1/labeler/labels",
+        None,
+        Some(json!({ "uri": "did:plc:alice", "val": "online" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, body) = request(
+        &router,
+        "POST",
+        "/v1/labeler/labels",
+        Some(TOKEN),
+        Some(json!({ "uri": "did:plc:alice", "val": "online" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["seq"], 1);
+    assert_eq!(body["label"]["src"], "did:plc:labeler");
+    assert_eq!(body["label"]["uri"], "did:plc:alice");
+    assert_eq!(body["label"]["val"], "online");
+    assert!(body["label"].get("neg").is_none());
+    assert!(body["label"]["sig"]["$bytes"].as_str().unwrap().len() > 80);
+
+    let (status, body) = request(
+        &router,
+        "GET",
+        "/xrpc/com.atproto.label.queryLabels",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "InvalidRequest");
+    assert!(body["message"].as_str().unwrap().contains("uriPatterns"));
+
+    let (status, body) = request(
+        &router,
+        "GET",
+        "/xrpc/com.atproto.label.queryLabels?uriPatterns=did%3Aplc%3Aalice",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["labels"].as_array().unwrap().len(), 1);
+    assert!(body.get("cursor").is_none());
+
+    let (status, body) = request(
+        &router,
+        "GET",
+        "/xrpc/com.atproto.label.queryLabels?uriPatterns=did%3Aplc%3A%2A&sources=did%3Aplc%3Alabeler",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["labels"].as_array().unwrap().len(), 1);
+
+    let (status, body) = request(
+        &router,
+        "GET",
+        "/xrpc/com.atproto.label.queryLabels?uriPatterns=%2A&sources=did%3Aplc%3Aother",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["labels"].as_array().unwrap().len(), 0);
+
+    for (uri, val) in [("did:plc:bob", "player"), ("did:plc:carol", "admin")] {
+        let (status, _) = request(
+            &router,
+            "POST",
+            "/v1/labeler/labels",
+            Some(TOKEN),
+            Some(json!({ "uri": uri, "val": val })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let (status, body) = request(
+        &router,
+        "GET",
+        "/xrpc/com.atproto.label.queryLabels?uriPatterns=%2A&limit=2",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["labels"].as_array().unwrap().len(), 2);
+    assert_eq!(body["cursor"], "2");
+    let (status, body) = request(
+        &router,
+        "GET",
+        "/xrpc/com.atproto.label.queryLabels?uriPatterns=%2A&limit=2&cursor=2",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["labels"].as_array().unwrap().len(), 1);
+
+    let (status, _) = request(
+        &router,
+        "POST",
+        "/v1/labeler/labels",
+        Some(TOKEN),
+        Some(json!({
+            "uri": "did:plc:dave",
+            "val": "online",
+            "exp": "1970-01-01T00:00:01Z"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, body) = request(
+        &router,
+        "GET",
+        "/xrpc/com.atproto.label.queryLabels?uriPatterns=did%3Aplc%3Adave",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["labels"].as_array().unwrap().len(), 0);
 
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }

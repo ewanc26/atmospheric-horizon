@@ -9,6 +9,7 @@
 
 mod browser;
 mod health;
+mod label;
 mod lexicon;
 mod link;
 mod pairing;
@@ -16,6 +17,7 @@ mod pairing;
 use crate::{
     browser::BrowserLinks,
     error::ApiError,
+    labeler::Labeler,
     oauth::{OAuthClient, Resolver},
     store::LinkStore,
 };
@@ -44,6 +46,8 @@ pub struct ServerConfig {
     /// services; integration tests point handle and DID resolution at a stub.
     #[doc(hidden)]
     pub oauth_resolver: Option<Resolver>,
+    /// The labeler service, when `ATMOSPHERIC_SERVER_LABELER_DID` is set.
+    pub labeler: Option<Labeler>,
 }
 
 #[derive(Clone)]
@@ -54,6 +58,7 @@ pub struct AppState {
     link_token: Option<Arc<str>>,
     public_url: Option<Arc<str>>,
     oauth: Option<OAuthClient>,
+    labeler: Option<Labeler>,
 }
 
 impl AppState {
@@ -80,6 +85,7 @@ impl AppState {
             link_token: token(config.link_token),
             public_url,
             oauth,
+            labeler: config.labeler,
         }
     }
 
@@ -138,6 +144,11 @@ pub fn app(store: LinkStore, config: ServerConfig) -> Router {
         )
         .route("/v1/pairings", post(pairing::create_pairing))
         .route("/v1/pairings/claim", post(pairing::claim_pairing))
+        .route("/v1/labeler/labels", post(label::emit_label))
+        .route(
+            "/xrpc/com.atproto.label.queryLabels",
+            get(label::query_labels),
+        )
         .route(
             "/v1/browser/pairings",
             post(browser::create_browser_pairing),

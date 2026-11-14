@@ -1,5 +1,6 @@
 use atmospheric_server::{
     ServerConfig, app,
+    labeler::Labeler,
     store::{LinkStore, default_links_path},
 };
 use std::{env, net::SocketAddr, path::PathBuf};
@@ -50,6 +51,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "atmospheric-server: browser linking is disabled; set ATMOSPHERIC_SERVER_PUBLIC_URL and ATMOSPHERIC_SERVER_LINK_TOKEN"
         );
     }
+    let labeler_did = env::var("ATMOSPHERIC_SERVER_LABELER_DID")
+        .ok()
+        .map(|did| did.trim().to_owned())
+        .filter(|did| !did.is_empty());
+    let labeler = match labeler_did {
+        Some(did) => {
+            let labeler = Labeler::open(data_dir.join("labeler"), &did)?;
+            println!(
+                "atmospheric-server: labeler enabled as {did} (signing key {})",
+                labeler.did_key()
+            );
+            Some(labeler)
+        }
+        None => {
+            eprintln!("atmospheric-server: labeler disabled; set ATMOSPHERIC_SERVER_LABELER_DID");
+            None
+        }
+    };
     let listener = TcpListener::bind(address).await?;
     println!(
         "atmospheric-server {} listening on http://{address} (data: {})",
@@ -61,6 +80,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         link_token,
         public_url,
         oauth_resolver: None,
+        labeler,
     };
     axum::serve(listener, app(store, config))
         .with_graceful_shutdown(shutdown_signal())

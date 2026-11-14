@@ -53,6 +53,7 @@ fn config(resolver: Resolver) -> ServerConfig {
         link_token: Some(LINK_TOKEN.into()),
         public_url: Some("https://links.example".into()),
         oauth_resolver: Some(resolver),
+        labeler: None,
     }
 }
 
