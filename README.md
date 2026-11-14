@@ -331,7 +331,7 @@ No telemetry, no analytics, no other endpoints. The optional identity service ab
 
 ## Layout
 
-Rust source in migrated crates follows `<scope>/[<subscope>/]<atom>.rs`: directories are scopes, files are single-word atoms, and `mod.rs` only declares a scope. `crates/atmospheric-server` and the mixin helper scopes are complete; the worker and protocol modules are being migrated incrementally.
+Rust source in migrated crates follows `<scope>/[<subscope>/]<atom>.rs`: directories are scopes, files are single-word atoms, and `mod.rs` only declares a scope. `crates/atmospheric-server` and the mixin helper scopes are complete; the worker and protocol modules are being migrated incrementally. `scripts/check-layout.sh` enforces the naming and migrated-scope placement rules in CI.
 
 - `mixins/atmospheric/` — horizon-mixins declarations: the injected std-only `runtime.rs` (which also spawns and bridges the sidecar), its placeholder hook, `horizon-mixin.toml`, and helper atoms grouped into `colibri/` and `gate/` scopes.
 - `crates/atmospheric/` — the protocol library: `config`, `session`, `oauth` (M8), `actions`, `notifications`, `lists` (M11/M15), `labels` (M12), `presence` (M13), `profiles` (M24), `skins` (M14), `chats` (M16), `servers` (M19), `graph` (M20 reads/M23 writes), `identity` (M36–M40), `interactions` (M21), `records` (atpcraft lexicon types), `tid`, `signing` (Ed25519 endorsements) and `worker`, plus the `atmospheric-worker` bin and its end-to-end test (`tests/sidecar.rs`).

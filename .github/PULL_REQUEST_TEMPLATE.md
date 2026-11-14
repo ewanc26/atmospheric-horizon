@@ -8,6 +8,7 @@
 
 ## Checklist
 
+- [ ] `bash scripts/check-layout.sh` passes
 - [ ] `cargo fmt --all --check` passes
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes
 - [ ] `cargo test --workspace --locked` passes

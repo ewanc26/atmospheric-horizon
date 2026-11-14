@@ -18,6 +18,7 @@ Thanks for considering a contribution.
 - Run before opening a PR:
 
 ```bash
+bash scripts/check-layout.sh
 cargo fmt
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked

@@ -19,7 +19,7 @@ The optional `atmospheric-server` binary is not in this diagram: it is a separat
 
 ## Source layout
 
-New and migrated Rust source follows `<scope>/[<subscope>/]<atom>.rs`: the directory names the domain scope, the final file is a single-word atom, and `mod.rs` only declares the scope. The layout is being migrated incrementally rather than in one repository-wide move, because the injected module and public paths are build inputs.
+New and migrated Rust source follows `<scope>/[<subscope>/]<atom>.rs`: the directory names the domain scope, the final file is a single-word atom, and `mod.rs` only declares the scope. The layout is being migrated incrementally rather than in one repository-wide move, because the injected module and public paths are build inputs. `scripts/check-layout.sh` is the dependency-free CI guard: it rejects non-atom Rust filenames everywhere, requires scope placement and `mod.rs` in the migrated server crate, and keeps explicit exceptions for Cargo target paths such as `atmospheric-worker.rs`.
 
 `crates/atmospheric-server` is the first complete slice: `api/` holds the router, state and handler atoms; `browser/` the one-time link state; `error/` the HTTP error mapping; `model/` the wire types and validation; `oauth/` the client, DPoP, resolver and encoding atoms; `page/` the browser HTML; and `store/` the in-memory store plus atomic file persistence. The public `app`, `ServerConfig`, `model`, `oauth` and `store` paths are unchanged.
 
