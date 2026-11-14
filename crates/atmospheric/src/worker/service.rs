@@ -1164,6 +1164,15 @@ impl Worker {
         Self::write_server_profile(agent, did, handle, &key, &config).await
     }
 
+    /// Re-publish the descriptor after a server-account login or a startup
+    /// resume (M51), as atpcraft does. Best-effort: a failed write is reported
+    /// but never undoes the session.
+    async fn auto_publish_server_profile(&mut self) {
+        if let Err(error) = self.post_server_profile_as_server().await {
+            self.fail(format!("could not publish the server profile: {error}"));
+        }
+    }
+
     /// Shared server-profile writer. Identity fields and capabilities come
     /// from the settings file; the `signingKey` block is the mod's persisted
     /// Ed25519 key; `createdAt` is preserved from the existing record.
@@ -2167,6 +2176,7 @@ impl Worker {
                 }
                 self.emit_server_account(SessionState::LoggedIn { did });
                 self.maybe_start_colibri().await;
+                self.auto_publish_server_profile().await;
             }
             Err(error) => self.emit_server_account(SessionState::Failed {
                 message: error.to_string(),
@@ -2421,6 +2431,7 @@ impl Worker {
                 }
                 self.emit_server_account(SessionState::LoggedIn { did });
                 self.maybe_start_colibri().await;
+                self.auto_publish_server_profile().await;
             }
             Err(error) => {
                 self.server_stored_session = None;
@@ -7221,8 +7232,8 @@ mod tests {
             }
         ));
 
-        // The server account owns the descriptor publish; the shared writer
-        // reads the existing record and upserts at rkey `self`.
+        // Login already auto-published the descriptor (M51); the manual
+        // command refreshes it again through the shared writer.
         command_tx.send(Command::PostServerProfileAsServer).unwrap();
         match wait_for(&event_rx, |e| matches!(e, Event::Posted { .. })) {
             Event::Posted { uri } => {
@@ -7235,7 +7246,11 @@ mod tests {
             .into_iter()
             .filter(|r| r.path == "/xrpc/com.atproto.repo.putRecord")
             .collect();
-        assert_eq!(puts.len(), 1, "one server-profile upsert");
+        assert_eq!(
+            puts.len(),
+            2,
+            "automatic and explicit server-profile upserts"
+        );
         assert_eq!(
             puts[0].authorization.as_deref(),
             Some("DPoP stub-oauth-access-1")
@@ -7262,6 +7277,80 @@ mod tests {
             other => panic!("expected ServerAccount(LoggedOut), got {other:?}"),
         }
         assert!(!dir.join(SERVER_SESSION_FILE).exists());
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn startup_resumes_server_account_and_publishes_profile() {
+        let stub = StubAuthServer::start(false);
+        let dir = temp_dir("server-profile-resume");
+        let key = oauth::DpopKey::generate();
+        let stored = session::StoredSession {
+            pds_url: stub.url.clone(),
+            did: "did:plc:stubuser".into(),
+            handle: "stub.test".into(),
+            refresh_jwt: "stub-oauth-refresh-1".into(),
+            oauth: Some(session::StoredOAuth {
+                dpop_jwk: key.to_jwk_json(),
+                token_endpoint: format!("{}/token", stub.url),
+                issuer: stub.url.clone(),
+                client_id: oauth::client_id(oauth::DEFAULT_SCOPE),
+                scope: oauth::DEFAULT_SCOPE.into(),
+            }),
+        };
+        std::fs::write(
+            dir.join(SERVER_SESSION_FILE),
+            serde_json::to_string(&stored).unwrap(),
+        )
+        .unwrap();
+
+        let (command_tx, event_rx, handle) = spawn_worker_at(dir, &stub);
+        match wait_for(&event_rx, |e| {
+            matches!(
+                e,
+                Event::ServerAccount {
+                    state: SessionState::LoggedIn { .. },
+                    ..
+                }
+            )
+        }) {
+            Event::ServerAccount {
+                state: SessionState::LoggedIn { did },
+                ..
+            } => assert_eq!(did, "did:plc:stubuser"),
+            other => panic!("expected ServerAccount(LoggedIn), got {other:?}"),
+        }
+
+        // The automatic publish has no success event; wait for the PDS write.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline
+            && !stub
+                .requests()
+                .iter()
+                .any(|r| r.path == "/xrpc/com.atproto.repo.putRecord")
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let puts: Vec<_> = stub
+            .requests()
+            .into_iter()
+            .filter(|r| r.path == "/xrpc/com.atproto.repo.putRecord")
+            .collect();
+        assert_eq!(puts.len(), 1, "startup auto-published once");
+        assert_eq!(
+            puts[0].authorization.as_deref(),
+            Some("DPoP stub-oauth-access-2")
+        );
+        let put: serde_json::Value = serde_json::from_str(&puts[0].body).unwrap();
+        assert_eq!(put["collection"], "at.atpcraft.server.profile");
+        assert_eq!(put["rkey"], "self");
+        assert_eq!(put["record"]["name"], "atmospheric-horizon");
+        assert_eq!(
+            put["record"]["capabilities"],
+            serde_json::json!(["skin-sync"])
+        );
 
         command_tx.send(Command::Shutdown).unwrap();
         handle.join().unwrap();
