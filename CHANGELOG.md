@@ -105,6 +105,14 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   close. The public XRPC routes also answer permissive CORS for browser
   consumers. No environment variable, record shape or outbound request is
   added.
+- **M59 — labeler service declaration (#140).** Add `labeler_enabled` (default
+  false). A successful server-account login and a persisted session resuming at
+  startup upsert `app.bsky.labeler.service` at rkey `self`, preserving
+  `createdAt`, declaring the 11 label values with their client metadata. A
+  narrow server-account OAuth scope gains the declaration write grant, and the
+  server profile advertises `labeler` when the flag is on. No PLC identity
+  update or game trigger is added, so the labeler is not yet discoverable
+  through the DID document. The record is stored on the PDS, not locally.
 
 ## [0.3.1] — 2026-11-14
 
