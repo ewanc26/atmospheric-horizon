@@ -379,7 +379,9 @@ the non-PNG/no-path rejections (no upload happens).
 
 `/atmospheric server` sends `Command::PostServerProfile`; the worker builds
 the descriptor from the settings file (identity fields, capabilities, game
-version), the logged-in DID/handle as `operator`, and the mod's persisted
+version; a blank `server_name` falls back to `client_name`, and an empty
+capabilities list is derived from active features), the logged-in DID/handle
+as `operator`, and the mod's persisted
 Ed25519 key as the `signingKey` block (`publicKey` = base64-standard SPKI).
 It is upserted with `putRecord` (validate=false) at the literal rkey `self`;
 a prior `getRecord` preserves `createdAt` across re-publishes (first publish
@@ -1186,6 +1188,14 @@ Verified: profile tests pin unicode/punctuation stripping, whitespace-to-undersc
 atpcraft's chat writer receives `signingKey.keyId` and writes it as `PlayerChatRecord.server`. This mod previously wrote `config.chat_server_id`, default `horizon-client`. `chat_server_id` is now an optional override: when blank (the default), `Worker::chat_record_server_id` loads or creates the persisted Ed25519 endorsement key through the existing M6 path and uses its key id. An explicit value still wins, so existing operators can keep a custom identifier. The key id algorithm is the one M6/M13 already use (`signing::key_id_of`), so chats, snapshots and skins now name the same server key.
 
 Verified: the existing worker test pins the explicit override; a new stub-PDS test logs in, posts chat with no override, and asserts `record.server` equals the persisted `signing-key.json` key id. No new endpoint, credential or record shape.
+
+### M49: server profile name and capabilities
+
+atpcraft builds `ServerProfileWriter.Identity` with `name = atproto-server-name.ifBlank { bluesky-client-name }`, and `ServerCapabilities.of` derives `join-gate`, `player-data-sync`, `skin-sync` and `labeler` from the live feature wiring. This mod previously fell back to the account handle and defaulted `server_capabilities` to `player-data-sync`/`skin-sync` even though server-side player-data capture is not implemented.
+
+`server_profile_name` now uses `server_name` when non-empty and `client_name` otherwise. `server_profile_capabilities` uses an explicit non-empty `server_capabilities` as an override; otherwise it advertises `skin-sync` (M9/M14 are implemented) and `join-gate` when the gate is armed. `player-data-sync` and `labeler` remain absent until #111/#112, so the descriptor no longer overstates the server's capabilities. No new endpoint, credential or record shape.
+
+Verified: config tests pin the `client_name` default and the empty capability override; worker unit tests pin the name fallback and the join-gate/skin-sync derivation with an explicit override. No live PDS was contacted.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
