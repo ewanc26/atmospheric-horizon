@@ -12,6 +12,13 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+### Changed
+
+- **Protocol scope layout.** Move the protocol modules under `account/`,
+  `base/`, `social/`, `colibri/` and `worker/` scopes. Crate-root re-exports
+  preserve every public module path, and the layout guard now enforces scope
+  placement in both Rust crates.
+
 ### Fixed
 
 - **Injected notice helpers (#92).** Keep `Text::component()` values alive in
