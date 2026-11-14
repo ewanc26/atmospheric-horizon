@@ -12,6 +12,13 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-11-14
+
+Third tagged release. Adds the social-graph write side, profile reads, a
+separate server account, the Colibri chat bridge and its follow-ups, and the
+optional server-side identity service with in-game and browser linking; also
+migrates both Rust crates to the scope/atom source layout.
+
 ### Changed
 
 - **Protocol scope layout.** Move the protocol modules under `account/`,
@@ -267,6 +274,7 @@ unless it writes to your own repo.
   can issue the same link (M40). The online whitelist sweep remains to be
   implemented.
 
-[Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.1.0
