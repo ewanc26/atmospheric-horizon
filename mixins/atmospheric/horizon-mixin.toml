@@ -96,7 +96,7 @@ id = "colibri-notice"
 hook = "broadcast_message"
 hook_version = 1
 kind = "HEAD"
-helper = "colibri_notice.rs"
+helper = "colibri/notice.rs"
 bindings = [
   { name = "line", ty = "&horizon_client::text::Text", value = "&*line" },
 ]
@@ -109,7 +109,7 @@ id = "colibri-join"
 hook = "player_logged_in"
 hook_version = 1
 kind = "HEAD"
-helper = "colibri_join.rs"
+helper = "colibri/join.rs"
 bindings = [
   { name = "player", ty = "u128", value = "player" },
   { name = "name", ty = "&str", value = "name" },
@@ -123,7 +123,7 @@ id = "gate-login"
 hook = "player_login"
 hook_version = 1
 kind = "HEAD"
-helper = "gate_login.rs"
+helper = "gate/login.rs"
 bindings = [
   { name = "player", ty = "u128", value = "player" },
   { name = "name", ty = "&str", value = "name" },
@@ -136,7 +136,7 @@ id = "colibri-leave"
 hook = "player_logged_out"
 hook_version = 1
 kind = "HEAD"
-helper = "colibri_leave.rs"
+helper = "colibri/leave.rs"
 bindings = [{ name = "name", ty = "&str", value = "name" }]
 
 # Once a tick: drain the worker's events into the HUD status line.
