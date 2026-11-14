@@ -191,6 +191,15 @@ pub fn spawn(
                 let mut poll =
                     tokio::time::interval(Duration::from_secs(worker.poll_interval_secs));
                 poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // The server-account token refresh (M50): the first check runs
+                // after one period, matching atpcraft's scheduled refresher.
+                let refresh_period = server_token_refresh_period(worker.server_token_refresh_secs);
+                let mut server_token_refresh = tokio::time::interval_at(
+                    tokio::time::Instant::now() + refresh_period,
+                    refresh_period,
+                );
+                server_token_refresh
+                    .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     tokio::select! {
                         command = rx.recv() => {
@@ -222,6 +231,20 @@ pub fn spawn(
                                             tokio::time::MissedTickBehavior::Delay,
                                         );
                                     }
+                                    if target == OAuthTarget::Server
+                                        && worker.server_agent.is_some()
+                                    {
+                                        let period = server_token_refresh_period(
+                                            worker.server_token_refresh_secs,
+                                        );
+                                        server_token_refresh = tokio::time::interval_at(
+                                            tokio::time::Instant::now() + period,
+                                            period,
+                                        );
+                                        server_token_refresh.set_missed_tick_behavior(
+                                            tokio::time::MissedTickBehavior::Delay,
+                                        );
+                                    }
                                 }
                                 Some((target, Err(error))) => match target {
                                     OAuthTarget::Player => worker.emit(Event::Session(
@@ -245,6 +268,9 @@ pub fn spawn(
                         }
                         _ = poll.tick() => {
                             worker.poll_notifications(false).await;
+                        }
+                        _ = server_token_refresh.tick() => {
+                            worker.refresh_server_token().await;
                         }
                     }
                 }
@@ -273,6 +299,8 @@ struct Worker {
     did: Option<String>,
     cursor: SeenCursor,
     poll_interval_secs: u64,
+    /// Seconds between proactive server-account token refreshes (M50).
+    server_token_refresh_secs: u64,
     /// TID generator for record keys (chat records, later more).
     tid: TidGen,
     /// `post_chat_messages` from the settings file, refreshed at login.
@@ -404,6 +432,11 @@ fn server_profile_capabilities(config: &Config) -> Vec<String> {
     capabilities
 }
 
+/// The M50 server-token refresh period, floored at one second like atpcraft.
+fn server_token_refresh_period(seconds: u64) -> Duration {
+    Duration::from_secs(seconds.max(1))
+}
+
 impl Worker {
     fn new(
         options: WorkerOptions,
@@ -439,6 +472,9 @@ impl Worker {
             did: None,
             cursor,
             poll_interval_secs: Config::default().poll_interval_secs,
+            server_token_refresh_secs: Config::default()
+                .server_account_token_refresh_seconds
+                .max(1),
             tid: TidGen::new(),
             post_chat_messages: false,
             post_death_messages: false,
@@ -2106,6 +2142,10 @@ impl Worker {
                 self.server_did = Some(did.clone());
                 self.server_handle = Some(handle.clone());
                 self.server_dpop = dpop;
+                if let Ok(config) = self.load_config() {
+                    self.server_token_refresh_secs =
+                        config.server_account_token_refresh_seconds.max(1);
+                }
                 let stored = StoredSession {
                     pds_url,
                     did: did.clone(),
@@ -2265,6 +2305,15 @@ impl Worker {
         }
     }
 
+    /// Proactively refresh the server account's OAuth token (M50). The
+    /// existing expiry check skips the network while the token is healthy.
+    async fn refresh_server_token(&mut self) {
+        if self.server_agent.is_none() || self.server_did.is_none() {
+            return;
+        }
+        self.ensure_server_oauth_fresh().await;
+    }
+
     /// Resume a persisted session (refresh token) without the app password.
     /// Runs once at startup; failure just leaves the worker logged out.
     async fn try_resume(&mut self) {
@@ -2361,6 +2410,10 @@ impl Worker {
                 self.server_handle = Some(rotated.handle.clone());
                 self.server_dpop = dpop;
                 self.server_stored_session = Some(rotated.clone());
+                if let Ok(config) = self.load_config() {
+                    self.server_token_refresh_secs =
+                        config.server_account_token_refresh_seconds.max(1);
+                }
                 if let Err(error) = self.save_server_session(&rotated) {
                     self.fail(format!(
                         "could not persist the server-account session file: {error}"
@@ -2960,6 +3013,7 @@ mod tests {
             identifier: "stub.test".into(),
             app_password: "correct-horse".into(),
             poll_interval_secs: 60,
+            server_account_token_refresh_seconds: 60,
             post_death_messages: false,
             post_chat_messages: false,
             chat_server_id: "test-server".into(),
@@ -4555,6 +4609,7 @@ mod tests {
             identifier: "someone.example".into(),
             app_password: "abcd-1234-efgh-5678".into(),
             poll_interval_secs: 30,
+            server_account_token_refresh_seconds: 30,
             post_death_messages: true,
             post_chat_messages: true,
             chat_server_id: "my-server".into(),
@@ -4630,6 +4685,13 @@ mod tests {
             server_profile_capabilities(&config),
             vec!["labeler", "skin-sync"]
         );
+    }
+
+    #[test]
+    fn server_token_refresh_period_is_floored_at_one_second() {
+        assert_eq!(server_token_refresh_period(0), Duration::from_secs(1));
+        assert_eq!(server_token_refresh_period(1), Duration::from_secs(1));
+        assert_eq!(server_token_refresh_period(60), Duration::from_secs(60));
     }
 
     /// A minimal PNG header (magic + IHDR with 2560x1440) for image tests.

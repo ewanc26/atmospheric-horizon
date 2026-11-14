@@ -45,6 +45,10 @@ pub struct Config {
     pub app_password: String,
     /// Seconds between notification polls.
     pub poll_interval_secs: u64,
+    /// Seconds between proactive server-account token refreshes (M50).
+    /// The token is refreshed only when it is close to expiry, so a healthy
+    /// session costs an in-memory check. Floored at one second.
+    pub server_account_token_refresh_seconds: u64,
     /// Post the death message automatically when the player dies.
     pub post_death_messages: bool,
     /// Publish every chat message as an `at.atpcraft.player.chat` record.
@@ -137,6 +141,7 @@ impl Default for Config {
             identifier: String::new(),
             app_password: String::new(),
             poll_interval_secs: 60,
+            server_account_token_refresh_seconds: 60,
             post_death_messages: false,
             post_chat_messages: false,
             chat_server_id: default_chat_server_id(),
@@ -208,6 +213,7 @@ mod tests {
             identifier: "ewan.example".into(),
             app_password: "abcd-1234-efgh-5678".into(),
             poll_interval_secs: 30,
+            server_account_token_refresh_seconds: 30,
             post_death_messages: true,
             post_chat_messages: true,
             chat_server_id: "my-server".into(),
@@ -245,6 +251,7 @@ mod tests {
         let back = Config::from_json(&raw).unwrap();
         assert_eq!(config.pds_url, back.pds_url);
         assert_eq!(config.poll_interval_secs, back.poll_interval_secs);
+        assert_eq!(back.server_account_token_refresh_seconds, 30);
         assert!(back.post_death_messages);
         assert!(back.post_chat_messages);
         assert_eq!(back.chat_server_id, "my-server");
@@ -293,6 +300,7 @@ mod tests {
         assert!(!config.join_gate_enabled);
         assert!(config.join_gate_list.is_empty());
         assert_eq!(config.join_gate_sweep_seconds, 60);
+        assert_eq!(config.server_account_token_refresh_seconds, 60);
         assert_eq!(config.colibri_appview_url, "https://api.colibri.social");
         assert!(config.server_api_url.is_empty());
         assert!(config.colibri_server_events_fallback_enabled);
