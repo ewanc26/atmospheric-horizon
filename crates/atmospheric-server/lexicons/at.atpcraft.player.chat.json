@@ -1,0 +1,37 @@
+{
+  "lexicon": 1,
+  "id": "at.atpcraft.player.chat",
+  "description": "Player chat messages published to the sender's own repository.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "any",
+      "description": "One record per chat message; writers key them by TID so a player's messages accumulate as an append-only history.",
+      "record": {
+        "type": "object",
+        "required": [
+          "sentAt",
+          "message",
+          "server"
+        ],
+        "properties": {
+          "sentAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "When the message was sent (ISO 8601)."
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "The plain text of the chat message."
+          },
+          "server": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "Identifier of the server where the message was sent."
+          }
+        }
+      }
+    }
+  }
+}

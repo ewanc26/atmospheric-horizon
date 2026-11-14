@@ -262,6 +262,145 @@ async fn browser_links_need_the_shared_game_server_token() {
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
+fn required_fields(document: &Value, expected: &[&str]) {
+    let required = document["required"].as_array().unwrap();
+    for field in expected {
+        assert!(
+            required.iter().any(|value| value.as_str() == Some(field)),
+            "missing required field {field}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn lexicons_are_public_and_unknown_documents_are_not_found() {
+    let path = temp_path("lexicons");
+    let store = LinkStore::open(&path).unwrap();
+    let router = app(store, config());
+    let nsids = [
+        "at.atpcraft.player.chat",
+        "at.atpcraft.player.defs",
+        "at.atpcraft.player.skin",
+        "at.atpcraft.player.snapshot",
+        "at.atpcraft.server.profile",
+    ];
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/lexicons")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE].to_str().unwrap(),
+        "text/html; charset=utf-8"
+    );
+    assert_eq!(
+        response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN]
+            .to_str()
+            .unwrap(),
+        "*"
+    );
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let page = String::from_utf8(bytes.to_vec()).unwrap();
+    for nsid in nsids {
+        assert!(page.contains(&format!("/lexicons/{nsid}.json")), "{nsid}");
+    }
+
+    for nsid in nsids {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/lexicons/{nsid}.json"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE].to_str().unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN]
+                .to_str()
+                .unwrap(),
+            "*"
+        );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let document: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(document["lexicon"], 1);
+        assert_eq!(document["id"], nsid);
+        match nsid {
+            "at.atpcraft.player.chat" => {
+                required_fields(
+                    &document["defs"]["main"]["record"],
+                    &["sentAt", "message", "server"],
+                );
+            }
+            "at.atpcraft.player.defs" => {
+                for name in [
+                    "summary",
+                    "position",
+                    "score",
+                    "teamSummary",
+                    "aspect",
+                    "endorsement",
+                ] {
+                    assert!(document["defs"].get(name).is_some(), "{name}");
+                }
+            }
+            "at.atpcraft.player.skin" => {
+                required_fields(
+                    &document["defs"]["main"]["record"],
+                    &["timestamp", "endorsements"],
+                );
+            }
+            "at.atpcraft.player.snapshot" => {
+                required_fields(
+                    &document["defs"]["main"]["record"],
+                    &["version", "issuedAt", "summary", "aspects", "endorsements"],
+                );
+            }
+            "at.atpcraft.server.profile" => {
+                required_fields(
+                    &document["defs"]["main"]["record"],
+                    &[
+                        "name",
+                        "minecraftVersion",
+                        "atpcraftVersion",
+                        "signingKey",
+                        "updatedAt",
+                    ],
+                );
+            }
+            other => panic!("unexpected lexicon {other}"),
+        }
+    }
+
+    for path in [
+        "/lexicons/com.example.unknown.json",
+        "/lexicons/at.atpcraft.player.chat",
+        "/lexicons/..%2Fsecrets.json",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
 #[tokio::test]
 async fn pairing_claims_once_and_survives_a_restart() {
     let path = temp_path("pairing");

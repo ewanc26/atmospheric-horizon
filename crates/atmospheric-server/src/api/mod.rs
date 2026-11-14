@@ -9,6 +9,7 @@
 
 mod browser;
 mod health;
+mod lexicon;
 mod link;
 mod pairing;
 
@@ -142,6 +143,8 @@ pub fn app(store: LinkStore, config: ServerConfig) -> Router {
             post(browser::create_browser_pairing),
         )
         .route("/oauth-client-metadata.json", get(browser::client_metadata))
+        .route("/lexicons", get(lexicon::index))
+        .route("/lexicons/{file}", get(lexicon::document))
         .route("/link/callback", get(browser::link_callback))
         .route(
             "/link/{token}",

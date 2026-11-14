@@ -1,0 +1,55 @@
+{
+  "lexicon": 1,
+  "id": "at.atpcraft.player.snapshot",
+  "description": "Server-endorsed snapshot of a Minecraft player's state.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "any",
+      "description": "One snapshot per player per endorsing key; the record key is the server's signing key id.",
+      "record": {
+        "type": "object",
+        "required": [
+          "version",
+          "issuedAt",
+          "summary",
+          "aspects",
+          "endorsements"
+        ],
+        "properties": {
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Monotonically increasing version (anti-rollback)."
+          },
+          "issuedAt": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "summary": {
+            "type": "ref",
+            "ref": "at.atpcraft.player.defs#summary"
+          },
+          "aspects": {
+            "type": "array",
+            "items": {
+              "type": "ref",
+              "ref": "at.atpcraft.player.defs#aspect"
+            },
+            "maxLength": 16,
+            "description": "Opaque aspect payloads, sorted by name with unique names."
+          },
+          "endorsements": {
+            "type": "array",
+            "items": {
+              "type": "ref",
+              "ref": "at.atpcraft.player.defs#endorsement"
+            },
+            "minLength": 1,
+            "maxLength": 64
+          }
+        }
+      }
+    }
+  }
+}

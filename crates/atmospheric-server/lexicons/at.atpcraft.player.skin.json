@@ -1,0 +1,59 @@
+{
+  "lexicon": 1,
+  "id": "at.atpcraft.player.skin",
+  "description": "Server-endorsed player skin and cape references.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "any",
+      "description": "One skin record per player per endorsing key; the record key is the server's signing key id.",
+      "record": {
+        "type": "object",
+        "required": [
+          "timestamp",
+          "endorsements"
+        ],
+        "properties": {
+          "skin": {
+            "type": "blob",
+            "accept": [
+              "image/png"
+            ],
+            "maxSize": 1048576,
+            "description": "The player's skin PNG, stored as a blob in their repository."
+          },
+          "cape": {
+            "type": "blob",
+            "accept": [
+              "image/png"
+            ],
+            "maxSize": 1048576,
+            "description": "Optional cape PNG."
+          },
+          "model": {
+            "type": "string",
+            "maxLength": 32,
+            "knownValues": [
+              "default",
+              "slim"
+            ]
+          },
+          "timestamp": {
+            "type": "string",
+            "maxLength": 64,
+            "format": "datetime"
+          },
+          "endorsements": {
+            "type": "array",
+            "items": {
+              "type": "ref",
+              "ref": "at.atpcraft.player.defs#endorsement"
+            },
+            "minLength": 1,
+            "maxLength": 64
+          }
+        }
+      }
+    }
+  }
+}
