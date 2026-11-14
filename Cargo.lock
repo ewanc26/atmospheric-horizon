@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "atmospheric"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "atrium-api",
  "atrium-common",
@@ -79,11 +79,11 @@ dependencies = [
 
 [[package]]
 name = "atmospheric-horizon"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "atmospheric-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
