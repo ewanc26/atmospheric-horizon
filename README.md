@@ -248,7 +248,7 @@ M35 supplies the mapping, M36 lets a player claim a link in game, M37 checks a l
 
 ## Roadmap
 
-M1–M21 shipped through v0.1.0 and v0.2.0, and M23 (social-graph writes) through M42 (online whitelist sweep) shipped in v0.3.1, with M44 (generic record browser), M45 (linked-player names), M46 (lexicon hosting), M47 (atpcraft-compatible name sanitization), M48 (signing-key chat server id), M49 (server-profile name/capability parity), M50 (proactive server-account token refresh), M51 (automatic server-profile publish), M52 (list-member cache), M53 (configurable OAuth scope), M54 (scope grant parity) and M55 (configurable browser-link lifetime) on `main` for the next release; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, labeler issuance, RPG discovery, aspect capture/restore, and the next read/write surfaces.
+M1–M21 shipped through v0.1.0 and v0.2.0, and M23 (social-graph writes) through M42 (online whitelist sweep) shipped in v0.3.1, with M44 (generic record browser), M45 (linked-player names), M46 (lexicon hosting), M47 (atpcraft-compatible name sanitization), M48 (signing-key chat server id), M49 (server-profile name/capability parity), M50 (proactive server-account token refresh), M51 (automatic server-profile publish), M52 (list-member cache), M53 (configurable OAuth scope), M54 (scope grant parity), M55 (configurable browser-link lifetime) and M56 (label signing core) on `main` for the next release; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, labeler issuance, RPG discovery, aspect capture/restore, and the next read/write surfaces.
 
 ### Porting atpcraft
 

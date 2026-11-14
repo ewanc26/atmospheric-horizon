@@ -84,6 +84,11 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   pairing bound to the stored expiry. The join-gate refusal reports the
   configured window. An omitted field keeps the service default. No endpoint or
   record shape changes.
+- **M56 — label signing core (#134).** Add the server-side `labeler` scope:
+  the `com.atproto.label.defs#label` wire type, canonical DAG-CBOR encoding of
+  the unsigned label, and K-256 key handling with multibase `did:key` plus
+  64-byte low-S signatures. This is the first slice of #112; no endpoint, PLC
+  update, declaration record, label store or game trigger is added yet.
 
 ## [0.3.1] — 2026-11-14
 
