@@ -50,6 +50,12 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   gate is armed, `join-gate`. It no longer claims `player-data-sync` before
   server-side capture/restore exists. No new endpoint, credential or record
   shape.
+- **M50 — proactive server-account token refresh (#122).** The worker checks
+  the server account's OAuth token on `server_account_token_refresh_seconds`
+  (default 60, minimum 1) instead of refreshing only when a server-side action
+  needs it. The existing expiry check keeps a healthy token an in-memory check;
+  a completed server login resets the cadence. No new endpoint, credential or
+  record shape.
 
 ## [0.3.1] — 2026-11-14
 
