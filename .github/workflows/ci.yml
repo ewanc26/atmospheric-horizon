@@ -20,6 +20,9 @@ jobs:
       - name: Source layout
         run: bash scripts/check-layout.sh
 
+      - name: Source layout tests
+        run: bash scripts/test-layout.sh
+
       - name: Format
         run: cargo fmt --all --check
 

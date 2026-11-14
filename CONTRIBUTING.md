@@ -19,6 +19,7 @@ Thanks for considering a contribution.
 
 ```bash
 bash scripts/check-layout.sh
+bash scripts/test-layout.sh
 cargo fmt
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
