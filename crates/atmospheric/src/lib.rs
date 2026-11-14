@@ -6,27 +6,18 @@
 //! command/event channels owned by [`worker`], which is the only place that
 //! performs network or disk I/O.
 
-pub mod actions;
-pub mod chats;
+mod account;
+mod base;
 pub mod colibri;
-pub mod config;
-pub mod error;
-pub mod graph;
-pub mod identity;
-pub mod interactions;
-pub mod labels;
-pub mod lists;
-pub mod notifications;
-pub mod oauth;
-pub mod presence;
-pub mod profiles;
-pub mod records;
-pub mod servers;
-pub mod session;
-pub mod signing;
-pub mod skins;
-pub mod tid;
+mod social;
 pub mod worker;
+
+pub use account::{identity, oauth, session};
+pub use base::{config, error, records, signing, tid};
+pub use social::{
+    actions, chats, graph, interactions, labels, lists, notifications, presence, profiles, servers,
+    skins,
+};
 
 pub use config::Config;
 pub use error::AtmosphericError;
