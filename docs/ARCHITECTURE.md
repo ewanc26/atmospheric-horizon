@@ -1205,6 +1205,14 @@ atpcraft arms `ServerAccountTokenRefresher` while the server runs and calls its 
 
 Verified: the config round-trip and older-settings tests pin the default and a non-default interval; a worker unit test pins the one-second floor. No live PDS was contacted. No new endpoint, credential or record shape; the token endpoint simply sees refreshes on a cadence instead of only on demand.
 
+### M51: automatic server-profile publish
+
+atpcraft re-publishes the descriptor inside the server-account login callback and calls `publishServerProfileOnStartup()` after the server starts. Both paths are best-effort: a missing account or invalid credentials skip the write, and a failed write does not fail the login or the server start. This mod required `/atmospheric server-account publish`, so a restart or a new server-account login could leave the public descriptor behind the configured name, capabilities, game version or signing key.
+
+`Worker::auto_publish_server_profile` now calls the existing M25/M10 writer after a successful server-account OAuth login and after a persisted server session resumes at startup. It does not add a success event, matching atpcraft's silent best-effort publish; a failure is surfaced through the worker's normal `Failed` event without undoing the session. The manual command still works. The writer keeps its existing `getRecord`/`putRecord` pair, rkey `self`, `createdAt` preservation and M49 name/capability rules, so no record shape or endpoint changes.
+
+Verified: the server-account OAuth worker test now expects the automatic upsert and the manual refresh, and a new startup-resume test creates a persisted server session, refreshes it through the stub authorization server, and asserts one descriptor `putRecord` with the refreshed access token and the default name/capabilities. No live PDS was contacted.
+
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
 `/atmospheric skin-of <did|handle>` sends `Command::FetchPlayerSkin` — the
