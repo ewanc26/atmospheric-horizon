@@ -19,7 +19,8 @@
 // precedence (M24); /atmospheric follows|followers|blocks|mutes <did|handle>
 // reads a public social graph (M20);
 // follow|unfollow|block|unblock|mute|unmute <did|handle> writes one (M23);
-// /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri> and
+// /atmospheric records <did|handle> <collection> browses any public collection
+// (M44); /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri> and
 // /atmospheric repost <at-uri> publish interactions (M21); /atmospheric link
 // <code> claims a server identity pairing code (M36).
 fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut bool) {
@@ -31,7 +32,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric colibri start|stop|reconnect|status|send <text>, /atmospheric link [code], /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric colibri start|stop|reconnect|status|send <text>, /atmospheric link [code], /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric records <did|handle> <collection>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -275,6 +276,21 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
         } else {
             m::fetch_chat(subject);
             game.native_chat("atmospheric: reading the player's chat history…");
+        }
+    } else if rest == "records" || rest.starts_with("records ") {
+        let mut args = rest
+            .strip_prefix("records")
+            .unwrap_or("")
+            .trim()
+            .splitn(2, ' ');
+        let subject = args.next().unwrap_or("").trim();
+        let collection = args.next().unwrap_or("").trim();
+        *ran = true;
+        if subject.is_empty() || collection.is_empty() {
+            game.native_chat("atmospheric: /atmospheric records <did | handle> <collection>");
+        } else {
+            m::fetch_records(subject, collection);
+            game.native_chat("atmospheric: reading records…");
         }
     } else if rest == "reply" || rest.starts_with("reply ") {
         let mut args = rest.strip_prefix("reply").unwrap_or("").splitn(2, ' ');

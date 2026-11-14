@@ -163,6 +163,9 @@ pub enum GameCommand {
     /// chat mirror). Unsigned records by design — no endorsement to verify.
     /// Works logged out.
     FetchChat { subject: String },
+    /// Read generic records from any collection in a subject's own PDS (M44):
+    /// an unauthenticated listRecords viewer. Works logged out.
+    FetchRecords { subject: String, collection: String },
     /// Read the labels on a subject (M12, labeler read side): an AT-URI, a
     /// DID, a handle, or a bsky.app profile/post/list URL.
     FetchLabels { subject: String },
@@ -483,6 +486,16 @@ pub enum ModEvent {
         total: usize,
         items: Vec<ChatDigest>,
     },
+    /// Generic records from any collection in a subject's PDS (M44):
+    /// the DID (`subject`), the PDS (`via`), the collection, the total record
+    /// count, and the newest few records as compact JSON strings (oldest first).
+    RecordsHistory {
+        subject: String,
+        via: String,
+        collection: String,
+        total: usize,
+        items: Vec<String>,
+    },
     /// The labels found on a subject (M12, labeler read side): the subject
     /// (AT-URI or DID), where the labels came from (`via`: the AppView URL or
     /// the labeler's endpoint), and the labels themselves.
@@ -638,6 +651,23 @@ pub fn status_text(event: &ModEvent) -> String {
                     .map(|i| format!(" — latest from {}: \"{}\"", i.server, i.message))
                     .unwrap_or_default();
                 format!("atmospheric: {total} chat record(s) for {subject} (unsigned){latest}")
+            }
+        }
+        ModEvent::RecordsHistory {
+            subject,
+            collection,
+            total,
+            items,
+            ..
+        } => {
+            if *total == 0 {
+                format!("atmospheric: no {collection} records for {subject}")
+            } else {
+                let latest = items
+                    .last()
+                    .map(|item| format!(" — newest: {}", record_snippet(item)))
+                    .unwrap_or_default();
+                format!("atmospheric: {total} {collection} record(s) for {subject}{latest}")
             }
         }
         ModEvent::Labels {
@@ -897,6 +927,22 @@ pub const STATUS_LINES_MAX: usize = 3;
 
 /// How long a HUD status line stays visible before it expires (#17).
 pub const STATUS_LINE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How much of a record's JSON the one-line HUD summary shows (M44).
+const RECORD_SNIPPET_LEN: usize = 120;
+
+/// One-line preview of a record's JSON for the HUD (M44): newlines collapsed
+/// and the value truncated so the status line stays readable.
+fn record_snippet(json: &str) -> String {
+    let one_line = json.replace('\n', " ");
+    let mut chars = one_line.chars();
+    let snippet: String = chars.by_ref().take(RECORD_SNIPPET_LEN).collect();
+    if chars.next().is_some() {
+        format!("{snippet}…")
+    } else {
+        snippet
+    }
+}
 
 fn status_slot() -> &'static Mutex<Vec<(String, std::time::Instant)>> {
     // Empty until the first worker event: with no worker attached (no sidecar
@@ -1569,6 +1615,15 @@ pub fn drain_join_gate_kicks() -> Vec<SweepPlayer> {
 pub fn fetch_chat(subject: &str) {
     send(GameCommand::FetchChat {
         subject: subject.into(),
+    });
+}
+
+/// Ask the worker to read generic records from a subject's PDS (M44).
+/// `subject` is a DID or a handle; `collection` is the collection name.
+pub fn fetch_records(subject: &str, collection: &str) {
+    send(GameCommand::FetchRecords {
+        subject: subject.into(),
+        collection: collection.into(),
     });
 }
 
@@ -2323,6 +2378,16 @@ fn encode_command(command: &GameCommand) -> String {
         GameCommand::FetchChat { subject } => {
             jobj(vec![("FetchChat", jobj(vec![("subject", jstr(subject))]))])
         }
+        GameCommand::FetchRecords {
+            subject,
+            collection,
+        } => jobj(vec![(
+            "FetchRecords",
+            jobj(vec![
+                ("subject", jstr(subject)),
+                ("collection", jstr(collection)),
+            ]),
+        )]),
         GameCommand::FetchLabels { subject } => jobj(vec![(
             "FetchLabels",
             jobj(vec![("subject", jstr(subject))]),
@@ -2677,6 +2742,20 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 items,
             })
         }
+        "RecordsHistory" => {
+            let obj = payload_obj()?;
+            let items = as_arr(jget(obj, "items")?)?
+                .iter()
+                .map(|item| as_str(item).map(str::to_string))
+                .collect::<Option<Vec<_>>>()?;
+            Some(ModEvent::RecordsHistory {
+                subject: req_str(obj, "subject")?,
+                via: req_str(obj, "via")?,
+                collection: req_str(obj, "collection")?,
+                total: req_int(obj, "total")? as usize,
+                items,
+            })
+        }
         "Labels" => {
             let obj = payload_obj()?;
             let labels = as_arr(jget(obj, "labels")?)?
@@ -2872,6 +2951,7 @@ mod tests {
             "did:plc:example",
         );
         fetch_chat("someone.example");
+        fetch_records("someone.example", "app.bsky.feed.post");
         logout();
         assert!(!post_screenshot("no screenshot yet"));
         remember_screenshot("/tmp/shots/2026-11-12_07.00.00.png");
@@ -3057,6 +3137,16 @@ mod tests {
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::FetchChat { subject }) => assert_eq!(subject, "someone.example"),
             other => panic!("expected FetchChat, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::FetchRecords {
+                subject,
+                collection,
+            }) => {
+                assert_eq!(subject, "someone.example");
+                assert_eq!(collection, "app.bsky.feed.post");
+            }
+            other => panic!("expected FetchRecords, got {:?}", other),
         }
         assert!(matches!(
             command_rx.recv_timeout(std::time::Duration::from_secs(5)),
@@ -3421,6 +3511,26 @@ mod tests {
             "atmospheric: no chat records for did:plc:empty"
         );
         assert_eq!(
+            status_text(&ModEvent::RecordsHistory {
+                subject: "did:plc:x".into(),
+                via: "https://pds.example".into(),
+                collection: "app.bsky.feed.post".into(),
+                total: 3,
+                items: vec![r#"{"text":"hello there"}"#.into()],
+            }),
+            "atmospheric: 3 app.bsky.feed.post record(s) for did:plc:x — newest: {\"text\":\"hello there\"}"
+        );
+        assert_eq!(
+            status_text(&ModEvent::RecordsHistory {
+                subject: "did:plc:empty".into(),
+                via: "https://pds.example".into(),
+                collection: "app.bsky.feed.post".into(),
+                total: 0,
+                items: vec![],
+            }),
+            "atmospheric: no app.bsky.feed.post records for did:plc:empty"
+        );
+        assert_eq!(
             status_text(&ModEvent::Labels {
                 subject: "did:plc:x".into(),
                 via: "did:plc:labeler (https://labels.example)".into(),
@@ -3769,6 +3879,13 @@ mod tests {
         assert_eq!(
             encode_command(&GameCommand::RefreshNotifications),
             r#""RefreshNotifications""#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::FetchRecords {
+                subject: "a.test".into(),
+                collection: "app.bsky.feed.post".into(),
+            }),
+            r#"{"FetchRecords":{"subject":"a.test","collection":"app.bsky.feed.post"}}"#
         );
         assert_eq!(
             encode_command(&GameCommand::PostChat {
@@ -4211,6 +4328,18 @@ mod tests {
                     server: "srv".into(),
                     message: "hi".into(),
                 }]
+            })
+        );
+        assert_eq!(
+            decode_event(
+                r#"{"RecordsHistory":{"subject":"s","via":"https://pds.example","collection":"app.bsky.feed.post","total":1,"items":["{\"text\":\"hi\"}"]}}"#
+            ),
+            Some(ModEvent::RecordsHistory {
+                subject: "s".into(),
+                via: "https://pds.example".into(),
+                collection: "app.bsky.feed.post".into(),
+                total: 1,
+                items: vec![r#"{"text":"hi"}"#.into()],
             })
         );
         // `exp` is skipped when absent (skip_serializing_if) and present otherwise.
