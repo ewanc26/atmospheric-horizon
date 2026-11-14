@@ -331,9 +331,11 @@ No telemetry, no analytics, no other endpoints. The optional identity service ab
 
 ## Layout
 
+Rust source in migrated crates follows `<scope>/[<subscope>/]<atom>.rs`: directories are scopes, files are single-word atoms, and `mod.rs` only declares a scope. `crates/atmospheric-server` is the first completed slice; the worker and mixin helpers are being migrated incrementally.
+
 - `mixins/atmospheric/` — horizon-mixins declarations: the injected std-only `runtime.rs` (which also spawns and bridges the sidecar), its placeholder hook, and `horizon-mixin.toml`.
 - `crates/atmospheric/` — the protocol library: `config`, `session`, `oauth` (M8), `actions`, `notifications`, `lists` (M11/M15), `labels` (M12), `presence` (M13), `profiles` (M24), `skins` (M14), `chats` (M16), `servers` (M19), `graph` (M20 reads/M23 writes), `identity` (M36–M40), `interactions` (M21), `records` (atpcraft lexicon types), `tid`, `signing` (Ed25519 endorsements) and `worker`, plus the `atmospheric-worker` bin and its end-to-end test (`tests/sidecar.rs`).
-- `crates/atmospheric-server/` — the optional HTTP identity service: link model and validation, atomically persisted store, admin-auth router and integration tests.
+- `crates/atmospheric-server/` — the optional HTTP identity service, organised into `api/`, `browser/`, `error/`, `model/`, `oauth/`, `page/` and `store/` scopes: admin-auth router and handlers, link model and validation, atomically persisted store, browser OAuth and integration tests.
 - `docker/` — the server image, compose file and end-to-end Docker test.
 - `oauth-client-metadata.json` — the OAuth client metadata document to host when an authorization server does not support the loopback client ([#21](https://github.com/ewanc26/atmospheric-horizon/issues/21)).
 - `compatibility.json` — the pinned Horizon and horizon-mixins revisions the bundle is built against.

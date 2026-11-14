@@ -14,6 +14,7 @@ Guidance for AI coding agents working in **atmospheric-horizon**.
 - Two layers, one boundary:
   - `mixins/atmospheric/runtime.rs` — the injected module (`crate::game::atmospheric`) **and** the standalone Cargo library of the root package. It must stay **std-only**: no external crates, no game imports. It owns the command/event channels only.
   - `crates/atmospheric` — all AT Protocol logic, builds and tests without a game. The worker thread (`worker.rs`) is the **only** place that performs network or disk I/O.
+- New and migrated Rust modules follow `<scope>/[<subscope>/]<atom>.rs`: the directory names the domain scope, the final file name is a single-word atom, and `mod.rs` only declares the scope. `crates/atmospheric-server` is the first completed slice; migrate the worker and mixin helpers incrementally rather than adding new multi-word flat files. Entry points (`lib.rs`, `main.rs`) and the injected `runtime.rs` keep their required paths.
 - All AST changes to Horizon sources go through horizon-mixins plan/apply; never hand-edit generated hooks or injected copies, and never add string-based Rust source rewriting.
 - Keep this repository separate from Horizon and horizon-mixins. Only export committed pinned Horizon sources into ignored target trees; never modify the original checkout or player resources. Do not commit binaries, exported sources or Minecraft assets.
 - Read `compatibility.json` before editing; its pinned revisions are the only validated build targets.

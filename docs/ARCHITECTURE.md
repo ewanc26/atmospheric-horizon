@@ -17,6 +17,14 @@ How atmospheric-horizon is put together, for reviewers, contributors, and coding
 
 The optional `atmospheric-server` binary is not in this diagram: it is a separate HTTP process run by the Minecraft server operator, with no game imports. It owns the shared player UUID-to-DID map described under M35 below; browser linking adds the outbound OAuth requests described under M39.
 
+## Source layout
+
+New and migrated Rust source follows `<scope>/[<subscope>/]<atom>.rs`: the directory names the domain scope, the final file is a single-word atom, and `mod.rs` only declares the scope. The layout is being migrated incrementally rather than in one repository-wide move, because the injected module and public paths are build inputs.
+
+`crates/atmospheric-server` is the first complete slice: `api/` holds the router, state and handler atoms; `browser/` the one-time link state; `error/` the HTTP error mapping; `model/` the wire types and validation; `oauth/` the client, DPoP, resolver and encoding atoms; `page/` the browser HTML; and `store/` the in-memory store plus atomic file persistence. The public `app`, `ServerConfig`, `model`, `oauth` and `store` paths are unchanged.
+
+Entry points (`lib.rs`, `main.rs`) and the injected `runtime.rs` keep their required paths. The worker and mixin helpers remain flat until their scopes are migrated.
+
 ### The injected module: `mixins/atmospheric/runtime.rs`
 
 This exact source is injected by horizon-mixins into the game as
@@ -1073,7 +1081,7 @@ verification, DPoP proofs, persisted link lookup and state replay rejection.
 
 Verified: the worker gate test asserts the URL appears in the refusal and that
 `/v1/browser/pairings` was requested; the runtime test pins the command and
-player-name field; the new `oauth_flow` integration test covers the complete
+player-name field; the new `oauth` integration test covers the complete
 browser flow and persistence. No live identity service, PDS or authorization
 server was contacted.
 
