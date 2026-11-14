@@ -848,6 +848,50 @@ fn colibri_scope_adds_the_stream_grant_only_when_enabled() {
     );
 }
 
+#[test]
+fn scope_for_falls_back_to_the_default_base_and_trims_a_configured_one() {
+    assert_eq!(
+        scope_for("", false, "did:web:api.colibri.social"),
+        DEFAULT_SCOPE
+    );
+    assert_eq!(
+        scope_for("   ", false, "did:web:api.colibri.social"),
+        DEFAULT_SCOPE
+    );
+    assert_eq!(
+        scope_for("  atproto  ", false, "did:web:api.colibri.social"),
+        "atproto"
+    );
+}
+
+#[test]
+fn scope_for_appends_each_colibri_grant_once() {
+    let base = "atproto repo:app.bsky.feed.post?action=create";
+    let scope = scope_for(base, true, "did:web:api.colibri.social");
+    assert!(scope.starts_with(base));
+    let colibri_grants = scope
+        .split_ascii_whitespace()
+        .filter(|token| {
+            token.starts_with("repo:social.colibri") || token.starts_with("rpc:social.colibri")
+        })
+        .count();
+    assert_eq!(colibri_grants, 3);
+    // A base that already carries the grants is left unchanged.
+    assert_eq!(scope_for(&scope, true, "did:web:api.colibri.social"), scope);
+}
+
+#[test]
+fn scope_for_a_custom_base_without_the_bridge_is_just_the_base() {
+    assert_eq!(
+        scope_for(
+            "atproto repo:app.bsky.feed.post?action=create",
+            false,
+            "did:web:api.colibri.social"
+        ),
+        "atproto repo:app.bsky.feed.post?action=create"
+    );
+}
+
 #[tokio::test]
 async fn redirect_wait_times_out_without_a_browser() {
     let stub = StubAuthServer::start(false);

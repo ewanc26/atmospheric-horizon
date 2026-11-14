@@ -100,6 +100,7 @@ fn main() {
         chat_server_id: "pds-check".into(),
         persist_session: true,
         oauth_client_id: env::var("ATMOSPHERIC_OAUTH_CLIENT_ID").unwrap_or_default(),
+        oauth_scope: env::var("ATMOSPHERIC_OAUTH_SCOPE").unwrap_or_default(),
         skin_path: String::new(),
         cape_path: String::new(),
         skin_model: "default".into(),
