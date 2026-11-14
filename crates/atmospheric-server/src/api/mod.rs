@@ -170,6 +170,7 @@ pub fn app(store: LinkStore, config: ServerConfig) -> Router {
         .route("/v1/pairings", post(pairing::create_pairing))
         .route("/v1/pairings/claim", post(pairing::claim_pairing))
         .route("/v1/labeler/labels", post(label::emit_label))
+        .route("/v1/labeler/identity", get(label::labeler_identity))
         .merge(xrpc)
         .route(
             "/v1/browser/pairings",

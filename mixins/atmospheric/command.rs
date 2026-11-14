@@ -32,7 +32,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric colibri start|stop|reconnect|status|send <text>, /atmospheric link [code], /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric records <did|handle> <collection>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric colibri start|stop|reconnect|status|send <text>, /atmospheric link [code], /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric records <did|handle> <collection>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric labeler-identity [status|request|submit <token>], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -231,6 +231,30 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
                 game.native_chat("atmospheric: querying the labeler…");
             }
             _ => game.native_chat("atmospheric: /atmospheric labeler <labeler-did> [subject]"),
+        }
+    } else if rest == "labeler-identity" || rest.starts_with("labeler-identity ") {
+        let args: Vec<&str> = rest
+            .strip_prefix("labeler-identity")
+            .unwrap_or("")
+            .split_whitespace()
+            .collect();
+        *ran = true;
+        match args.as_slice() {
+            [] | ["status"] => {
+                m::labeler_identity_status();
+                game.native_chat("atmospheric: checking the labeler identity…");
+            }
+            ["request"] => {
+                m::request_labeler_plc_signature();
+                game.native_chat("atmospheric: requesting a PLC signature token…");
+            }
+            ["submit", token] => {
+                m::submit_labeler_plc_update(token);
+                game.native_chat("atmospheric: submitting the PLC identity update…");
+            }
+            _ => game.native_chat(
+                "atmospheric: /atmospheric labeler-identity [status|request|submit <token>]",
+            ),
         }
     } else if rest == "profile" || rest.starts_with("profile ") {
         let subject = rest.strip_prefix("profile").unwrap_or("").trim();

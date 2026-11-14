@@ -453,6 +453,68 @@ async fn lexicons_are_public_and_unknown_documents_are_not_found() {
 }
 
 #[tokio::test]
+async fn labeler_identity_reports_the_signing_key_and_public_endpoint() {
+    let path = temp_path("labeler-identity-off");
+    let store = LinkStore::open(&path).unwrap();
+    let (status, body) = request(
+        &app(store, config()),
+        "GET",
+        "/v1/labeler/identity",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "NotEnabled");
+
+    let path = temp_path("labeler-identity");
+    let store = LinkStore::open(&path).unwrap();
+    let labeler = Labeler::open(path.parent().unwrap().join("labeler"), "did:plc:labeler").unwrap();
+    let signing_key = labeler.did_key();
+    let mut enabled = config();
+    enabled.public_url = Some("https://labels.example".into());
+    enabled.labeler = Some(labeler);
+    let (status, body) = request(
+        &app(store, enabled),
+        "GET",
+        "/v1/labeler/identity",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["did"], "did:plc:labeler");
+    assert_eq!(body["signingKey"], signing_key);
+    assert!(
+        body["signingKey"]
+            .as_str()
+            .unwrap()
+            .starts_with("did:key:zQ3sh")
+    );
+    assert_eq!(body["endpoint"], "https://labels.example");
+
+    // Without a public URL the identity still reports the key; the caller
+    // explains that ATMOSPHERIC_SERVER_PUBLIC_URL must be set.
+    let path = temp_path("labeler-identity-no-url");
+    let store = LinkStore::open(&path).unwrap();
+    let labeler = Labeler::open(path.parent().unwrap().join("labeler"), "did:plc:labeler").unwrap();
+    let mut no_url = config();
+    no_url.public_url = None;
+    no_url.labeler = Some(labeler);
+    let (status, body) = request(
+        &app(store, no_url),
+        "GET",
+        "/v1/labeler/identity",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["endpoint"], Value::Null);
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[tokio::test]
 async fn labeler_emits_and_serves_query_labels() {
     let path = temp_path("labeler");
     let store = LinkStore::open(&path).unwrap();

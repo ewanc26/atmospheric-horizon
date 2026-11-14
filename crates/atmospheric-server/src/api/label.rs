@@ -153,6 +153,33 @@ pub(super) async fn emit_label(
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
+/// Public labeler identity (M60). The worker needs the service DID, the
+/// signing `did:key` and the public endpoint to publish them in the server
+/// account's PLC DID document. All three are public: the key verifies every
+/// published label and the endpoint is the service the DID document names.
+///
+/// A missing `ATMOSPHERIC_SERVER_PUBLIC_URL` is reported as a null endpoint so
+/// the caller can explain that the operator must configure it; without an
+/// endpoint there is nothing a DID document could advertise.
+pub(super) async fn labeler_identity(State(state): State<AppState>) -> Response {
+    let Some(labeler) = state.labeler.as_ref() else {
+        return xrpc_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "NotEnabled",
+            "Labeler service not initialized",
+        );
+    };
+    (
+        StatusCode::OK,
+        Json(json!({
+            "did": labeler.did(),
+            "signingKey": labeler.did_key(),
+            "endpoint": state.public_url.as_deref(),
+        })),
+    )
+        .into_response()
+}
+
 fn xrpc_error(status: StatusCode, error: &'static str, message: impl Into<String>) -> Response {
     (
         status,
