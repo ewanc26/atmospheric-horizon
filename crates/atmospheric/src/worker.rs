@@ -67,6 +67,13 @@ const JOIN_GATE_NOT_MEMBER: &str = "You are not on this server's Bluesky whiteli
 const JOIN_GATE_UNAVAILABLE: &str =
     "Could not verify Bluesky whitelist membership. Try again shortly.";
 
+/// The only allow is a linked DID on the configured list (M38).
+enum JoinGateVerdict {
+    Allowed,
+    NotMember,
+    Unlinked(String),
+}
+
 /// Write a file that holds secrets (app password in `config.json`, the
 /// session/refresh token and DPoP private key in `session.json`, the Ed25519
 /// seed in `signing-key.json`) with owner-only permissions: 0600 on unix.
@@ -587,8 +594,10 @@ impl Worker {
             Command::JoinGateCheck {
                 request_id,
                 player_uuid,
+                player_name,
             } => {
-                self.check_join_gate(request_id, &player_uuid).await;
+                self.check_join_gate(request_id, &player_uuid, &player_name)
+                    .await;
             }
             Command::FetchChat { subject } => {
                 // A public read against the subject's own PDS: works logged
@@ -1154,8 +1163,10 @@ impl Worker {
 
     /// Enforce the gate for one joining player (M38). The runtime blocks the
     /// login for a bounded time; every failure is a refusal. A linked DID on
-    /// the configured list is the only allow.
-    async fn check_join_gate(&self, request_id: u64, player_uuid: &str) {
+    /// the configured list is the only allow. An unlinked player is refused
+    /// with a one-time browser link when the shared link token is configured
+    /// (M40), so they can link without first being placed.
+    async fn check_join_gate(&self, request_id: u64, player_uuid: &str, player_name: &str) {
         let config = self.load_config().unwrap_or_default();
         if !config.join_gate_enabled {
             self.emit(Event::JoinGateDecision {
@@ -1175,13 +1186,13 @@ impl Worker {
         }
         let verdict = tokio::time::timeout(
             JOIN_GATE_TIMEOUT,
-            self.join_gate_verdict(&config, player_uuid),
+            self.join_gate_verdict(&config, player_uuid, player_name),
         )
         .await;
         let (allowed, message) = match verdict {
-            Ok(Ok(Some(true))) => (true, String::new()),
-            Ok(Ok(Some(false))) => (false, JOIN_GATE_NOT_MEMBER.into()),
-            Ok(Ok(None)) => (false, JOIN_GATE_UNLINKED.into()),
+            Ok(Ok(JoinGateVerdict::Allowed)) => (true, String::new()),
+            Ok(Ok(JoinGateVerdict::NotMember)) => (false, JOIN_GATE_NOT_MEMBER.into()),
+            Ok(Ok(JoinGateVerdict::Unlinked(message))) => (false, message),
             Ok(Err(_)) | Err(_) => (false, JOIN_GATE_UNAVAILABLE.into()),
         };
         self.emit(Event::JoinGateDecision {
@@ -1191,14 +1202,15 @@ impl Worker {
         });
     }
 
-    /// `Some(true)` when the linked DID is on the list, `Some(false)` when it
-    /// is not, `None` when the UUID has no link. Any service or AppView error
-    /// propagates so the caller refuses the join.
+    /// The gate verdict for one UUID. Any service or AppView error propagates
+    /// so the caller refuses the join. The unlinked branch may create the
+    /// browser link inside the same bounded gate read.
     async fn join_gate_verdict(
         &self,
         config: &Config,
         player_uuid: &str,
-    ) -> crate::error::Result<Option<bool>> {
+        player_name: &str,
+    ) -> crate::error::Result<JoinGateVerdict> {
         if config.server_api_url.trim().is_empty() {
             return Err(AtmosphericError::Message(
                 "server_api_url is not configured".into(),
@@ -1207,10 +1219,46 @@ impl Worker {
         let Some(link) =
             identity::fetch_link(&self.http, &config.server_api_url, player_uuid).await?
         else {
-            return Ok(None);
+            return Ok(JoinGateVerdict::Unlinked(
+                self.join_gate_unlinked_message(config, player_uuid, player_name)
+                    .await,
+            ));
         };
         let outcome = self.check_gate(&config.join_gate_list, &link.did).await?;
-        Ok(Some(outcome.allowed))
+        Ok(if outcome.allowed {
+            JoinGateVerdict::Allowed
+        } else {
+            JoinGateVerdict::NotMember
+        })
+    }
+
+    /// The refusal for an unlinked player, including a freshly issued browser
+    /// URL when the server has the shared link token. A failed link request is
+    /// not fatal to the refusal; the player can still use an operator code.
+    async fn join_gate_unlinked_message(
+        &self,
+        config: &Config,
+        player_uuid: &str,
+        player_name: &str,
+    ) -> String {
+        if config.server_link_token.trim().is_empty() {
+            return JOIN_GATE_UNLINKED.into();
+        }
+        match identity::start_browser_link(
+            &self.http,
+            &config.server_api_url,
+            &config.server_link_token,
+            player_uuid,
+            player_name,
+        )
+        .await
+        {
+            Ok(link) => format!(
+                "{JOIN_GATE_UNLINKED} Open {} within 10 minutes to link, then reconnect.",
+                link.url
+            ),
+            Err(_) => JOIN_GATE_UNLINKED.into(),
+        }
     }
 
     /// Read the labels the AppView attaches to a subject's view (M12, the
@@ -2970,6 +3018,12 @@ mod tests {
                 "200 OK",
                 r#"{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex","did":"did:plc:stubuser","handle":"stub.test","linked_at":1760000000}"#.to_string(),
             )
+        } else if path == "/v1/browser/pairings" {
+            (
+                "201 Created",
+                r#"{"url":"https://links.test/link/browser-token","expires_at":1760000600}"#
+                    .to_string(),
+            )
         } else if path == "/v1/links/00000000-0000-4000-8000-0000000000a1" {
             (
                 "200 OK",
@@ -3774,6 +3828,7 @@ mod tests {
         let mut config = test_config(pds.url.clone());
         config.appview_url = pds.url.clone();
         config.server_api_url = pds.url.clone();
+        config.server_link_token = "stub-link-token".into();
         config.join_gate_enabled = true;
         config.join_gate_list = "at://did:plc:owner/app.bsky.graph.list/3abc".into();
         write_config(&dir, &config);
@@ -3789,7 +3844,11 @@ mod tests {
         worker.resolver = stub_resolver(&pds.url);
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
-        runtime.block_on(worker.check_join_gate(1, "00000000-0000-4000-8000-0000000000a3"));
+        runtime.block_on(worker.check_join_gate(
+            1,
+            "00000000-0000-4000-8000-0000000000a3",
+            "Alice",
+        ));
         match event_rx.try_recv() {
             Ok(Event::JoinGateDecision {
                 request_id,
@@ -3803,7 +3862,11 @@ mod tests {
             other => panic!("expected an allowed JoinGateDecision, got {other:?}"),
         }
 
-        runtime.block_on(worker.check_join_gate(2, "00000000-0000-4000-8000-0000000000a2"));
+        runtime.block_on(worker.check_join_gate(
+            2,
+            "00000000-0000-4000-8000-0000000000a2",
+            "Unlinked",
+        ));
         match event_rx.try_recv() {
             Ok(Event::JoinGateDecision {
                 request_id,
@@ -3813,11 +3876,25 @@ mod tests {
                 assert_eq!(request_id, 2);
                 assert!(!allowed);
                 assert!(message.contains("linked Bluesky account"), "{message}");
+                assert!(
+                    message.contains("https://links.test/link/browser-token"),
+                    "the gate refusal carries the browser link: {message}"
+                );
+                assert!(
+                    pds.requests()
+                        .iter()
+                        .any(|request| request.path == "/v1/browser/pairings"),
+                    "the worker asks the identity service for a browser link"
+                );
             }
             other => panic!("expected an unlinked refusal, got {other:?}"),
         }
 
-        runtime.block_on(worker.check_join_gate(3, "00000000-0000-4000-8000-0000000000a1"));
+        runtime.block_on(worker.check_join_gate(
+            3,
+            "00000000-0000-4000-8000-0000000000a1",
+            "NotMember",
+        ));
         match event_rx.try_recv() {
             Ok(Event::JoinGateDecision {
                 request_id,
@@ -3833,7 +3910,11 @@ mod tests {
 
         config.join_gate_list.clear();
         write_config(&dir, &config);
-        runtime.block_on(worker.check_join_gate(4, "00000000-0000-4000-8000-0000000000a3"));
+        runtime.block_on(worker.check_join_gate(
+            4,
+            "00000000-0000-4000-8000-0000000000a3",
+            "Alice",
+        ));
         match event_rx.try_recv() {
             Ok(Event::JoinGateDecision {
                 request_id,

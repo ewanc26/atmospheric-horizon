@@ -8,9 +8,8 @@ fn atmospheric_gate_login(
     reason: &mut Option<horizon_client::text::Text>,
 ) {
     use crate::game::atmospheric as m;
-    let _ = name;
     let uuid = m::uuid_text(player);
-    if let Some(message) = m::join_gate_refusal(&uuid) {
+    if let Some(message) = m::join_gate_refusal(&uuid, name) {
         *cancel = true;
         *reason = Some(horizon_client::text::Text::literal(&message));
     }
