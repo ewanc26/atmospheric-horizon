@@ -11,7 +11,7 @@ use super::{
 use crate::model::{normalize_did, unix_now};
 use serde::Serialize;
 use std::{fmt, fs, path::Path, sync::Arc};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, broadcast};
 
 /// A request to sign and append one label. `src` is always the configured
 /// labeler service DID; only the subject and value come from the caller.
@@ -55,9 +55,15 @@ pub struct Labeler {
     did: Arc<str>,
     signer: LabelSigner,
     log: LabelLog,
+    entries: Arc<RwLock<Vec<LogEntry>>>,
     active: Arc<RwLock<ActiveLabels>>,
+    live: broadcast::Sender<LogEntry>,
     emit_lock: Arc<Mutex<()>>,
 }
+
+/// Per-subscriber live buffer. A client that falls this far behind is closed
+/// rather than blocking emission.
+const LIVE_CAPACITY: usize = 1_024;
 
 impl Labeler {
     /// Open the labeler state under `directory`, loading or creating its
@@ -69,11 +75,14 @@ impl Labeler {
         let signer = key::load_or_create(&directory.join("signing-key.json"))?;
         let (log, entries) = LabelLog::open(directory.join("labels.jsonl"))?;
         let active = ActiveLabels::rebuild(&entries, unix_now());
+        let (live, _) = broadcast::channel(LIVE_CAPACITY);
         Ok(Self {
             did: Arc::from(did),
             signer,
             log,
+            entries: Arc::new(RwLock::new(entries)),
             active: Arc::new(RwLock::new(active)),
+            live,
             emit_lock: Arc::new(Mutex::new(())),
         })
     }
@@ -142,8 +151,46 @@ impl Labeler {
         };
         let signed = SignedLabel::new(label.clone(), self.signer.sign(&label));
         let entry = self.log.append(signed).await?;
+        self.entries.write().await.push(entry.clone());
         self.active.write().await.apply(&entry, now);
+        if !entry.label.is_expired(now) {
+            let _ = self.live.send(entry.clone());
+        }
         Ok(entry)
+    }
+
+    /// Subscribe to labels emitted after this call. The receiver is attached
+    /// before any backfill snapshot, so an emission during backfill is buffered
+    /// and can be skipped by sequence number once the snapshot is sent.
+    pub fn subscribe(&self) -> broadcast::Receiver<LogEntry> {
+        self.live.subscribe()
+    }
+
+    /// Number of attached live subscribers, for readiness checks.
+    pub fn subscribers(&self) -> usize {
+        self.live.receiver_count()
+    }
+
+    /// The highest durable sequence number, or 0 when the log is empty.
+    pub async fn last_seq(&self) -> u64 {
+        self.entries
+            .read()
+            .await
+            .last()
+            .map(|entry| entry.seq)
+            .unwrap_or(0)
+    }
+
+    /// Every logged entry after `cursor`, in sequence order. Backfill includes
+    /// expired entries because it replays the log rather than active state.
+    pub async fn entries_after(&self, cursor: u64) -> Vec<LogEntry> {
+        self.entries
+            .read()
+            .await
+            .iter()
+            .filter(|entry| entry.seq > cursor)
+            .cloned()
+            .collect()
     }
 
     /// Serve one `queryLabels` page from the active state.
@@ -248,6 +295,51 @@ mod tests {
                 .labels
                 .is_empty()
         );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn live_subscribers_receive_label_deltas_and_expired_labels_are_skipped() {
+        let directory = temp_dir("live");
+        let labeler = Labeler::open(&directory, "did:plc:labeler").unwrap();
+        let mut receiver = labeler.subscribe();
+        assert_eq!(labeler.subscribers(), 1);
+
+        labeler
+            .emit(emit("did:plc:alice", "online"), 100)
+            .await
+            .unwrap();
+        labeler
+            .emit(emit("did:plc:bob", "player"), 100)
+            .await
+            .unwrap();
+        assert_eq!(receiver.recv().await.unwrap().seq, 1);
+        assert_eq!(receiver.recv().await.unwrap().seq, 2);
+        assert_eq!(
+            labeler
+                .entries_after(1)
+                .await
+                .iter()
+                .map(|entry| entry.seq)
+                .collect::<Vec<_>>(),
+            [2]
+        );
+        assert_eq!(labeler.last_seq().await, 2);
+
+        let mut expired = emit("did:plc:carol", "online");
+        expired.exp = Some("1970-01-01T00:00:02Z".into());
+        labeler.emit(expired, 100).await.unwrap();
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        assert_eq!(labeler.last_seq().await, 3);
+        assert_eq!(labeler.entries_after(2).await.len(), 1);
+
+        drop(receiver);
+        drop(labeler);
+        let reopened = Labeler::open(&directory, "did:plc:labeler").unwrap();
+        assert_eq!(reopened.last_seq().await, 3);
         let _ = std::fs::remove_dir_all(directory);
     }
 

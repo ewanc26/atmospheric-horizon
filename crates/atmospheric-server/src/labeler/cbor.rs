@@ -1,18 +1,37 @@
-//! Canonical DRISL/DAG-CBOR encoding of an unsigned label.
+//! Canonical DRISL/DAG-CBOR encoding for labels and subscription frames.
 //!
-//! Only the subset a label needs is implemented: definite-length maps, text,
-//! unsigned integers and booleans. Map keys are sorted length-first, then by
-//! unsigned bytes, matching the label signing format. The `sig` field is not
-//! part of the signing input, so byte strings are not needed here.
+//! Only the subset labels and stream frames need is implemented: definite-length
+//! maps and arrays, text, unsigned and signed integers, booleans and byte
+//! strings. Map keys are sorted length-first, then by unsigned bytes, matching
+//! the label signing format and the reference XRPC stream framing.
 
 use super::label::Label;
 
-/// A value in the label map. `cid`/`exp`/`src`/`uri`/`val` are text, `neg` is
-/// a boolean and `ver` is an unsigned integer.
-enum Value<'a> {
+/// A value in a canonical CBOR map. `sig` is the only byte string a label
+/// carries; arrays hold the batch of labels in a stream frame.
+pub(super) enum Value<'a> {
     Text(&'a str),
     Unsigned(u64),
+    Signed(i64),
     Bool(bool),
+    Bytes(&'a [u8]),
+    Array(Vec<Value<'a>>),
+    Map(Vec<(&'a str, Value<'a>)>),
+}
+
+/// Encode a map with canonical key ordering: UTF-8 length first, then unsigned
+/// byte value.
+pub(super) fn encode_map(mut entries: Vec<(&str, Value<'_>)>) -> Vec<u8> {
+    let len = entries.len();
+    entries.sort_by(|left, right| canonical_key(left.0, right.0));
+
+    let mut out = Vec::new();
+    encode_arg(5, len as u64, &mut out);
+    for (key, value) in entries {
+        encode_text(key, &mut out);
+        encode_value(value, &mut out);
+    }
+    out
 }
 
 /// Encode the label exactly as it is signed: `cts`, optional `cid` and `exp`,
@@ -33,19 +52,7 @@ pub(super) fn encode_label(label: &Label) -> Vec<u8> {
     entries.push(("uri", Value::Text(&label.uri)));
     entries.push(("val", Value::Text(&label.val)));
     entries.push(("ver", Value::Unsigned(u64::from(label.ver))));
-    entries.sort_by(|left, right| canonical_key(left.0, right.0));
-
-    let mut out = Vec::new();
-    encode_arg(5, entries.len() as u64, &mut out);
-    for (key, value) in entries {
-        encode_text(key, &mut out);
-        match value {
-            Value::Text(text) => encode_text(text, &mut out),
-            Value::Unsigned(number) => encode_arg(0, number, &mut out),
-            Value::Bool(value) => out.push(if value { 0xf5 } else { 0xf4 }),
-        }
-    }
-    out
+    encode_map(entries)
 }
 
 /// Longest keys first would be plain lexicographic; DAG-CBOR instead sorts by
@@ -54,6 +61,27 @@ fn canonical_key(left: &str, right: &str) -> std::cmp::Ordering {
     left.len()
         .cmp(&right.len())
         .then_with(|| left.as_bytes().cmp(right.as_bytes()))
+}
+
+fn encode_value(value: Value<'_>, out: &mut Vec<u8>) {
+    match value {
+        Value::Text(text) => encode_text(text, out),
+        Value::Unsigned(number) => encode_arg(0, number, out),
+        Value::Signed(number) if number >= 0 => encode_arg(0, number as u64, out),
+        Value::Signed(number) => encode_arg(1, (-1 - number) as u64, out),
+        Value::Bool(value) => out.push(if value { 0xf5 } else { 0xf4 }),
+        Value::Bytes(bytes) => {
+            encode_arg(2, bytes.len() as u64, out);
+            out.extend_from_slice(bytes);
+        }
+        Value::Array(values) => {
+            encode_arg(4, values.len() as u64, out);
+            for value in values {
+                encode_value(value, out);
+            }
+        }
+        Value::Map(entries) => out.extend_from_slice(&encode_map(entries)),
+    }
 }
 
 fn encode_text(value: &str, out: &mut Vec<u8>) {
@@ -159,5 +187,31 @@ mod tests {
             assert!(position >= previous, "{key} is out of order: {encoded}");
             previous = position;
         }
+    }
+
+    #[test]
+    fn maps_arrays_bytes_and_negative_integers_share_the_canonical_encoder() {
+        let encoded = encode_map(vec![
+            ("op", Value::Signed(-1)),
+            ("t", Value::Text("#labels")),
+            (
+                "labels",
+                Value::Array(vec![Value::Bytes(&[7, 8, 9]), Value::Bool(true)]),
+            ),
+        ]);
+        assert_eq!(
+            hex(&encoded),
+            concat!(
+                "a3",
+                "6174",
+                "67236c6162656c73",
+                "626f70",
+                "20",
+                "666c6162656c73",
+                "82",
+                "43070809",
+                "f5",
+            )
+        );
     }
 }

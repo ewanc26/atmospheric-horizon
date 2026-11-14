@@ -24,10 +24,11 @@ use crate::{
 use axum::{
     Router,
     extract::DefaultBodyLimit,
-    http::{HeaderMap, header},
+    http::{HeaderMap, HeaderName, Method, header},
     routing::{get, post},
 };
 use std::sync::Arc;
+use tower_http::cors::{Any, CorsLayer};
 
 const LINK_PAGE_LIMIT: usize = 16 * 1024;
 
@@ -133,6 +134,30 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 /// Build the complete router with the given store and service configuration.
 pub fn app(store: LinkStore, config: ServerConfig) -> Router {
+    // The labeler's XRPC reads are public and fetched cross-origin by browser
+    // clients (Bluesky, Ozone, dashboards), so they must answer permissive CORS.
+    // The WebSocket upgrade is not subject to preflight, but shares the lane.
+    let xrpc = Router::new()
+        .route(
+            "/xrpc/com.atproto.label.queryLabels",
+            get(label::query_labels),
+        )
+        .route(
+            "/xrpc/com.atproto.label.subscribeLabels",
+            get(label::subscribe_labels),
+        )
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(vec![Method::GET, Method::OPTIONS])
+                .allow_headers(vec![
+                    header::AUTHORIZATION,
+                    header::CONTENT_TYPE,
+                    HeaderName::from_static("atproto-accept-labelers"),
+                    HeaderName::from_static("atproto-proxy"),
+                ]),
+        );
+
     Router::new()
         .route("/healthz", get(health::health))
         .route("/v1/links", get(link::list_links))
@@ -145,10 +170,7 @@ pub fn app(store: LinkStore, config: ServerConfig) -> Router {
         .route("/v1/pairings", post(pairing::create_pairing))
         .route("/v1/pairings/claim", post(pairing::claim_pairing))
         .route("/v1/labeler/labels", post(label::emit_label))
-        .route(
-            "/xrpc/com.atproto.label.queryLabels",
-            get(label::query_labels),
-        )
+        .merge(xrpc)
         .route(
             "/v1/browser/pairings",
             post(browser::create_browser_pairing),
