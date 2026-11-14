@@ -56,6 +56,11 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   needs it. The existing expiry check keeps a healthy token an in-memory check;
   a completed server login resets the cadence. No new endpoint, credential or
   record shape.
+- **M51 — automatic server-profile publish (#124).** A successful
+  server-account login, and a persisted server session resuming at startup,
+  now re-publish `at.atpcraft.server.profile` through the existing writer. The
+  write is best-effort and keeps the manual `/atmospheric server-account
+  publish` command; no endpoint, credential or record shape changes.
 
 ## [0.3.1] — 2026-11-14
 
