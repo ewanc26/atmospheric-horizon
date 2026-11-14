@@ -1197,6 +1197,14 @@ atpcraft builds `ServerProfileWriter.Identity` with `name = atproto-server-name.
 
 Verified: config tests pin the `client_name` default and the empty capability override; worker unit tests pin the name fallback and the join-gate/skin-sync derivation with an explicit override. No live PDS was contacted.
 
+### M50: proactive server-account token refresh
+
+atpcraft arms `ServerAccountTokenRefresher` while the server runs and calls its token store every `server-account-token-refresh-seconds` (default 60, floored at 1). The store's expiry check skips the network until the access token is actually near expiry, so the steady-state tick is a cheap in-memory check; the point is that an idle server descriptor, Colibri service-token mint or future server-side write always finds a live token. This mod only called `ensure_server_oauth_fresh` before an on-demand server action, so a quiet period could make the next action pay the refresh round-trip.
+
+`Worker` now carries `server_token_refresh_secs`, loaded from `server_account_token_refresh_seconds` on a resumed server session and after a server-account OAuth login. The worker loop owns a separate `tokio` interval whose first tick is one period away; each tick calls `refresh_server_token`, which is a no-op with no server account and otherwise delegates to the existing expiry-aware `ensure_server_oauth_fresh`. A completed server OAuth login recreates the interval so a changed setting takes effect without a restart. The period is floored at one second.
+
+Verified: the config round-trip and older-settings tests pin the default and a non-default interval; a worker unit test pins the one-second floor. No live PDS was contacted. No new endpoint, credential or record shape; the token endpoint simply sees refreshes on a cadence instead of only on demand.
+
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
 `/atmospheric skin-of <did|handle>` sends `Command::FetchPlayerSkin` — the
