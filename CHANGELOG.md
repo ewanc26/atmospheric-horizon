@@ -12,6 +12,21 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+### Added
+
+- **M42 — online whitelist sweep (#103).** The M38 join gate only checked the
+  list at login, so a player admitted before a list edit stayed until they
+  reconnected. Every `join_gate_sweep_seconds` (default 60; `0` disables, and a
+  positive value is floored at 60 like atpcraft's list cache) the server now
+  re-reads `join_gate_list` and disconnects a linked player whose DID has left
+  it. The worker resolves each online UUID through the identity service, emits
+  only the linked non-members, and the tick hook runs vanilla `kick` with
+  atpcraft's reason. A failed list read — or a timeout — kicks nobody, and a
+  per-player lookup error or an unlinked player is skipped, so a transient
+  error never removes someone by accident. Adds `Command::JoinGateSweep`,
+  `Event::JoinGateKicks` and the `sweep_seconds` field on `JoinGateState`; no
+  new endpoint and no new stored data (the sweep reuses the M38 public reads).
+
 ## [0.3.0] — 2026-11-14
 
 Third tagged release. Adds the social-graph write side, profile reads, a
