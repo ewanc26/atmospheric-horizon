@@ -147,6 +147,47 @@ pub async fn fetch_profile(
     Ok((did, pds, profile))
 }
 
+/// How long a composed in-game nickname may be (M45). Minecraft names are 16
+/// characters, but a Bluesky display name may be longer; the nickname is plain
+/// text shown in chat and the player list, so keep it short.
+pub const NICKNAME_MAX_LEN: usize = 32;
+
+/// Compose the in-game nickname for a linked player (M45): the Bluesky display
+/// name when there is one (`vanilla` otherwise), plus ` (pronouns)` when the
+/// profile has usable pronouns. Control characters are stripped and whitespace
+/// is collapsed, matching atpcraft's display rules. Returns `None` when the
+/// result is the vanilla name, so an unlinked-looking player is left untouched.
+pub fn nickname_for(vanilla: &str, profile: &ProfileDigest) -> Option<String> {
+    let base = clean_display_name(&profile.display_name).unwrap_or_else(|| vanilla.to_string());
+    let mut name = base;
+    if let Some(pronouns) = normalize_pronouns(profile.pronouns.as_deref()) {
+        name.push_str(" (");
+        name.push_str(&pronouns);
+        name.push(')');
+    }
+    let name = truncate_chars(&name, NICKNAME_MAX_LEN);
+    (!name.is_empty() && name != vanilla).then_some(name)
+}
+
+fn clean_display_name(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    let normal = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!normal.is_empty()).then_some(normal)
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    let mut chars = text.chars();
+    let truncated: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        truncated.trim_end().to_string()
+    } else {
+        truncated
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,5 +269,60 @@ mod tests {
     fn both_sources_failing_is_an_error() {
         let error = digest("did:plc:alice", None, None).unwrap_err();
         assert!(error.to_string().contains("both the AppView"), "{error}");
+    }
+
+    fn nickname_profile(display_name: &str, pronouns: Option<&str>) -> ProfileDigest {
+        ProfileDigest {
+            did: "did:plc:alice".into(),
+            handle: "alice.test".into(),
+            display_name: display_name.into(),
+            description: String::new(),
+            pronouns: pronouns.map(str::to_string),
+            avatar: String::new(),
+        }
+    }
+
+    #[test]
+    fn nickname_uses_the_display_name_and_pronouns() {
+        assert_eq!(
+            nickname_for("Alex", &nickname_profile("Alice", Some("they/them"))).as_deref(),
+            Some("Alice (they/them)")
+        );
+        assert_eq!(
+            nickname_for("Alex", &nickname_profile("Alice", None)).as_deref(),
+            Some("Alice")
+        );
+    }
+
+    #[test]
+    fn nickname_falls_back_to_the_minecraft_name_for_pronouns_only() {
+        assert_eq!(
+            nickname_for("Alex", &nickname_profile("", Some(" she / her "))).as_deref(),
+            Some("Alex (she / her)")
+        );
+        // No display name and no pronouns leaves the vanilla name alone.
+        assert_eq!(nickname_for("Alex", &nickname_profile("", None)), None);
+        // A display name identical to the Minecraft name changes nothing.
+        assert_eq!(nickname_for("Alex", &nickname_profile("Alex", None)), None);
+    }
+
+    #[test]
+    fn nickname_strips_control_characters_and_collapses_whitespace() {
+        assert_eq!(
+            nickname_for(
+                "Alex",
+                &nickname_profile("  Alice\u{0007}\n  Smith  ", None)
+            )
+            .as_deref(),
+            Some("Alice Smith")
+        );
+    }
+
+    #[test]
+    fn nickname_is_capped_at_a_char_boundary() {
+        let long = "A".repeat(NICKNAME_MAX_LEN + 10);
+        let name = nickname_for("Alex", &nickname_profile(&long, Some("x"))).unwrap();
+        assert_eq!(name.chars().count(), NICKNAME_MAX_LEN);
+        assert!(name.starts_with("AAAA"));
     }
 }
