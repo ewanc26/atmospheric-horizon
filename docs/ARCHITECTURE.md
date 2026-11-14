@@ -15,7 +15,7 @@ How atmospheric-horizon is put together, for reviewers, contributors, and coding
 └──────────────────────────────┘                          └──────────────────────────┘
 ```
 
-The optional `atmospheric-server` binary is not in this diagram: it is a separate HTTP process run by the Minecraft server operator, with no game imports and no outbound requests. It owns the shared player UUID-to-DID map described under M35 below.
+The optional `atmospheric-server` binary is not in this diagram: it is a separate HTTP process run by the Minecraft server operator, with no game imports. It owns the shared player UUID-to-DID map described under M35 below; browser linking adds the outbound OAuth requests described under M39.
 
 ### The injected module: `mixins/atmospheric/runtime.rs`
 
@@ -72,9 +72,9 @@ Everything else, with zero Horizon imports so it builds and tests with plain
   `getFollowers`/`getBlocks`/`getMutes` pagination on the public AppView,
   reduced to DID/handle/display name) and M23 writes (`follow`/`block`
   records, their removal, and the expected record shapes)
-- `identity` — M36–M38 client for the optional M35 service: claim URL and
-  request/response shapes, public UUID link lookup, DID ownership check and
-  service-error propagation
+- `identity` — M36–M40 client for the optional M35 service: claim URL and
+  request/response shapes, public UUID link lookup, browser-link creation,
+  DID ownership check and service-error propagation
 - `interactions` — M21 replies, likes and reposts (unauthenticated
   `com.atproto.repo.getRecord` for the target's strong ref and thread root,
   then `app.bsky.feed.post`/`like`/`repost` records in your own repo)
@@ -891,7 +891,8 @@ Verified: `model` unit tests cover UUID, name, DID, handle, code and TTL
 validation; store tests cover reopen persistence, `linked_at` preservation,
 one-time and expired pairings, and idempotent deletion; router tests cover
 public reads, admin authentication, direct writes, deletion and a claim that
-survives a store reopen. `docker/server-test.sh` builds the image, runs the
+survives a store reopen, plus an M40 full browser OAuth flow against a local
+stub that verifies PKCE and DPoP before the link is persisted. `docker/server-test.sh` builds the image, runs the
 container against a named volume, exercises the API including an invalid DID,
 restarts the container and checks links still resolve. No network service
 outside the container is contacted.
@@ -968,34 +969,36 @@ and, when it gets one, cancels with that text on the disconnect screen.
 `Worker::emit_join_gate_state` publishes `{enabled, list}` at startup and
 after a settings save. The runtime caches it; an unknown state waits up to
 3 seconds. With the gate off, login proceeds without a request. With it on,
-the runtime sends `JoinGateCheck { request_id, player_uuid }` and waits up to
-6 seconds for the matching `JoinGateDecision`. The worker bounds the whole
-identity-plus-list read at 5 seconds.
+the runtime sends `JoinGateCheck { request_id, player_uuid, player_name }` and
+waits up to 6 seconds for the matching `JoinGateDecision`. The worker bounds
+the whole identity, list and optional link-creation read at 5 seconds.
 
 The worker reads `server_api_url`, resolves the UUID through
 `GET /v1/links/{uuid}`, and checks the returned DID with the existing
 `lists::check_gate` read against `join_gate_list`. A linked member is
 allowed. An unlinked UUID, a non-member, an empty list, a missing service
 URL, any service/AppView error, and a timeout are refused; this is atpcraft's
-fail-closed rule. With no sidecar attached the runtime cannot know the gate
-is armed and stays out of the way. The gate runs on the server thread only;
-the worker keeps all network and disk I/O.
+fail-closed rule. The M40 unlinked branch also creates a browser link inside
+the same 5-second budget and appends its URL to the refusal; if that request
+fails, the generic refusal is returned. With no sidecar attached the runtime
+cannot know the gate is armed and stays out of the way. The gate runs on the
+server thread only; the worker keeps all network and disk I/O.
 
 This does not implement atpcraft's IP-bound `/mc` gate sessions or the
-periodic sweep that kicks online players removed from the list. M39 adds the
-browser OAuth flow for players who are already connected. Operationally, a
-player refused by an armed gate still cannot run `/atmospheric link`, so they
-must use an operator-issued code or be linked before the gate is enabled.
+periodic sweep that kicks online players removed from the list. M39 supplies
+the browser OAuth flow and M40 runs it from the refusal path, so an unlinked
+player can link before being placed.
 
 Verified: a worker test links one UUID to a member, one to a non-member and
-one to nothing, then asserts allow, refusal and fail-closed empty-list
-behaviour. Runtime tests pin the gate-state/decision wire shapes and the
-synchronous refusal and allow paths. The injected `player_login` helper was
-compiled in the staged pinned Horizon tree, where all 13
-`game::atmospheric` tests pass; `cargo test` alone does not compile it. The
-staged Horizon-wide run still reports its own `hook_points_stay_hookable`
-source-scan test because other injected helpers contain macros; the M38 hook
-has none. No live identity service or AppView was contacted.
+one to nothing, then asserts allow, refusal, the browser URL in the refusal
+and fail-closed empty-list behaviour. Runtime tests pin the gate-state/decision
+wire shapes and the synchronous refusal and allow paths. The injected
+`player_login` helper was compiled in the staged pinned Horizon tree, where
+all 13 `game::atmospheric` tests pass; `cargo test` alone does not compile it.
+The staged Horizon-wide run still reports its own
+`hook_points_stay_hookable` source-scan test because other injected helpers
+contain macros; the M38 hook has none. No live identity service or AppView was
+contacted.
 
 ### M39: browser self-service linking
 
@@ -1030,9 +1033,9 @@ PDS, its authorization server, and the token endpoint. It does not call the
 AppView for this flow and does not store access or refresh tokens. A restart
 invalidates browser link sessions. The OAuth client metadata and callback are
 public; link creation is authenticated to the game server, and possession of
-the one-time URL is the player's credential. An armed M38 gate still refuses
-before this command can run, so this solves browser linking for connected
-players, not pre-join gate admission.
+the one-time URL is the player's credential. M39 serves connected players;
+M40 reuses the same creation request from the M38 refusal path so an unlinked
+player can link before being placed.
 
 Verified: server tests cover link-token authorization, URL shape, the browser
 form, client metadata, callback state rejection and expiry; OAuth unit tests
@@ -1042,6 +1045,37 @@ wire shapes. The Docker test creates a link, fetches its form and reads the
 metadata without contacting an external provider. The full OAuth start/finish
 is covered against a local stub; no live PDS or authorization server was
 contacted.
+
+### M40: browser link from the join-gate refusal
+
+M39's browser flow was only reachable from `/atmospheric link`, but M38 runs
+before a refused player can type a command. M40 closes that gap without a new
+server endpoint or a second link store. `gate_login.rs` already has the
+joining player's name; it now passes it through `join_gate_refusal` and
+`Command::JoinGateCheck` as `player_name`. The runtime adds the field to the
+JSON command, and the worker uses it only for the identity service's existing
+`POST /v1/browser/pairings` request.
+
+When `join_gate_verdict` finds no link and `server_link_token` is non-empty, it
+calls the same M39 creation path inside the existing 5-second gate timeout and
+returns a refusal with the one-time URL appended. A failed creation, a missing
+service URL, or a malformed response falls back to the generic unlinked
+message, and the join still fails closed. The URL expires after ten minutes,
+is single-use, and is held only in the game's disconnect reason and the
+service's memory. No new wire field, endpoint, or stored data was added beyond
+the `player_name` field already carried by other identity requests.
+
+`ServerConfig` also gained a test-only `oauth_resolver` override (defaulting to
+the public Bluesky services) so the router-level OAuth test can point handle
+and DID resolution at a loopback stub. The test drives the entire flow through
+the real router: link creation, the handle form, PAR, the callback, PKCE
+verification, DPoP proofs, persisted link lookup and state replay rejection.
+
+Verified: the worker gate test asserts the URL appears in the refusal and that
+`/v1/browser/pairings` was requested; the runtime test pins the command and
+player-name field; the new `oauth_flow` integration test covers the complete
+browser flow and persistence. No live identity service, PDS or authorization
+server was contacted.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 

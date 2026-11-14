@@ -7,6 +7,8 @@ services:
       dockerfile: docker/server.Dockerfile
     environment:
       ATMOSPHERIC_SERVER_TOKEN: ${ATMOSPHERIC_SERVER_TOKEN:?set ATMOSPHERIC_SERVER_TOKEN}
+      ATMOSPHERIC_SERVER_LINK_TOKEN: ${ATMOSPHERIC_SERVER_LINK_TOKEN:-}
+      ATMOSPHERIC_SERVER_PUBLIC_URL: ${ATMOSPHERIC_SERVER_PUBLIC_URL:-}
     ports:
       - "8787:8787"
     volumes:
