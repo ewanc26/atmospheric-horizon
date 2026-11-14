@@ -27,7 +27,7 @@ Not yet: launcher registry distribution, which waits on third-party native-mod s
 - **Join the conversation.** Reply to, like or repost any Bluesky post, from its AT-URI or its bsky.app URL.
 - **Notifications in the HUD.** A digest line, a poll timer and a cursor that survives restarts.
 - **atpcraft-compatible records.** Chat messages, Ed25519-endorsed snapshots and skins with blob uploads, and a server descriptor at rkey `self`.
-- **Read the public side.** List membership (with a fail-closed gate decision), labels and labeler queries, player presence, skins, chat history, server profiles, profiles with display names and pronouns, and follows/followers/blocks/mutes.
+- **Read the public side.** List membership (with a fail-closed gate decision), labels and labeler queries, player presence, skins, chat history, arbitrary public collections (M44), server profiles, profiles with display names and pronouns, and follows/followers/blocks/mutes.
 - **Shape your social graph.** Follow, unfollow, block, unblock, mute or unmute an account from its DID or handle.
 - **Sign in properly.** OAuth in the system browser (PAR + PKCE + DPoP, loopback redirect), with app passwords as the fallback.
 - **Run a server account.** `/atmospheric server-account login <handle>` gives the server its own persisted OAuth identity, separate from the player, and can publish the server descriptor from that account.
@@ -107,6 +107,7 @@ All commands are under `/atmospheric`:
 | `player <did\|handle>` | Read a player's latest verified snapshot |
 | `skin-of <did\|handle>` | Read a verified skin and download its blobs |
 | `chat-of <did\|handle>` | Read a player's mirrored chat history |
+| `records <did\|handle> <collection>` | Browse any public collection on a PDS |
 | `follows\|followers\|blocks\|mutes <did\|handle>` | Read a public social graph |
 | `follow\|unfollow\|block\|unblock\|mute\|unmute <did\|handle>` | Write one relationship |
 | `reply <at-uri> <text>` | Reply to a post |
@@ -237,7 +238,7 @@ M35 supplies the mapping, M36 lets a player claim a link in game, M37 checks a l
 
 ## Roadmap
 
-M1–M21 shipped through v0.1.0 and v0.2.0, and M23 (social-graph writes) through M42 (online whitelist sweep) shipped in v0.3.1; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, labeler issuance, RPG discovery, aspect capture/restore, and the next read/write surfaces.
+M1–M21 shipped through v0.1.0 and v0.2.0, and M23 (social-graph writes) through M42 (online whitelist sweep) shipped in v0.3.1, with M44 (generic record browser) on `main` for the next release; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, labeler issuance, RPG discovery, aspect capture/restore, and the next read/write surfaces.
 
 ### Porting atpcraft
 
@@ -284,6 +285,7 @@ All of these are unauthenticated, and the query carries only the subject's DID o
 - **Presence (M13):** `com.atproto.repo.listRecords` for `at.atpcraft.player.snapshot` (paged, limit 100) against the subject's own PDS for `/atmospheric player`.
 - **Skins (M14):** `com.atproto.repo.listRecords` for `at.atpcraft.player.skin`, then — only when the endorsement verifies — `com.atproto.sync.getBlob` for the skin/cape blob CIDs (query: the subject's DID and the CID) to download the PNGs.
 - **Chat history (M16):** `com.atproto.repo.listRecords` for `at.atpcraft.player.chat` against the subject's own PDS for `/atmospheric chat-of`. Chat records are unsigned by design, so nothing is verified.
+- **Generic records (M44):** `com.atproto.repo.listRecords` (paged, limit 100) for the requested collection against the subject's own PDS for `/atmospheric records`. The query carries only the subject's DID and the collection name; nothing about the requester goes out, and nothing is written or stored.
 - **Server profiles (M19):** `com.atproto.repo.listRecords` for `at.atpcraft.server.profile` against the subject's own PDS for `/atmospheric server-of`.
 - **Social graphs (M20):** `app.bsky.graph.getFollows`, `getFollowers`, `getBlocks` and `getMutes` (paged, limit 100) against `appview_url` for `/atmospheric follows|followers|blocks|mutes`. The member list comes back to you; nothing about you goes out.
 - **Social-graph write lookups (M23):** undoing a follow or block uses `com.atproto.repo.listRecords` for `app.bsky.graph.follow`/`block` against your own PDS (public, unauthenticated) to find records whose `subject` is the target DID. The create/delete/mute calls themselves are in the writes section below.
