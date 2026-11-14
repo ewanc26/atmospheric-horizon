@@ -25,6 +25,7 @@ fn config() -> ServerConfig {
         admin_token: Some(TOKEN.into()),
         link_token: Some(LINK_TOKEN.into()),
         public_url: Some("https://links.example".into()),
+        oauth_resolver: None,
     }
 }
 
