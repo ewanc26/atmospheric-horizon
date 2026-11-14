@@ -168,6 +168,13 @@ pub enum Command {
     /// Read generic records from any collection in a subject's own PDS
     /// (M44). Works logged out, unauthenticated.
     FetchRecords { subject: String, collection: String },
+    /// Check a joining player's linked Bluesky profile for their display name
+    /// and pronouns (M45): resolve the UUID through the identity service and
+    /// read the profile unauthenticated. Works logged out.
+    CheckPlayerProfile {
+        player_uuid: String,
+        player_name: String,
+    },
     /// Read the labels on a subject (M12, labeler read side): an AT-URI, a
     /// DID, a handle, or a bsky.app profile/post/list URL. Labels come from
     /// the subject's AppView view (`labels` field). Works logged out.
@@ -308,6 +315,14 @@ pub enum Event {
         collection: String,
         total: usize,
         items: Vec<String>,
+    },
+    /// A linked joining player's in-game nickname (M45): the canonical UUID,
+    /// the Minecraft name, and the display name plus pronouns to show. The
+    /// worker never emits a nickname equal to the Minecraft name.
+    PlayerProfile {
+        player_uuid: String,
+        player_name: String,
+        nickname: String,
     },
     /// The labels found on a subject (M12, labeler read side): the subject
     /// (AT-URI or DID), where the labels came from (`via`: the AppView URL or
@@ -763,6 +778,11 @@ mod tests {
                 collection: "app.bsky.feed.post".into(),
                 total: 1,
                 items: vec![r#"{"text":"hi"}"#.into()],
+            },
+            Event::PlayerProfile {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
+                nickname: "Alice (they/them)".into(),
             },
             Event::Labels {
                 subject: "s".into(),

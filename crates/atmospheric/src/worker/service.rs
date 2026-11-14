@@ -514,6 +514,10 @@ impl Worker {
                 self.check_remote_colibri_profile(&player_uuid, &player_name)
                     .await
             }
+            Command::CheckPlayerProfile {
+                player_uuid,
+                player_name,
+            } => self.check_player_profile(&player_uuid, &player_name).await,
             Command::ClaimServerLink { code } => self.claim_server_link(&code).await,
             Command::StartBrowserLink {
                 player_uuid,
@@ -2572,6 +2576,43 @@ impl Worker {
         }
     }
 
+    /// Apply a linked joining player's Bluesky display name and pronouns as
+    /// their in-game name (M45). atpcraft shows display names and pronouns for
+    /// linked players; the worker resolves the DID through the M35 map, reads
+    /// the profile with M24's two-source precedence, and emits the composed
+    /// nickname. Every failure is quiet: an unlinked player, an unreachable
+    /// service or a profile with no usable name changes nothing.
+    async fn check_player_profile(&self, player_uuid: &str, player_name: &str) {
+        let Ok(config) = self.load_config() else {
+            return;
+        };
+        if config.server_api_url.trim().is_empty() {
+            return;
+        }
+        let Ok(Some(link)) =
+            identity::fetch_link(&self.http, &config.server_api_url, player_uuid).await
+        else {
+            return;
+        };
+        let appview = if config.appview_url.is_empty() {
+            crate::lists::DEFAULT_APPVIEW.to_string()
+        } else {
+            config.appview_url.clone()
+        };
+        let Ok((_, _, profile)) =
+            profiles::fetch_profile(&self.http, &self.resolver, &appview, &link.did).await
+        else {
+            return;
+        };
+        if let Some(nickname) = profiles::nickname_for(player_name, &profile) {
+            self.emit(Event::PlayerProfile {
+                player_uuid: player_uuid.to_string(),
+                player_name: player_name.to_string(),
+                nickname,
+            });
+        }
+    }
+
     /// Disarm the bridge and, unless called from a replace, report it.
     fn stop_colibri(&mut self, announce: bool) {
         if let Some(task) = self.colibri_task.take() {
@@ -4215,6 +4256,55 @@ mod tests {
 
         runtime.block_on(
             worker.check_remote_colibri_profile("00000000-0000-4000-8000-0000000000a2", "Unlinked"),
+        );
+        assert!(event_rx.try_recv().is_err(), "an unlinked player is quiet");
+    }
+
+    #[test]
+    fn check_player_profile_composes_a_linked_players_nickname() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("player-profile");
+        let mut config = test_config(pds.url.clone());
+        config.server_api_url = pds.url.clone();
+        config.appview_url = pds.url.clone();
+        write_config(&dir, &config);
+        let (events, event_rx) = std::sync::mpsc::channel();
+        let (oauth_tx, _oauth_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (colibri_tx, _colibri_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut worker = Worker::new(WorkerOptions::new(dir), events, oauth_tx, colibri_tx);
+        worker.resolver = stub_resolver(&pds.url);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let uuid = "00000000-0000-4000-8000-0000000000a1";
+
+        runtime.block_on(worker.check_player_profile(uuid, "Alex"));
+        match event_rx.try_recv() {
+            Ok(Event::PlayerProfile {
+                player_uuid,
+                player_name,
+                nickname,
+            }) => {
+                assert_eq!(player_uuid, uuid);
+                assert_eq!(player_name, "Alex");
+                assert_eq!(nickname, "AppView Name (she/her)");
+            }
+            other => panic!("expected PlayerProfile, got {other:?}"),
+        }
+        let requests = pds.requests();
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.path == format!("/v1/links/{uuid}")),
+            "the worker resolves the join through the public link map"
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.path.starts_with("/xrpc/app.bsky.actor.getProfile")),
+            "the linked player's profile is read from the AppView"
+        );
+
+        runtime.block_on(
+            worker.check_player_profile("00000000-0000-4000-8000-0000000000a2", "Unlinked"),
         );
         assert!(event_rx.try_recv().is_err(), "an unlinked player is quiet");
     }

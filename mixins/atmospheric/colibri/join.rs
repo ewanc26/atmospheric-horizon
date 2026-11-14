@@ -1,5 +1,6 @@
 // A player logged in (HEAD of player_logged_in): schedule the presence
-// fallback and ask the worker to check their linked Colibri profile (M37).
+// fallback, ask the worker to check their linked Colibri profile (M37), and
+// ask for their linked Bluesky display name and pronouns (M45).
 // The worker waits three seconds before writing the fallback, and only when
 // the vanilla broadcast or a rewritten join line did not mark it handled.
 fn atmospheric_colibri_join(player: u128, name: &str) {
@@ -13,4 +14,5 @@ fn atmospheric_colibri_join(player: u128, name: &str) {
     );
     m::post_colibri_presence("join", &line.plain());
     m::check_colibri_player(player, name);
+    m::check_player_profile(player, name);
 }

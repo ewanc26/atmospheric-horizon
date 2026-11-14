@@ -23,6 +23,15 @@ fn atmospheric_tick(game: &mut crate::game::Game<'_>) {
             game.native_tell(uuid, horizon_client::text::Text::literal(&line));
         }
     }
+    // M45: apply a linked player's Bluesky display name and pronouns as their
+    // in-game name. The worker resolves the link and profile; a client tick
+    // simply has no server to apply it to.
+    for nickname in m::drain_player_nicknames() {
+        let Some(uuid) = m::uuid_value(&nickname.player_uuid) else {
+            continue;
+        };
+        game.native_set_nickname(uuid, Some(nickname.nickname.as_str()));
+    }
     for link in m::drain_browser_links() {
         let Some(uuid) = m::uuid_value(&link.player_uuid) else {
             continue;

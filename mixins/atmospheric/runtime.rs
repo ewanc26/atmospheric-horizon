@@ -166,6 +166,12 @@ pub enum GameCommand {
     /// Read generic records from any collection in a subject's own PDS (M44):
     /// an unauthenticated listRecords viewer. Works logged out.
     FetchRecords { subject: String, collection: String },
+    /// Check a joining player's linked Bluesky profile for their display name
+    /// and pronouns (M45): the worker resolves the link and reads the profile.
+    CheckPlayerProfile {
+        player_uuid: String,
+        player_name: String,
+    },
     /// Read the labels on a subject (M12, labeler read side): an AT-URI, a
     /// DID, a handle, or a bsky.app profile/post/list URL.
     FetchLabels { subject: String },
@@ -496,6 +502,13 @@ pub enum ModEvent {
         total: usize,
         items: Vec<String>,
     },
+    /// A linked joining player's in-game nickname (M45): the canonical UUID,
+    /// the Minecraft name, and the display name plus pronouns to show.
+    PlayerProfile {
+        player_uuid: String,
+        player_name: String,
+        nickname: String,
+    },
     /// The labels found on a subject (M12, labeler read side): the subject
     /// (AT-URI or DID), where the labels came from (`via`: the AppView URL or
     /// the labeler's endpoint), and the labels themselves.
@@ -636,7 +649,8 @@ pub fn status_text(event: &ModEvent) -> String {
         ),
         ModEvent::JoinGateState { .. }
         | ModEvent::JoinGateDecision { .. }
-        | ModEvent::JoinGateKicks { .. } => String::new(),
+        | ModEvent::JoinGateKicks { .. }
+        | ModEvent::PlayerProfile { .. } => String::new(),
         ModEvent::ChatHistory {
             subject,
             total,
@@ -1071,6 +1085,27 @@ pub fn drain_events(max: usize) -> Vec<ModEvent> {
             prompts.remove(0);
         }
     }
+    if let Ok(mut nicknames) = REMOTE_NICKNAMES
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+    {
+        for event in &drained {
+            if let ModEvent::PlayerProfile {
+                player_uuid,
+                nickname,
+                ..
+            } = event
+            {
+                nicknames.push(RemoteNickname {
+                    player_uuid: player_uuid.clone(),
+                    nickname: nickname.clone(),
+                });
+            }
+        }
+        while nicknames.len() > 32 {
+            nicknames.remove(0);
+        }
+    }
     if let Ok(mut links) = REMOTE_BROWSER_LINKS
         .get_or_init(|| Mutex::new(Vec::new()))
         .lock()
@@ -1184,6 +1219,15 @@ pub struct RemoteBrowserLink {
 
 static REMOTE_BROWSER_LINKS: OnceLock<Mutex<Vec<RemoteBrowserLink>>> = OnceLock::new();
 
+/// One linked player's in-game nickname queued for `native_set_nickname` (M45).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteNickname {
+    pub player_uuid: String,
+    pub nickname: String,
+}
+
+static REMOTE_NICKNAMES: OnceLock<Mutex<Vec<RemoteNickname>>> = OnceLock::new();
+
 /// Take the targeted player prompts queued for server-side delivery (M37).
 pub fn drain_colibri_prompts() -> Vec<RemoteColibriPrompt> {
     REMOTE_COLIBRI_PROMPTS
@@ -1199,6 +1243,15 @@ pub fn drain_browser_links() -> Vec<RemoteBrowserLink> {
         .get_or_init(|| Mutex::new(Vec::new()))
         .lock()
         .map(|mut links| std::mem::take(&mut *links))
+        .unwrap_or_default()
+}
+
+/// Take the linked players' nicknames queued for `native_set_nickname` (M45).
+pub fn drain_player_nicknames() -> Vec<RemoteNickname> {
+    REMOTE_NICKNAMES
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .map(|mut nicknames| std::mem::take(&mut *nicknames))
         .unwrap_or_default()
 }
 
@@ -1386,6 +1439,15 @@ pub fn start_browser_link(player_uuid: String, player_name: &str) {
 /// Ask the worker to check a joining player's linked Colibri profile (M37).
 pub fn check_colibri_player(player: u128, name: &str) {
     send(GameCommand::ColibriPlayerJoined {
+        player_uuid: uuid_text(player),
+        player_name: name.into(),
+    });
+}
+
+/// Ask the worker for a joining player's linked Bluesky display name and
+/// pronouns (M45).
+pub fn check_player_profile(player: u128, name: &str) {
+    send(GameCommand::CheckPlayerProfile {
         player_uuid: uuid_text(player),
         player_name: name.into(),
     });
@@ -2388,6 +2450,16 @@ fn encode_command(command: &GameCommand) -> String {
                 ("collection", jstr(collection)),
             ]),
         )]),
+        GameCommand::CheckPlayerProfile {
+            player_uuid,
+            player_name,
+        } => jobj(vec![(
+            "CheckPlayerProfile",
+            jobj(vec![
+                ("player_uuid", jstr(player_uuid)),
+                ("player_name", jstr(player_name)),
+            ]),
+        )]),
         GameCommand::FetchLabels { subject } => jobj(vec![(
             "FetchLabels",
             jobj(vec![("subject", jstr(subject))]),
@@ -2756,6 +2828,14 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 items,
             })
         }
+        "PlayerProfile" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::PlayerProfile {
+                player_uuid: req_str(obj, "player_uuid")?,
+                player_name: req_str(obj, "player_name")?,
+                nickname: req_str(obj, "nickname")?,
+            })
+        }
         "Labels" => {
             let obj = payload_obj()?;
             let labels = as_arr(jget(obj, "labels")?)?
@@ -2921,6 +3001,7 @@ mod tests {
         post_colibri_handled(Some("join"));
         post_colibri_presence("join", "Alex joined the game");
         check_colibri_player(1, "Alex");
+        check_player_profile(2, "Alex");
         post_snapshot(snapshot_from_player(
             "",
             "minecraft:overworld",
@@ -3047,6 +3128,16 @@ mod tests {
                 assert_eq!(player_name, "Alex");
             }
             other => panic!("expected ColibriPlayerJoined, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::CheckPlayerProfile {
+                player_uuid,
+                player_name,
+            }) => {
+                assert_eq!(player_uuid, "00000000-0000-0000-0000-000000000002");
+                assert_eq!(player_name, "Alex");
+            }
+            other => panic!("expected CheckPlayerProfile, got {:?}", other),
         }
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::PostSnapshot { summary }) => {
@@ -3240,6 +3331,24 @@ mod tests {
         );
         assert!(drain_colibri_prompts().is_empty());
 
+        // M45: a linked player's nickname is queued for native_set_nickname.
+        event_tx
+            .send(ModEvent::PlayerProfile {
+                player_uuid: "00000000-0000-4000-8000-000000000002".into(),
+                player_name: "Alex".into(),
+                nickname: "Alice (they/them)".into(),
+            })
+            .unwrap();
+        assert_eq!(drain_events(16).len(), 1);
+        assert_eq!(
+            drain_player_nicknames(),
+            vec![RemoteNickname {
+                player_uuid: "00000000-0000-4000-8000-000000000002".into(),
+                nickname: "Alice (they/them)".into(),
+            }]
+        );
+        assert!(drain_player_nicknames().is_empty());
+
         // M38: the login hook asks the worker and waits for its decision.
         event_tx
             .send(ModEvent::JoinGateState {
@@ -3346,6 +3455,14 @@ mod tests {
 
     #[test]
     fn status_text_covers_every_event() {
+        assert_eq!(
+            status_text(&ModEvent::PlayerProfile {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
+                nickname: "Alice (they/them)".into(),
+            }),
+            ""
+        );
         assert_eq!(
             status_text(&ModEvent::Profile {
                 subject: "did:plc:alice".into(),
@@ -3888,6 +4005,13 @@ mod tests {
             r#"{"FetchRecords":{"subject":"a.test","collection":"app.bsky.feed.post"}}"#
         );
         assert_eq!(
+            encode_command(&GameCommand::CheckPlayerProfile {
+                player_uuid: "00000000-0000-4000-8000-000000000002".into(),
+                player_name: "Alex".into(),
+            }),
+            r#"{"CheckPlayerProfile":{"player_uuid":"00000000-0000-4000-8000-000000000002","player_name":"Alex"}}"#
+        );
+        assert_eq!(
             encode_command(&GameCommand::PostChat {
                 message: "m".into(),
                 automatic: true,
@@ -4112,6 +4236,16 @@ mod tests {
 
     #[test]
     fn decode_event_wire_shapes() {
+        assert_eq!(
+            decode_event(
+                r#"{"PlayerProfile":{"player_uuid":"00000000-0000-4000-8000-000000000002","player_name":"Alex","nickname":"Alice (they/them)"}}"#
+            ),
+            Some(ModEvent::PlayerProfile {
+                player_uuid: "00000000-0000-4000-8000-000000000002".into(),
+                player_name: "Alex".into(),
+                nickname: "Alice (they/them)".into(),
+            })
+        );
         assert_eq!(
             decode_event(
                 r#"{"SocialGraph":{"kind":"follows","subject":"did:plc:x","via":"https://public.api.bsky.app","members":[{"did":"did:plc:a","handle":"a.test","display_name":"A"}]}}"#
