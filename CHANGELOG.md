@@ -113,6 +113,14 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   server profile advertises `labeler` when the flag is on. No PLC identity
   update or game trigger is added, so the labeler is not yet discoverable
   through the DID document. The record is stored on the PDS, not locally.
+- **M60 — labeler PLC identity publication (#142).** `atmospheric-server` serves
+  the labeler's public identity at `GET /v1/labeler/identity` (service DID,
+  signing `did:key`, public endpoint). `/atmospheric labeler-identity status`,
+  `request` and `submit <token>` read the account's current PLC operation,
+  preserve every existing rotation key, alias, verification method and service,
+  add `#atproto_label` and `#atproto_labeler`, and sign/submit the operation as
+  the server account. A narrow server-account scope gains `identity:*` while
+  the labeler is enabled. No new local storage or label emission.
 
 ## [0.3.1] — 2026-11-14
 
