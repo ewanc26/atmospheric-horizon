@@ -60,6 +60,10 @@ const COLIBRI_PRESENCE_WINDOW: Duration = Duration::from_secs(5);
 
 /// How long the M38 login gate waits for the identity map and list read.
 const JOIN_GATE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How many of the newest generic records the HUD shows (M44), matching the
+/// M16 chat-history limit.
+const RECORDS_HISTORY_LIMIT: usize = 5;
+
 /// How long the M42 online sweep waits for the list refresh and the per-player
 /// link lookups. Longer than one login gate because it covers every online
 /// player; a timeout kicks nobody.
@@ -616,6 +620,25 @@ impl Worker {
                         total,
                         items,
                     }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::FetchRecords {
+                subject,
+                collection,
+            } => {
+                // A public read against the subject's own PDS: works logged
+                // out, no token refresh.
+                match self.fetch_records(&subject, &collection).await {
+                    Ok((subject, via, collection, total, items)) => {
+                        self.emit(Event::RecordsHistory {
+                            subject,
+                            via,
+                            collection,
+                            total,
+                            items,
+                        })
+                    }
                     Err(error) => self.fail(error.to_string()),
                 }
             }
@@ -1439,6 +1462,29 @@ impl Worker {
             presence::list_records(&self.http, &pds, &did, records::CHAT_COLLECTION).await?;
         let (total, items) = chats::history(&did, &records, chats::HISTORY_LIMIT);
         Ok((did, pds, total, items))
+    }
+
+    /// Read generic records from any collection in a subject's own PDS (M44):
+    /// unauthenticated listRecords, reduced to the total plus the newest few
+    /// records as compact JSON strings. The records are arbitrary lexicons, so
+    /// nothing is parsed or verified.
+    async fn fetch_records(
+        &self,
+        subject: &str,
+        collection: &str,
+    ) -> crate::error::Result<(String, String, String, usize, Vec<String>)> {
+        let (did, pds) = presence::resolve_player(&self.http, &self.resolver, subject).await?;
+        let records = presence::list_records(&self.http, &pds, &did, collection).await?;
+        let total = records.len();
+        // listRecords serves a collection newest-first; take the newest few and
+        // reverse them into display order (oldest first).
+        let items = records
+            .iter()
+            .take(RECORDS_HISTORY_LIMIT)
+            .rev()
+            .map(|(_, value)| value.to_string())
+            .collect();
+        Ok((did, pds, collection.to_string(), total, items))
     }
 
     /// Read a player's latest `at.atpcraft.player.skin` record from their own
@@ -5424,6 +5470,60 @@ mod tests {
             pds.non_poll_requests().len(),
             before,
             "no HTTP call for a record URI"
+        );
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn fetch_records_reads_any_collection_unauthenticated() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("fetch-records");
+        write_config(&dir, &test_config(pds.url.clone()));
+        // A record in a collection the mod does not otherwise know about.
+        pds.seed_record(
+            "app.bsky.feed.post",
+            "3jub4stub0007",
+            serde_json::json!({
+                "$type": "app.bsky.feed.post",
+                "text": "a generic record",
+                "createdAt": "2026-11-12T10:00:00.000Z",
+            }),
+        );
+        let (command_tx, event_rx, handle) =
+            spawn_worker_with_resolver(dir.clone(), stub_resolver(&pds.url));
+
+        // Logged out: the read is unauthenticated and finds the seeded record.
+        command_tx
+            .send(Command::FetchRecords {
+                subject: "did:plc:stubuser".into(),
+                collection: "app.bsky.feed.post".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::RecordsHistory { .. })) {
+            Event::RecordsHistory {
+                subject,
+                via,
+                collection,
+                total,
+                items,
+            } => {
+                assert_eq!(subject, "did:plc:stubuser");
+                assert_eq!(via, pds.url);
+                assert_eq!(collection, "app.bsky.feed.post");
+                assert_eq!(total, 1);
+                assert_eq!(items.len(), 1);
+                assert!(items[0].contains("a generic record"), "{}", items[0]);
+            }
+            other => panic!("expected RecordsHistory, got {other:?}"),
+        }
+        assert!(
+            pds.requests()
+                .iter()
+                .filter(|r| r.path.starts_with("/xrpc/com.atproto.repo.listRecords"))
+                .all(|r| !r.authorized),
+            "the generic record read is unauthenticated"
         );
 
         command_tx.send(Command::Shutdown).unwrap();
