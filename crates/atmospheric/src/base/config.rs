@@ -49,6 +49,11 @@ pub struct Config {
     /// The token is refreshed only when it is close to expiry, so a healthy
     /// session costs an in-memory check. Floored at one second.
     pub server_account_token_refresh_seconds: u64,
+    /// Publish the `app.bsky.labeler.service` declaration as the server
+    /// account when it logs in or resumes (M59). Off by default, matching
+    /// atpcraft's `bluesky-labeler-enabled`; the labeler HTTP service itself
+    /// is enabled separately by `ATMOSPHERIC_SERVER_LABELER_DID`.
+    pub labeler_enabled: bool,
     /// Post the death message automatically when the player dies.
     pub post_death_messages: bool,
     /// Publish every chat message as an `at.atpcraft.player.chat` record.
@@ -155,6 +160,7 @@ impl Default for Config {
             app_password: String::new(),
             poll_interval_secs: 60,
             server_account_token_refresh_seconds: 60,
+            labeler_enabled: false,
             post_death_messages: false,
             post_chat_messages: false,
             chat_server_id: default_chat_server_id(),
@@ -230,6 +236,7 @@ mod tests {
             app_password: "abcd-1234-efgh-5678".into(),
             poll_interval_secs: 30,
             server_account_token_refresh_seconds: 30,
+            labeler_enabled: true,
             post_death_messages: true,
             post_chat_messages: true,
             chat_server_id: "my-server".into(),
@@ -271,6 +278,7 @@ mod tests {
         assert_eq!(config.pds_url, back.pds_url);
         assert_eq!(config.poll_interval_secs, back.poll_interval_secs);
         assert_eq!(back.server_account_token_refresh_seconds, 30);
+        assert!(back.labeler_enabled);
         assert_eq!(
             back.oauth_scope,
             "atproto repo:app.bsky.feed.post?action=create"
@@ -327,6 +335,7 @@ mod tests {
         assert_eq!(config.join_gate_sweep_seconds, 60);
         assert_eq!(config.list_cache_seconds, 300);
         assert_eq!(config.server_account_token_refresh_seconds, 60);
+        assert!(!config.labeler_enabled);
         assert!(config.oauth_scope.is_empty());
         assert_eq!(config.colibri_appview_url, "https://api.colibri.social");
         assert!(config.server_api_url.is_empty());

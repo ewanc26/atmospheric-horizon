@@ -7,6 +7,7 @@ pub mod actions;
 pub mod chats;
 pub mod graph;
 pub mod interactions;
+pub mod labeler;
 pub mod labels;
 pub mod lists;
 pub mod notifications;
