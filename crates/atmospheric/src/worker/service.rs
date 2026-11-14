@@ -4285,7 +4285,7 @@ mod tests {
             }) => {
                 assert_eq!(player_uuid, uuid);
                 assert_eq!(player_name, "Alex");
-                assert_eq!(nickname, "AppView Name (she/her)");
+                assert_eq!(nickname, "AppView_Name (she/her)");
             }
             other => panic!("expected PlayerProfile, got {other:?}"),
         }

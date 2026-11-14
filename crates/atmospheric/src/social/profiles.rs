@@ -147,18 +147,25 @@ pub async fn fetch_profile(
     Ok((did, pds, profile))
 }
 
-/// How long a composed in-game nickname may be (M45). Minecraft names are 16
-/// characters, but a Bluesky display name may be longer; the nickname is plain
-/// text shown in chat and the player list, so keep it short.
+/// atpcraft's longest Minecraft player name.
+pub const MINECRAFT_NAME_MAX_LEN: usize = 16;
+
+/// How long the complete in-game nickname may be (M47). The base name follows
+/// atpcraft's 16-character Minecraft limit; the plain-text pronoun suffix and
+/// the overall display are capped separately because Horizon's nickname helper
+/// has no styled chat-only form.
 pub const NICKNAME_MAX_LEN: usize = 32;
 
-/// Compose the in-game nickname for a linked player (M45): the Bluesky display
-/// name when there is one (`vanilla` otherwise), plus ` (pronouns)` when the
-/// profile has usable pronouns. Control characters are stripped and whitespace
-/// is collapsed, matching atpcraft's display rules. Returns `None` when the
-/// result is the vanilla name, so an unlinked-looking player is left untouched.
+/// Compose the in-game nickname for a linked player (M47), following
+/// atpcraft's `sanitizeMinecraftNameWithFallback`: the display name reduced to
+/// a valid Minecraft name, else the handle's username part, else the vanilla
+/// name. A usable pronoun value is appended as ` (pronouns)` in plain text.
+/// Returns `None` when the result is the vanilla name, so an unchanged player
+/// is left untouched.
 pub fn nickname_for(vanilla: &str, profile: &ProfileDigest) -> Option<String> {
-    let base = clean_display_name(&profile.display_name).unwrap_or_else(|| vanilla.to_string());
+    let base = minecraft_name(&profile.display_name)
+        .or_else(|| handle_name(&profile.handle))
+        .unwrap_or_else(|| vanilla.to_string());
     let mut name = base;
     if let Some(pronouns) = normalize_pronouns(profile.pronouns.as_deref()) {
         name.push_str(" (");
@@ -169,13 +176,31 @@ pub fn nickname_for(vanilla: &str, profile: &ProfileDigest) -> Option<String> {
     (!name.is_empty() && name != vanilla).then_some(name)
 }
 
-fn clean_display_name(raw: &str) -> Option<String> {
-    let cleaned: String = raw
+/// atpcraft's `sanitizeMinecraftName`: keep `[A-Za-z0-9_]` and ASCII
+/// whitespace, drop everything else, collapse whitespace runs into `_`, and
+/// cap the result at 16 characters. `None` when nothing valid remains.
+fn minecraft_name(raw: &str) -> Option<String> {
+    let kept: String = raw
         .chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || ch.is_ascii_whitespace())
         .collect();
-    let normal = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!normal.is_empty()).then_some(normal)
+    let name: String = kept
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>()
+        .join("_")
+        .chars()
+        .take(MINECRAFT_NAME_MAX_LEN)
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// atpcraft's handle fallback: the part before the first dot, sanitized.
+fn handle_name(handle: &str) -> Option<String> {
+    let (username, _) = handle.split_once('.')?;
+    if username.is_empty() {
+        return None;
+    }
+    minecraft_name(username)
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {
@@ -295,15 +320,90 @@ mod tests {
     }
 
     #[test]
-    fn nickname_falls_back_to_the_minecraft_name_for_pronouns_only() {
+    fn nickname_falls_back_to_the_handle_username() {
+        let mut profile = nickname_profile("", None);
+        profile.handle = "almostzoey.bsky.social".into();
         assert_eq!(
-            nickname_for("Alex", &nickname_profile("", Some(" she / her "))).as_deref(),
-            Some("Alex (she / her)")
+            nickname_for("Alex", &profile).as_deref(),
+            Some("almostzoey")
         );
-        // No display name and no pronouns leaves the vanilla name alone.
-        assert_eq!(nickname_for("Alex", &nickname_profile("", None)), None);
+
+        profile.pronouns = Some("they/them".into());
+        assert_eq!(
+            nickname_for("Steve", &profile).as_deref(),
+            Some("almostzoey (they/them)")
+        );
+
+        // An invalid handle leaves the vanilla name; pronouns still show.
+        profile.handle = "🌈.test".into();
+        assert_eq!(
+            nickname_for("Alex", &profile).as_deref(),
+            Some("Alex (they/them)")
+        );
+    }
+
+    #[test]
+    fn nickname_sanitizes_the_display_name_like_atpcraft() {
+        assert_eq!(
+            nickname_for("Alex", &nickname_profile("Léon✨09", None)).as_deref(),
+            Some("Lon09")
+        );
+        assert_eq!(
+            nickname_for("Alex", &nickname_profile("🌈rain·bow🌈", None)).as_deref(),
+            Some("rainbow")
+        );
+        assert_eq!(
+            nickname_for("Alex", &nickname_profile("dash-dot.", None)).as_deref(),
+            Some("dashdot")
+        );
+        assert_eq!(
+            nickname_for("Alex", &nickname_profile("Cool \t Guy", None)).as_deref(),
+            Some("Cool_Guy")
+        );
+        // The stripped emoji leaves no dangling underscore.
+        assert_eq!(
+            nickname_for("Alex", &nickname_profile("Guy 🌈", None)).as_deref(),
+            Some("Guy")
+        );
+        assert_eq!(
+            nickname_for(
+                "Alex",
+                &nickname_profile("ABCDEFGHIJKLMNOPQRSTUVWXYZ", None)
+            )
+            .as_deref(),
+            Some("ABCDEFGHIJKLMNOP")
+        );
+        assert_eq!(
+            nickname_for("Alex", &nickname_profile("Alice Smith", Some("they/them"))).as_deref(),
+            Some("Alice_Smith (they/them)")
+        );
+    }
+
+    #[test]
+    fn nickname_keeps_the_vanilla_name_when_nothing_changes() {
         // A display name identical to the Minecraft name changes nothing.
         assert_eq!(nickname_for("Alex", &nickname_profile("Alex", None)), None);
+        // With no display name and no usable handle, there is nothing to apply.
+        let mut profile = nickname_profile("", None);
+        profile.handle = String::new();
+        assert_eq!(nickname_for("Alex", &profile), None);
+    }
+
+    #[test]
+    fn nickname_caps_the_base_and_the_final_text() {
+        let long = "A".repeat(40);
+        assert_eq!(
+            nickname_for("Alex", &nickname_profile(&long, None)).as_deref(),
+            Some("AAAAAAAAAAAAAAAA")
+        );
+        let pronouns = "p".repeat(40);
+        assert_eq!(
+            nickname_for("Alex", &nickname_profile("Alice", Some(&pronouns)))
+                .unwrap()
+                .chars()
+                .count(),
+            NICKNAME_MAX_LEN
+        );
     }
 
     #[test]
@@ -314,15 +414,7 @@ mod tests {
                 &nickname_profile("  Alice\u{0007}\n  Smith  ", None)
             )
             .as_deref(),
-            Some("Alice Smith")
+            Some("Alice_Smith")
         );
-    }
-
-    #[test]
-    fn nickname_is_capped_at_a_char_boundary() {
-        let long = "A".repeat(NICKNAME_MAX_LEN + 10);
-        let name = nickname_for("Alex", &nickname_profile(&long, Some("x"))).unwrap();
-        assert_eq!(name.chars().count(), NICKNAME_MAX_LEN);
-        assert!(name.starts_with("AAAA"));
     }
 }
