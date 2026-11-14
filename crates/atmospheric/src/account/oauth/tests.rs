@@ -835,15 +835,23 @@ async fn redirect_with_a_wrong_state_is_rejected() {
 }
 
 #[test]
-fn colibri_scope_adds_the_stream_grant_only_when_enabled() {
-    let enabled = scope_for_colibri(true, "did:web:api.colibri.social");
-    assert!(enabled.contains("repo:social.colibri.message?action=create&action=delete"));
-    assert!(enabled.contains("repo:social.colibri.membership?action=create&action=delete"));
-    assert!(enabled.contains(
-        "rpc:social.colibri.sync.subscribeEvents?aud=did:web:api.colibri.social#colibri_appview"
-    ));
+fn colibri_player_scope_has_message_grants_but_only_the_server_scope_has_the_stream() {
+    let player = scope_for_colibri(true, "did:web:api.colibri.social");
+    assert!(player.contains("repo:social.colibri.message?action=create&action=delete"));
+    assert!(player.contains("repo:social.colibri.membership?action=create&action=delete"));
+    assert!(!player.contains("rpc:social.colibri.sync.subscribeEvents"));
     assert_eq!(
         scope_for_colibri(false, "did:web:api.colibri.social"),
+        DEFAULT_SCOPE
+    );
+
+    let server = scope_for_server(DEFAULT_SCOPE, true, "did:web:api.colibri.social");
+    assert!(server.contains(
+        "rpc:social.colibri.sync.subscribeEvents?aud=did:web:api.colibri.social#colibri_appview"
+    ));
+    // The broad default base already covers the descriptor write.
+    assert_eq!(
+        scope_for_server(DEFAULT_SCOPE, false, "did:web:api.colibri.social"),
         DEFAULT_SCOPE
     );
 }
@@ -858,37 +866,84 @@ fn scope_for_falls_back_to_the_default_base_and_trims_a_configured_one() {
         scope_for("   ", false, "did:web:api.colibri.social"),
         DEFAULT_SCOPE
     );
+}
+
+#[test]
+fn a_custom_base_gets_the_required_player_grants_once() {
+    let base = "atproto repo:app.bsky.feed.post?action=create";
+    let scope = scope_for(base, false, "did:web:api.colibri.social");
+    assert!(scope.starts_with(base));
+    for grant in PLAYER_GRANTS {
+        assert_eq!(
+            scope
+                .split_ascii_whitespace()
+                .filter(|token| *token == grant)
+                .count(),
+            1,
+            "{grant} appears once"
+        );
+    }
+    // Rebuilding from the result changes nothing.
     assert_eq!(
-        scope_for("  atproto  ", false, "did:web:api.colibri.social"),
-        "atproto"
+        scope_for(&scope, false, "did:web:api.colibri.social"),
+        scope
+    );
+
+    // A trimmed custom base is the prefix.
+    let trimmed = scope_for("  atproto  ", false, "did:web:api.colibri.social");
+    assert!(trimmed.starts_with("atproto repo:at.atpcraft.player.snapshot"));
+
+    // The bridge adds each Colibri grant once, and only the server gets the stream.
+    let player = scope_for(base, true, "did:web:api.colibri.social");
+    assert_eq!(
+        player
+            .matches("repo:social.colibri.message?action=create&action=delete")
+            .count(),
+        1
+    );
+    assert_eq!(
+        player
+            .matches("repo:social.colibri.membership?action=create&action=delete")
+            .count(),
+        1
+    );
+    assert!(!player.contains("rpc:social.colibri.sync.subscribeEvents"));
+    let server = scope_for_server(base, true, "did:web:api.colibri.social");
+    assert_eq!(
+        server
+            .matches(
+                "rpc:social.colibri.sync.subscribeEvents?aud=did:web:api.colibri.social#colibri_appview"
+            )
+            .count(),
+        1
+    );
+    assert_eq!(
+        scope_for_server(&server, true, "did:web:api.colibri.social"),
+        server
     );
 }
 
 #[test]
-fn scope_for_appends_each_colibri_grant_once() {
-    let base = "atproto repo:app.bsky.feed.post?action=create";
-    let scope = scope_for(base, true, "did:web:api.colibri.social");
-    assert!(scope.starts_with(base));
-    let colibri_grants = scope
-        .split_ascii_whitespace()
-        .filter(|token| {
-            token.starts_with("repo:social.colibri") || token.starts_with("rpc:social.colibri")
-        })
-        .count();
-    assert_eq!(colibri_grants, 3);
-    // A base that already carries the grants is left unchanged.
-    assert_eq!(scope_for(&scope, true, "did:web:api.colibri.social"), scope);
-}
-
-#[test]
-fn scope_for_a_custom_base_without_the_bridge_is_just_the_base() {
+fn the_server_scope_adds_the_descriptor_grant_and_a_broad_base_needs_none() {
+    let base = "atproto";
+    let player = scope_for(base, false, "did:web:api.colibri.social");
+    assert!(!player.contains(SERVER_PROFILE_GRANT));
+    let server = scope_for_server(base, false, "did:web:api.colibri.social");
+    assert_eq!(server.matches(SERVER_PROFILE_GRANT).count(), 1);
     assert_eq!(
-        scope_for(
-            "atproto repo:app.bsky.feed.post?action=create",
-            false,
-            "did:web:api.colibri.social"
-        ),
-        "atproto repo:app.bsky.feed.post?action=create"
+        scope_for_server(&server, false, "did:web:api.colibri.social"),
+        server
+    );
+
+    // `transition:generic` already covers the writes, so the default string
+    // stays exactly as before.
+    assert_eq!(
+        scope_for(DEFAULT_SCOPE, false, "did:web:api.colibri.social"),
+        DEFAULT_SCOPE
+    );
+    assert_eq!(
+        scope_for_server(DEFAULT_SCOPE, false, "did:web:api.colibri.social"),
+        DEFAULT_SCOPE
     );
 }
 

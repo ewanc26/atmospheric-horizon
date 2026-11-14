@@ -2100,18 +2100,24 @@ impl Worker {
         }
         // The client_id comes from the settings file when set (hosted client
         // metadata URL); otherwise the loopback default. The scope is the
-        // configured base (or the mod's default) plus the Colibri grants when
-        // the bridge is enabled, because otherwise the PDS refuses to mint the
-        // AppView service-auth token.
+        // configured base (or the mod's default) plus the grants the features
+        // need; the server account also asks for its descriptor grant and the
+        // Colibri stream grant, because otherwise a narrow custom scope or a
+        // bridged server fails its writes / service-auth mint.
         let config = self.load_config().ok();
         let scope = config
             .as_ref()
-            .map(|config| {
-                oauth::scope_for(
+            .map(|config| match target {
+                OAuthTarget::Server => oauth::scope_for_server(
                     &config.oauth_scope,
                     config.colibri_bridge_enabled,
                     &config.colibri_appview_did,
-                )
+                ),
+                OAuthTarget::Player => oauth::scope_for(
+                    &config.oauth_scope,
+                    config.colibri_bridge_enabled,
+                    &config.colibri_appview_did,
+                ),
             })
             .unwrap_or_else(|| oauth::DEFAULT_SCOPE.into());
         let client_id = config
