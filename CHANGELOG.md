@@ -43,6 +43,13 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   `signingKey.keyId`; `chat_server_id` remains an optional override. The key is
   loaded or created through the existing snapshot path on first chat. No new
   endpoint, credential or record shape.
+- **M49 — server-profile name and capabilities (#120).** A blank `server_name`
+  now falls back to `client_name` (`atmospheric-horizon` by default), matching
+  atpcraft's client-name fallback. `server_capabilities` is an optional
+  override; when empty, the descriptor advertises `skin-sync` and, when the
+  gate is armed, `join-gate`. It no longer claims `player-data-sync` before
+  server-side capture/restore exists. No new endpoint, credential or record
+  shape.
 
 ## [0.3.1] — 2026-11-14
 
