@@ -97,6 +97,14 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   expiry and cursor pagination. The `app.bsky.labeler.service` declaration,
   PLC identity update, `subscribeLabels` stream and game triggers remain in
   #112.
+- **M58 — subscribeLabels and public CORS (#138).** Add the public spec
+  `GET /xrpc/com.atproto.label.subscribeLabels` WebSocket. Each label is a
+  binary DAG-CBOR frame (`{t:"#labels", op:1}` + `{seq, labels}`), with `sig`
+  as a byte string. A `cursor` backfills the durable log before live fan-out;
+  a cursor past the tail returns a `FutureCursor` error frame and a normal
+  close. The public XRPC routes also answer permissive CORS for browser
+  consumers. No environment variable, record shape or outbound request is
+  added.
 
 ## [0.3.1] — 2026-11-14
 
