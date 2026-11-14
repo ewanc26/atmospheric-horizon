@@ -1,10 +1,4 @@
-//! Durable link and pending-pairing storage.
-//!
-//! The state is a small JSON document rewritten atomically on every mutation.
-//! Writes are serialised by an async lock, and a failed write leaves the
-//! in-memory state untouched. The service is designed for one process per data
-//! directory; run a shared database if you need multiple replicas.
-
+use super::file::{DiskState, STORE_VERSION, persist};
 use crate::{
     error::ApiError,
     model::{
@@ -13,49 +7,8 @@ use crate::{
         pairing_ttl,
     },
 };
-use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    fs::{self, OpenOptions},
-    io::Write,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{fs, path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
-
-const STORE_VERSION: u32 = 1;
-const PAIRING_FILE: &str = "links.json";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DiskState {
-    #[serde(default = "store_version")]
-    version: u32,
-    #[serde(default)]
-    links: BTreeMap<String, Link>,
-    #[serde(default)]
-    pairings: BTreeMap<String, PendingPairing>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PendingPairing {
-    player_uuid: String,
-    player_name: String,
-    expires_at: u64,
-}
-
-impl DiskState {
-    fn empty() -> Self {
-        Self {
-            version: STORE_VERSION,
-            links: BTreeMap::new(),
-            pairings: BTreeMap::new(),
-        }
-    }
-}
-
-fn store_version() -> u32 {
-    STORE_VERSION
-}
 
 /// A cheap-to-clone handle to the shared store.
 #[derive(Clone)]
@@ -193,7 +146,7 @@ impl LinkStore {
                 let expires_at = now.saturating_add(ttl);
                 state.pairings.insert(
                     key,
-                    PendingPairing {
+                    super::file::PendingPairing {
                         player_uuid: player_uuid.clone(),
                         player_name: player_name.clone(),
                         expires_at,
@@ -244,64 +197,19 @@ impl LinkStore {
     }
 }
 
-async fn persist(path: PathBuf, state: DiskState) -> Result<(), ApiError> {
-    tokio::task::spawn_blocking(move || persist_sync(&path, &state)).await??;
-    Ok(())
-}
-
-fn persist_sync(path: &Path, state: &DiskState) -> Result<(), ApiError> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
-    let json = serde_json::to_vec_pretty(state)?;
-    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    }
-    file.write_all(&json)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    drop(file);
-    #[cfg(windows)]
-    if path.exists() {
-        // std::fs::rename does not replace an existing destination on Windows.
-        fs::remove_file(path)?;
-    }
-    fs::rename(&temporary, path)?;
-    Ok(())
-}
-
-/// The default data file inside a data directory.
-pub fn default_links_path(data_dir: impl AsRef<Path>) -> PathBuf {
-    data_dir.as_ref().join(PAIRING_FILE)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::default_links_path;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn temp_path(tag: &str) -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        std::env::temp_dir()
-            .join(format!(
-                "atmospheric-server-{tag}-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ))
-            .join(PAIRING_FILE)
+        default_links_path(std::env::temp_dir().join(format!(
+            "atmospheric-server-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        )))
     }
 
     fn link_input(did: &str) -> LinkInput {
