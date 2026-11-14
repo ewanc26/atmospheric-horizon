@@ -316,9 +316,9 @@ pub enum Event {
         total: usize,
         items: Vec<String>,
     },
-    /// A linked joining player's in-game nickname (M45): the canonical UUID,
-    /// the Minecraft name, and the display name plus pronouns to show. The
-    /// worker never emits a nickname equal to the Minecraft name.
+    /// A linked joining player's in-game nickname (M45/M47): the canonical
+    /// UUID, the Minecraft name, and the composed nickname to show. The worker
+    /// never emits a nickname equal to the Minecraft name.
     PlayerProfile {
         player_uuid: String,
         player_name: String,
