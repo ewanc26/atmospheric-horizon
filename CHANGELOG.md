@@ -61,6 +61,12 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   now re-publish `at.atpcraft.server.profile` through the existing writer. The
   write is best-effort and keeps the manual `/atmospheric server-account
   publish` command; no endpoint, credential or record shape changes.
+- **M52 — cached list members (#126).** `list_cache_seconds` (default 300;
+  `0` always refreshes) caches `app.bsky.graph.getList` members by AppView and
+  canonical list. A fresh hit makes no request, a stale cache refreshes once,
+  and a fresh gate miss refreshes once before denying. Explicit list reads,
+  gate decisions and the sweep reuse the cache; failures stay fail-closed and
+  keep the last successful cache. No endpoint or record shape changes.
 
 ## [0.3.1] — 2026-11-14
 

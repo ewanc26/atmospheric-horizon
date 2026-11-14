@@ -1096,8 +1096,9 @@ server was contacted.
 
 M38 only checks the list when a player logs in, so a player admitted before a
 list edit stays until they reconnect. M42 is atpcraft's `startWhitelistSweep` /
-`computeWhitelistKicks`: a periodic re-read that disconnects an online player
-whose linked DID has left the list.
+`computeWhitelistKicks`: a periodic cached check that disconnects an online
+player whose linked DID has left the list. M52 supplies the member cache and
+its stale-refresh rule.
 
 The sweep period is the new `join_gate_sweep_seconds` config key (default 60,
 `0` disables). `emit_join_gate_state` now sends
@@ -1110,8 +1111,8 @@ is the pure throttle (armed, period positive, elapsed since the last send);
 `Command::JoinGateSweep { players: [{player_uuid, player_name}, …] }` from
 Horizon's `native_server_players()` helper.
 
-The worker's `join_gate_sweep` re-reads the list once with the existing
-`fetch_list`, then resolves each online UUID through
+The worker's `join_gate_sweep` reads the list through the M52 cache (a stale
+entry refreshes once), then resolves each online UUID through
 `GET <server_api_url>/v1/links/{uuid}` and compares the DID to the members. It
 emits `Event::JoinGateKicks { players }` only when the list is non-empty and
 the whole read finished inside a 30-second budget. A failed list read (or a
@@ -1212,6 +1213,14 @@ atpcraft re-publishes the descriptor inside the server-account login callback an
 `Worker::auto_publish_server_profile` now calls the existing M25/M10 writer after a successful server-account OAuth login and after a persisted server session resumes at startup. It does not add a success event, matching atpcraft's silent best-effort publish; a failure is surfaced through the worker's normal `Failed` event without undoing the session. The manual command still works. The writer keeps its existing `getRecord`/`putRecord` pair, rkey `self`, `createdAt` preservation and M49 name/capability rules, so no record shape or endpoint changes.
 
 Verified: the server-account OAuth worker test now expects the automatic upsert and the manual refresh, and a new startup-resume test creates a persisted server session, refreshes it through the stub authorization server, and asserts one descriptor `putRecord` with the refreshed access token and the default name/capabilities. No live PDS was contacted.
+
+### M52: cached list members
+
+atpcraft's `AtprotoListResolver` caches the member DIDs from `app.bsky.graph.getList` for `bluesky-list-cache-seconds` (default 300). `isMember` serves a fresh cache hit without a request, refreshes when the cache is stale, and refreshes once on a fresh miss before the final reject; `getMembers` reuses a fresh cache, and the whitelist sweep force-refreshes on its period. This mod fetched every page for every list read, gate decision and sweep.
+
+The new `list_cache_seconds` setting (default 300; `0` always refreshes) controls a `ListCache` on the worker. It is keyed by the AppView and canonical list AT-URI, and its timestamp is taken after a successful read. `cached_list_members` returns the members plus whether they came from a fresh hit; `fetch_list` reuses that hit, `check_gate` refreshes once when a fresh cache misses the subject, and the sweep reuses the cache so the default 60-second sweep only performs a network read when the 300-second cache is stale. A failed read leaves the last successful cache intact and still fails closed at the gate. The sweep period remains the separate `join_gate_sweep_seconds`; the cache controls the list-read cadence.
+
+Verified: config tests pin the default and a non-default TTL; a worker unit test covers the TTL boundary, `0` and key mismatch. The M11 test repeats a list read and asserts it still fetched only the original two pages; the M15 test asserts two pages for the first check, two more for a fresh cache miss, and two more for a different list. No live AppView was contacted. No endpoint, credential or record shape changed.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
