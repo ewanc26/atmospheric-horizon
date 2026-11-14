@@ -10,7 +10,7 @@ use crate::{
     Command, Config, Event, SweepPlayer, actions, chats,
     colibri::{self, ChannelRef, StreamEvent},
     error::AtmosphericError,
-    graph, identity, interactions,
+    graph, identity, interactions, labeler,
     notifications::{self, SeenCursor},
     oauth::{self, DpopState, SharedDpop},
     presence::{self, PlayerDigest},
@@ -438,8 +438,9 @@ fn server_profile_name(config: &Config) -> String {
 
 /// The server profile's capabilities (M49): an explicit override wins;
 /// otherwise derive the features that are actually implemented. `skin-sync`
-/// is always present (M9/M14); `join-gate` appears when the gate is armed.
-/// `player-data-sync` and `labeler` stay absent until #111/#112.
+/// is always present (M9/M14); `join-gate` appears when the gate is armed;
+/// `labeler` appears when the M59 declaration is enabled. `player-data-sync`
+/// stays absent until #111.
 fn server_profile_capabilities(config: &Config) -> Vec<String> {
     if !config.server_capabilities.is_empty() {
         return config.server_capabilities.clone();
@@ -449,6 +450,9 @@ fn server_profile_capabilities(config: &Config) -> Vec<String> {
         capabilities.push("join-gate".into());
     }
     capabilities.push("skin-sync".into());
+    if config.labeler_enabled {
+        capabilities.push("labeler".into());
+    }
     capabilities
 }
 
@@ -1192,6 +1196,61 @@ impl Worker {
         if let Err(error) = self.post_server_profile_as_server().await {
             self.fail(format!("could not publish the server profile: {error}"));
         }
+    }
+
+    /// Republish the labeler declaration when `labeler_enabled` is on (M59),
+    /// as atpcraft does after a server-account login or startup resume.
+    /// Best-effort: the session remains usable when the write fails.
+    async fn auto_publish_labeler_declaration(&mut self) {
+        let enabled = self
+            .load_config()
+            .map(|config| config.labeler_enabled)
+            .unwrap_or(false);
+        if !enabled {
+            return;
+        }
+        if let Err(error) = self.publish_labeler_declaration_as_server().await {
+            self.fail(format!(
+                "could not publish the labeler service declaration: {error}"
+            ));
+        }
+    }
+
+    /// Upsert `app.bsky.labeler.service` at rkey `self` as the server account,
+    /// preserving an existing `createdAt`.
+    async fn publish_labeler_declaration_as_server(&mut self) -> crate::error::Result<String> {
+        self.ensure_server_oauth_fresh().await;
+        let (Some(agent), Some(did)) = (&self.server_agent, &self.server_did) else {
+            return Err(AtmosphericError::Message(
+                "no server account is logged in — run /atmospheric server-account login <handle>"
+                    .into(),
+            ));
+        };
+        let existing = actions::get_record(
+            agent,
+            did,
+            labeler::LABELER_SERVICE_COLLECTION,
+            labeler::LABELER_SERVICE_RKEY,
+        )
+        .await?;
+        let created_at = existing
+            .and_then(|value| serde_json::to_value(value).ok())
+            .and_then(|value| labeler::existing_created_at(&value))
+            .unwrap_or_else(|| {
+                serde_json::to_value(atrium_api::types::string::Datetime::now())
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default()
+            });
+        let record = labeler::LabelerServiceRecord::new(created_at);
+        actions::put_record(
+            agent,
+            did,
+            labeler::LABELER_SERVICE_COLLECTION,
+            labeler::LABELER_SERVICE_RKEY,
+            record.to_unknown()?,
+        )
+        .await
     }
 
     /// Shared server-profile writer. Identity fields and capabilities come
@@ -2115,6 +2174,7 @@ impl Worker {
                     &config.oauth_scope,
                     config.colibri_bridge_enabled,
                     &config.colibri_appview_did,
+                    config.labeler_enabled,
                 ),
                 OAuthTarget::Player => oauth::scope_for(
                     &config.oauth_scope,
@@ -2263,6 +2323,7 @@ impl Worker {
                 self.emit_server_account(SessionState::LoggedIn { did });
                 self.maybe_start_colibri().await;
                 self.auto_publish_server_profile().await;
+                self.auto_publish_labeler_declaration().await;
             }
             Err(error) => self.emit_server_account(SessionState::Failed {
                 message: error.to_string(),
@@ -2518,6 +2579,7 @@ impl Worker {
                 self.emit_server_account(SessionState::LoggedIn { did });
                 self.maybe_start_colibri().await;
                 self.auto_publish_server_profile().await;
+                self.auto_publish_labeler_declaration().await;
             }
             Err(error) => {
                 self.server_stored_session = None;
@@ -3112,6 +3174,7 @@ mod tests {
             poll_interval_secs: 60,
             list_cache_seconds: 300,
             server_account_token_refresh_seconds: 60,
+            labeler_enabled: false,
             post_death_messages: false,
             post_chat_messages: false,
             chat_server_id: "test-server".into(),
@@ -4713,6 +4776,7 @@ mod tests {
             poll_interval_secs: 30,
             list_cache_seconds: 300,
             server_account_token_refresh_seconds: 30,
+            labeler_enabled: false,
             post_death_messages: true,
             post_chat_messages: true,
             chat_server_id: "my-server".into(),
@@ -4785,6 +4849,11 @@ mod tests {
         assert_eq!(
             server_profile_capabilities(&config),
             vec!["join-gate", "skin-sync"]
+        );
+        config.labeler_enabled = true;
+        assert_eq!(
+            server_profile_capabilities(&config),
+            vec!["join-gate", "skin-sync", "labeler"]
         );
         config.server_capabilities = vec!["labeler".into(), "skin-sync".into()];
         assert_eq!(
@@ -7445,6 +7514,94 @@ mod tests {
             other => panic!("expected ServerAccount(LoggedOut), got {other:?}"),
         }
         assert!(!dir.join(SERVER_SESSION_FILE).exists());
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn labeler_enabled_publishes_declaration_after_server_login() {
+        let stub = StubAuthServer::start(false);
+        let dir = temp_dir("labeler-declaration");
+        let mut config = test_config(stub.url.clone());
+        config.labeler_enabled = true;
+        write_config(&dir, &config);
+        let (command_tx, event_rx, handle) = spawn_worker_at(dir.clone(), &stub);
+
+        command_tx
+            .send(Command::LoginServerOAuth {
+                handle: "stub.test".into(),
+            })
+            .unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(
+                e,
+                Event::ServerAccount {
+                    state: SessionState::LoggingIn,
+                    ..
+                }
+            )
+        });
+        let _ = simulate_browser(&event_rx);
+        match wait_for(&event_rx, |e| {
+            matches!(
+                e,
+                Event::ServerAccount {
+                    state: SessionState::LoggedIn { .. },
+                    ..
+                }
+            )
+        }) {
+            Event::ServerAccount {
+                state: SessionState::LoggedIn { did },
+                ..
+            } => assert_eq!(did, "did:plc:stubuser"),
+            other => panic!("expected ServerAccount(LoggedIn), got {other:?}"),
+        }
+
+        // The declaration write is automatic and best-effort, so wait for it.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let declaration = loop {
+            let found = stub.requests().into_iter().find_map(|request| {
+                if request.path != "/xrpc/com.atproto.repo.putRecord" {
+                    return None;
+                }
+                let body: serde_json::Value = serde_json::from_str(&request.body).ok()?;
+                (body["collection"] == labeler::LABELER_SERVICE_COLLECTION).then_some(body)
+            });
+            if let Some(declaration) = found {
+                break declaration;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the labeler declaration was not published"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(declaration["rkey"], "self");
+        assert_eq!(declaration["validate"], false);
+        let record = &declaration["record"];
+        assert_eq!(record["$type"], labeler::LABELER_SERVICE_COLLECTION);
+        assert!(record["createdAt"].is_string());
+        let labels = record["policies"]["labelValues"].as_array().unwrap();
+        assert_eq!(labels.len(), 11);
+        assert_eq!(labels[0], "player");
+        assert_eq!(labels[10], "death-defier");
+        assert_eq!(
+            record["policies"]["labelValueDefinitions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            11
+        );
+
+        // The descriptor is still published first; the declaration adds one
+        // more write rather than replacing it.
+        assert!(stub.requests().iter().any(|request| {
+            request.path == "/xrpc/com.atproto.repo.putRecord"
+                && serde_json::from_str::<serde_json::Value>(&request.body)
+                    .is_ok_and(|body| body["collection"] == "at.atpcraft.server.profile")
+        }));
 
         command_tx.send(Command::Shutdown).unwrap();
         handle.join().unwrap();
