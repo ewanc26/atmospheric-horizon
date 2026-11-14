@@ -1232,6 +1232,16 @@ A hosted `oauth_client_id` metadata document must declare the same custom scope,
 
 Verified: config tests pin the empty default and a non-default round-trip; OAuth unit tests cover the default fallback, trimming, a custom base without the bridge, and append-once behaviour. The existing stub flow tests still request `DEFAULT_SCOPE`. No live authorization server was contacted.
 
+### M54: required OAuth grants for custom and server scopes
+
+atpcraft's `effectiveScope()` appends the snapshot, skin and chat repo grants plus `blob:*/*` to any configured base, adds the RPG item grant while item discovery is on, and adds the Colibri message/membership grants while the bridge is on. Its server login uses `clientMetadataScope()`, which adds the server-profile repo grant, the RPG attestation grant, the Colibri stream grant and, when the labeler is on, the labeler-service and `identity:*` grants. M53 made the base configurable but appended only the Colibri message/membership grants, so a narrow custom scope could log in and then fail snapshot, skin, chat or descriptor writes; player logins also requested the stream grant they never use.
+
+`scope_for` now appends `at.atpcraft.player.snapshot`, `at.atpcraft.player.skin` and `at.atpcraft.player.chat` (create/update/delete) and `blob:*/*` to a non-default base, once each, and keeps appending the Colibri message/membership grants when the bridge is on. `scope_for_server` adds `at.atpcraft.server.profile` (create/update/delete) and, when the bridge is on, `social.colibri.sync.subscribeEvents?aud=…`; `start_oauth` picks it for `OAuthTarget::Server`. The mod's default `atproto transition:generic` already covers those repo and blob writes, so the grants are not appended to it and the default scope string is unchanged (atpcraft instead defaults to a granular scope). RPG and labeler grants remain absent until #111/#112.
+
+A hosted `oauth_client_id` metadata document must declare the union used by its logins: the custom base plus these grants. No endpoint, credential or record shape changes; an existing session keeps its granted scope until it logs in again.
+
+Verified: unit tests pin the custom-base grants, no duplication, the default's unchanged string, the player/server split and the server-only descriptor and stream grants. The config round-trip and older-settings tests still pass. No live authorization server was contacted.
+
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
 `/atmospheric skin-of <did|handle>` sends `Command::FetchPlayerSkin` — the

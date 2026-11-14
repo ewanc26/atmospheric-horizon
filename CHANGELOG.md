@@ -72,6 +72,12 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   Colibri repo/RPC grants are still appended — once each — when the bridge is
   enabled. A hosted client-metadata document must declare a custom scope. No
   endpoint, credential or record shape changes.
+- **M54 — required OAuth grants (#130).** A narrow `oauth_scope` now gains the
+  snapshot, skin, chat and `blob:*/*` grants the implemented writes need, and
+  server-account logins add the server-profile grant plus the Colibri stream
+  grant when the bridge is on. Player logins no longer request the stream
+  grant. The default `atproto transition:generic` string is unchanged. No
+  endpoint, credential or record shape changes.
 
 ## [0.3.1] — 2026-11-14
 
