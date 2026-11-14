@@ -292,6 +292,24 @@ enum OAuthTarget {
     Server,
 }
 
+/// Cached member DIDs for one list/AppView pair (M52).
+struct ListCache {
+    appview: String,
+    list: String,
+    members: Vec<String>,
+    fetched_at: Instant,
+}
+
+impl ListCache {
+    /// A cache entry is fresh only for the same AppView and canonical list,
+    /// and strictly inside the TTL. `0` therefore always refreshes.
+    fn is_fresh(&self, appview: &str, list: &str, ttl_seconds: u64, now: Instant) -> bool {
+        self.appview == appview
+            && self.list == list
+            && now.saturating_duration_since(self.fetched_at) < Duration::from_secs(ttl_seconds)
+    }
+}
+
 /// The worker's state: the agent and DID once logged in, plus its files.
 struct Worker {
     storage_dir: PathBuf,
@@ -332,6 +350,8 @@ struct Worker {
     dpop: SharedDpop,
     /// The HTTP client for the raw OAuth calls (resolution, PAR, token).
     http: reqwest::Client,
+    /// Cached list members for M52.
+    list_cache: Option<ListCache>,
     /// Where handles/DIDs resolve for OAuth logins.
     resolver: oauth::Resolver,
     /// Whether OAuth logins may spawn the system browser.
@@ -494,6 +514,7 @@ impl Worker {
                 .timeout(Duration::from_secs(30))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
+            list_cache: None,
             resolver: options.resolver.clone(),
             launch_browser: options.launch_browser,
             oauth_tx,
@@ -1239,7 +1260,7 @@ impl Worker {
     /// side of atpcraft's port). Works logged out: `getList` on the public
     /// AppView needs no auth. bsky.app URLs with a handle resolve the handle
     /// first (via the same directory service as OAuth login).
-    async fn fetch_list(&self, reference: &str) -> crate::error::Result<(String, Vec<String>)> {
+    async fn fetch_list(&mut self, reference: &str) -> crate::error::Result<(String, Vec<String>)> {
         let config = self.load_config().unwrap_or_default();
         let appview = if config.appview_url.is_empty() {
             crate::lists::DEFAULT_APPVIEW.to_string()
@@ -1248,7 +1269,9 @@ impl Worker {
         };
         let list =
             crate::lists::resolve_list_reference(&self.http, &self.resolver, reference).await?;
-        let members = crate::lists::fetch_list_members(&self.http, &appview, &list).await?;
+        let (members, _) = self
+            .cached_list_members(&appview, &list, config.list_cache_seconds, false)
+            .await?;
         Ok((list, members))
     }
 
@@ -1256,7 +1279,7 @@ impl Worker {
     /// read, so it works logged out. Fail-closed — errors propagate and the
     /// handler reports them as the deny reason.
     async fn check_gate(
-        &self,
+        &mut self,
         list: &str,
         subject: &str,
     ) -> crate::error::Result<crate::lists::GateOutcome> {
@@ -1266,7 +1289,56 @@ impl Worker {
         } else {
             config.appview_url.clone()
         };
-        crate::lists::check_gate(&self.http, &self.resolver, &appview, list, subject).await
+        let gate = crate::lists::prepare_gate(&self.http, &self.resolver, list, subject).await?;
+        let (members, fresh) = self
+            .cached_list_members(&appview, &gate.list, config.list_cache_seconds, false)
+            .await?;
+        let allowed = if members.iter().any(|member| member == &gate.subject) {
+            true
+        } else if fresh {
+            // atpcraft refreshes once on a fresh cache miss before rejecting.
+            let (refreshed, _) = self
+                .cached_list_members(&appview, &gate.list, config.list_cache_seconds, true)
+                .await?;
+            refreshed.iter().any(|member| member == &gate.subject)
+        } else {
+            false
+        };
+        Ok(crate::lists::GateOutcome {
+            list: gate.list,
+            subject: gate.subject,
+            allowed,
+        })
+    }
+
+    /// List members from the M52 cache. `fresh` is true only when the returned
+    /// members came from a cache hit; a fetch always returns false. A failed
+    /// fetch leaves the last successful cache untouched for the next attempt.
+    async fn cached_list_members(
+        &mut self,
+        appview: &str,
+        list: &str,
+        ttl_seconds: u64,
+        force: bool,
+    ) -> crate::error::Result<(Vec<String>, bool)> {
+        let now = Instant::now();
+        let fresh = !force
+            && self
+                .list_cache
+                .as_ref()
+                .is_some_and(|cache| cache.is_fresh(appview, list, ttl_seconds, now));
+        if fresh {
+            let cache = self.list_cache.as_ref().expect("checked above");
+            return Ok((cache.members.clone(), true));
+        }
+        let members = crate::lists::fetch_list_members(&self.http, appview, list).await?;
+        self.list_cache = Some(ListCache {
+            appview: appview.to_string(),
+            list: list.to_string(),
+            members: members.clone(),
+            fetched_at: Instant::now(),
+        });
+        Ok((members, false))
     }
 
     /// Publish the current arm state to the runtime (M38). Called at startup
@@ -1293,7 +1365,7 @@ impl Worker {
     /// the configured list is the only allow. An unlinked player is refused
     /// with a one-time browser link when the shared link token is configured
     /// (M40), so they can link without first being placed.
-    async fn check_join_gate(&self, request_id: u64, player_uuid: &str, player_name: &str) {
+    async fn check_join_gate(&mut self, request_id: u64, player_uuid: &str, player_name: &str) {
         let config = self.load_config().unwrap_or_default();
         if !config.join_gate_enabled {
             self.emit(Event::JoinGateDecision {
@@ -1333,7 +1405,7 @@ impl Worker {
     /// so the caller refuses the join. The unlinked branch may create the
     /// browser link inside the same bounded gate read.
     async fn join_gate_verdict(
-        &self,
+        &mut self,
         config: &Config,
         player_uuid: &str,
         player_name: &str,
@@ -1393,7 +1465,7 @@ impl Worker {
     /// throttled this to the configured period and supplied the online
     /// players. A failed list refresh — or a timeout — kicks nobody; the
     /// game side only disconnects the players reported here.
-    async fn join_gate_sweep(&self, players: Vec<SweepPlayer>) {
+    async fn join_gate_sweep(&mut self, players: Vec<SweepPlayer>) {
         if players.is_empty() {
             return;
         }
@@ -1424,7 +1496,7 @@ impl Worker {
     /// skips that player, matching atpcraft, which only kicks DIDs it can
     /// confirm are gone.
     async fn join_gate_sweep_kicks(
-        &self,
+        &mut self,
         config: &Config,
         players: &[SweepPlayer],
     ) -> crate::error::Result<Vec<SweepPlayer>> {
@@ -3024,6 +3096,7 @@ mod tests {
             identifier: "stub.test".into(),
             app_password: "correct-horse".into(),
             poll_interval_secs: 60,
+            list_cache_seconds: 300,
             server_account_token_refresh_seconds: 60,
             post_death_messages: false,
             post_chat_messages: false,
@@ -4620,6 +4693,7 @@ mod tests {
             identifier: "someone.example".into(),
             app_password: "abcd-1234-efgh-5678".into(),
             poll_interval_secs: 30,
+            list_cache_seconds: 300,
             server_account_token_refresh_seconds: 30,
             post_death_messages: true,
             post_chat_messages: true,
@@ -4696,6 +4770,47 @@ mod tests {
             server_profile_capabilities(&config),
             vec!["labeler", "skin-sync"]
         );
+    }
+
+    #[test]
+    fn list_cache_freshness_honors_ttl_and_key() {
+        let now = Instant::now();
+        let cache = ListCache {
+            appview: "https://appview.example".into(),
+            list: "at://did:plc:owner/app.bsky.graph.list/3abc".into(),
+            members: vec!["did:plc:alice".into()],
+            fetched_at: now,
+        };
+        assert!(cache.is_fresh(
+            "https://appview.example",
+            "at://did:plc:owner/app.bsky.graph.list/3abc",
+            300,
+            now + Duration::from_secs(299)
+        ));
+        assert!(!cache.is_fresh(
+            "https://appview.example",
+            "at://did:plc:owner/app.bsky.graph.list/3abc",
+            300,
+            now + Duration::from_secs(300)
+        ));
+        assert!(!cache.is_fresh(
+            "https://appview.example",
+            "at://did:plc:owner/app.bsky.graph.list/3abc",
+            0,
+            now
+        ));
+        assert!(!cache.is_fresh(
+            "https://other.example",
+            "at://did:plc:owner/app.bsky.graph.list/3abc",
+            300,
+            now
+        ));
+        assert!(!cache.is_fresh(
+            "https://appview.example",
+            "at://did:plc:owner/app.bsky.graph.list/other",
+            300,
+            now
+        ));
     }
 
     #[test]
@@ -5503,6 +5618,16 @@ mod tests {
             }
             other => panic!("expected ListMembers, got {other:?}"),
         }
+        // A fresh cache hit reuses the members without another request.
+        command_tx
+            .send(Command::FetchList {
+                reference: "at://did:plc:owner/app.bsky.graph.list/3abc".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::ListMembers { .. })) {
+            Event::ListMembers { members, .. } => assert_eq!(members.len(), 3),
+            other => panic!("expected the cached ListMembers, got {other:?}"),
+        }
         // A bad reference fails without any HTTP call.
         command_tx
             .send(Command::FetchList {
@@ -5557,6 +5682,27 @@ mod tests {
             }
             other => panic!("expected GateDecision, got {other:?}"),
         }
+        let get_list_hits = |pds: &StubPds| {
+            pds.requests()
+                .iter()
+                .filter(|r| r.path.starts_with("/xrpc/app.bsky.graph.getList"))
+                .count()
+        };
+        assert_eq!(get_list_hits(&pds), 2, "the first read fetched two pages");
+
+        // A fresh cache miss refreshes once before the final reject, matching
+        // atpcraft's `isMember`.
+        command_tx
+            .send(Command::CheckGate {
+                list: "at://did:plc:owner/app.bsky.graph.list/3abc".into(),
+                subject: "did:plc:mallory".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::GateDecision { .. })) {
+            Event::GateDecision { allowed, .. } => assert!(!allowed),
+            other => panic!("expected GateDecision, got {other:?}"),
+        }
+        assert_eq!(get_list_hits(&pds), 4, "the fresh miss refreshed two pages");
 
         // A bsky.app URL list (handle owner resolves via the stub to
         // did:plc:stubuser) and a handle subject (also did:plc:stubuser,
@@ -5582,6 +5728,7 @@ mod tests {
             }
             other => panic!("expected GateDecision, got {other:?}"),
         }
+        assert_eq!(get_list_hits(&pds), 6, "the second list was fetched fresh");
         // The getList reads went out unauthenticated.
         assert!(
             pds.requests()

@@ -112,6 +112,9 @@ pub struct Config {
     /// disables the sweep. The worker clamps it to at least 60 seconds when it
     /// is on, matching atpcraft's list-cache floor.
     pub join_gate_sweep_seconds: u64,
+    /// Seconds to cache list members from `app.bsky.graph.getList` (M52).
+    /// Zero disables caching; atpcraft defaults to 300.
+    pub list_cache_seconds: u64,
     /// Trusted atpcraft server endorsement keys (M13 presence reads): when
     /// reading a player's `at.atpcraft.player.snapshot` record, endorsements
     /// from these key ids are accepted alongside the mod's own signing key.
@@ -164,6 +167,7 @@ impl Default for Config {
             join_gate_enabled: false,
             join_gate_list: String::new(),
             join_gate_sweep_seconds: 60,
+            list_cache_seconds: 300,
             trusted_server_keys: Vec::new(),
             colibri_bridge_enabled: false,
             colibri_channel_uri: String::new(),
@@ -236,6 +240,7 @@ mod tests {
             join_gate_enabled: true,
             join_gate_list: "at://did:plc:owner/app.bsky.graph.list/3gate".into(),
             join_gate_sweep_seconds: 120,
+            list_cache_seconds: 120,
             trusted_server_keys: vec![TrustedServerKey {
                 key_id: String::new(),
                 public_key: "MCowBQYDK2VwAyEA...".into(),
@@ -269,6 +274,7 @@ mod tests {
             "at://did:plc:owner/app.bsky.graph.list/3gate"
         );
         assert_eq!(back.join_gate_sweep_seconds, 120);
+        assert_eq!(back.list_cache_seconds, 120);
         assert!(!back.colibri_server_events_enabled);
         assert!(!back.colibri_server_events_fallback_enabled);
     }
@@ -300,6 +306,7 @@ mod tests {
         assert!(!config.join_gate_enabled);
         assert!(config.join_gate_list.is_empty());
         assert_eq!(config.join_gate_sweep_seconds, 60);
+        assert_eq!(config.list_cache_seconds, 300);
         assert_eq!(config.server_account_token_refresh_seconds, 60);
         assert_eq!(config.colibri_appview_url, "https://api.colibri.social");
         assert!(config.server_api_url.is_empty());

@@ -165,6 +165,36 @@ pub struct GateOutcome {
     pub allowed: bool,
 }
 
+/// The resolved list and subject account for one gate check (M52). The worker
+/// uses this to fetch or cache members separately from resolving the subject.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateSubject {
+    pub list: String,
+    pub subject: String,
+}
+
+/// Resolve both sides of a gate check without fetching the list. A record URI
+/// is rejected before any read, matching the M15 fail-closed rule.
+pub async fn prepare_gate(
+    http: &reqwest::Client,
+    resolver: &crate::oauth::Resolver,
+    list_reference: &str,
+    subject: &str,
+) -> Result<GateSubject> {
+    let list = resolve_list_reference(http, resolver, list_reference).await?;
+    let reference = crate::labels::parse_subject_reference(subject)?;
+    let resolved = crate::labels::resolve_subject(http, resolver, &reference).await?;
+    if resolved.collection.is_some() {
+        return Err(AtmosphericError::Message(
+            "want an account (a DID or a handle), not a record URI".into(),
+        ));
+    }
+    Ok(GateSubject {
+        list,
+        subject: resolved.pattern, // the bare DID for accounts
+    })
+}
+
 /// Check whether `subject` (a DID or handle — not a record URI) is on the
 /// list referenced by `list_reference` (M15, atpcraft's
 /// `AtprotoListResolver.isMember` decision): resolve both, page the members
@@ -176,20 +206,12 @@ pub async fn check_gate(
     list_reference: &str,
     subject: &str,
 ) -> Result<GateOutcome> {
-    let list = resolve_list_reference(http, resolver, list_reference).await?;
-    let reference = crate::labels::parse_subject_reference(subject)?;
-    let resolved = crate::labels::resolve_subject(http, resolver, &reference).await?;
-    if resolved.collection.is_some() {
-        return Err(AtmosphericError::Message(
-            "want an account (a DID or a handle), not a record URI".into(),
-        ));
-    }
-    let did = resolved.pattern; // the bare DID for accounts
-    let members = fetch_list_members(http, appview, &list).await?;
-    let allowed = members.iter().any(|member| member == &did);
+    let gate = prepare_gate(http, resolver, list_reference, subject).await?;
+    let members = fetch_list_members(http, appview, &gate.list).await?;
+    let allowed = members.iter().any(|member| member == &gate.subject);
     Ok(GateOutcome {
-        list,
-        subject: did,
+        list: gate.list,
+        subject: gate.subject,
         allowed,
     })
 }
