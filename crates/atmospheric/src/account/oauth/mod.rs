@@ -30,23 +30,41 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// third-party PDS authorization servers reliably support today.
 pub const DEFAULT_SCOPE: &str = "atproto transition:generic";
 
-/// Add the Colibri grants to the OAuth scope when the bridge is enabled.
+/// Build the OAuth scope from a configured base plus the Colibri grants.
 ///
-/// The PDS only mints a service-auth token when the session carries the
-/// matching `rpc:` grant, and Colibri message/membership records need their
-/// repo grants. Without the bridge the scope is unchanged, so ordinary logins
-/// request no more than before.
-pub fn scope_for_colibri(bridge_enabled: bool, appview_did: &str) -> String {
+/// An empty (or whitespace-only) `base` uses [`DEFAULT_SCOPE`]. The Colibri
+/// grants are appended only when the bridge is enabled: the PDS only mints a
+/// service-auth token when the session carries the matching `rpc:` grant, and
+/// Colibri message/membership records need their repo grants. Without the
+/// bridge the base is returned unchanged, so ordinary logins request no more
+/// than before. Each grant is added at most once, so a base that already
+/// declares one does not duplicate it.
+pub fn scope_for(base: &str, bridge_enabled: bool, appview_did: &str) -> String {
+    let mut scope = base.trim().to_owned();
+    if scope.is_empty() {
+        scope = DEFAULT_SCOPE.into();
+    }
     if !bridge_enabled {
-        return DEFAULT_SCOPE.into();
+        return scope;
     }
     let aud = crate::colibri::appview_service_ref(appview_did);
-    format!(
-        "{DEFAULT_SCOPE} \
-         repo:social.colibri.message?action=create&action=delete \
-         repo:social.colibri.membership?action=create&action=delete \
-         rpc:social.colibri.sync.subscribeEvents?aud={aud}"
-    )
+    let grants = [
+        "repo:social.colibri.message?action=create&action=delete".to_owned(),
+        "repo:social.colibri.membership?action=create&action=delete".to_owned(),
+        format!("rpc:social.colibri.sync.subscribeEvents?aud={aud}"),
+    ];
+    for grant in grants {
+        if !scope.split_ascii_whitespace().any(|token| token == grant) {
+            scope.push(' ');
+            scope.push_str(&grant);
+        }
+    }
+    scope
+}
+
+/// [`scope_for`] with the mod's default base scope.
+pub fn scope_for_colibri(bridge_enabled: bool, appview_did: &str) -> String {
+    scope_for(DEFAULT_SCOPE, bridge_enabled, appview_did)
 }
 /// The loopback redirect host (IP literal, as the spec requires for native
 /// clients; `localhost` is reserved for the `client_id` origin).

@@ -65,6 +65,11 @@ pub struct Config {
     /// URL (see `oauth-client-metadata.json` in the repo root) for
     /// authorization servers that do not implement the loopback exception.
     pub oauth_client_id: String,
+    /// The OAuth scope requested at login (M53). Empty requests the mod's
+    /// default (`atproto transition:generic`); a configured value replaces the
+    /// base scope, and the Colibri grants are still appended when the bridge
+    /// is enabled. atpcraft exposes the same knob as `bluesky-scope`.
+    pub oauth_scope: String,
     /// Path of the player's skin PNG used by `/atmospheric skin` when the
     /// command gets no explicit path (M9). Empty means "not configured".
     pub skin_path: String,
@@ -150,6 +155,7 @@ impl Default for Config {
             chat_server_id: default_chat_server_id(),
             persist_session: true,
             oauth_client_id: String::new(),
+            oauth_scope: String::new(),
             skin_path: String::new(),
             cape_path: String::new(),
             skin_model: "default".into(),
@@ -223,6 +229,7 @@ mod tests {
             chat_server_id: "my-server".into(),
             persist_session: true,
             oauth_client_id: String::new(),
+            oauth_scope: "atproto repo:app.bsky.feed.post?action=create".into(),
             skin_path: String::new(),
             cape_path: String::new(),
             skin_model: "default".into(),
@@ -257,6 +264,10 @@ mod tests {
         assert_eq!(config.pds_url, back.pds_url);
         assert_eq!(config.poll_interval_secs, back.poll_interval_secs);
         assert_eq!(back.server_account_token_refresh_seconds, 30);
+        assert_eq!(
+            back.oauth_scope,
+            "atproto repo:app.bsky.feed.post?action=create"
+        );
         assert!(back.post_death_messages);
         assert!(back.post_chat_messages);
         assert_eq!(back.chat_server_id, "my-server");
@@ -308,6 +319,7 @@ mod tests {
         assert_eq!(config.join_gate_sweep_seconds, 60);
         assert_eq!(config.list_cache_seconds, 300);
         assert_eq!(config.server_account_token_refresh_seconds, 60);
+        assert!(config.oauth_scope.is_empty());
         assert_eq!(config.colibri_appview_url, "https://api.colibri.social");
         assert!(config.server_api_url.is_empty());
         assert!(config.colibri_server_events_fallback_enabled);

@@ -2099,14 +2099,19 @@ impl Worker {
             }
         }
         // The client_id comes from the settings file when set (hosted client
-        // metadata URL); otherwise the loopback default. The scope includes
-        // the Colibri grants when the bridge is enabled, because otherwise the
-        // PDS refuses to mint the AppView service-auth token.
+        // metadata URL); otherwise the loopback default. The scope is the
+        // configured base (or the mod's default) plus the Colibri grants when
+        // the bridge is enabled, because otherwise the PDS refuses to mint the
+        // AppView service-auth token.
         let config = self.load_config().ok();
         let scope = config
             .as_ref()
             .map(|config| {
-                oauth::scope_for_colibri(config.colibri_bridge_enabled, &config.colibri_appview_did)
+                oauth::scope_for(
+                    &config.oauth_scope,
+                    config.colibri_bridge_enabled,
+                    &config.colibri_appview_did,
+                )
             })
             .unwrap_or_else(|| oauth::DEFAULT_SCOPE.into());
         let client_id = config
@@ -3103,6 +3108,7 @@ mod tests {
             chat_server_id: "test-server".into(),
             persist_session: true,
             oauth_client_id: String::new(),
+            oauth_scope: String::new(),
             skin_path: String::new(),
             cape_path: String::new(),
             skin_model: "default".into(),
@@ -4700,6 +4706,7 @@ mod tests {
             chat_server_id: "my-server".into(),
             persist_session: true,
             oauth_client_id: String::new(),
+            oauth_scope: String::new(),
             skin_path: String::new(),
             cape_path: String::new(),
             skin_model: "default".into(),
