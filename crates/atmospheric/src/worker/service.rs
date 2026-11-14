@@ -793,16 +793,22 @@ impl Worker {
                     return;
                 }
                 self.ensure_oauth_fresh().await;
+                // Resolve the server id before borrowing the agent: with no
+                // override this loads or creates the M6 signing key.
+                let server_id = if self.is_logged_in() {
+                    match self.chat_record_server_id() {
+                        Ok(server_id) => server_id,
+                        Err(error) => {
+                            self.fail(error.to_string());
+                            return;
+                        }
+                    }
+                } else {
+                    String::new()
+                };
                 let result = match (&self.agent, &self.did) {
                     (Some(agent), Some(did)) => {
-                        actions::post_chat(
-                            agent,
-                            did,
-                            &self.chat_server_id,
-                            &message,
-                            &mut self.tid,
-                        )
-                        .await
+                        actions::post_chat(agent, did, &server_id, &message, &mut self.tid).await
                     }
                     _ => Err(AtmosphericError::NotLoggedIn),
                 };
@@ -1054,6 +1060,17 @@ impl Worker {
                 Ok(key)
             }
         }
+    }
+
+    /// The `server` value for chat records (M48): the configured override, or
+    /// the persisted Ed25519 key id atpcraft uses. Loads or creates the key on
+    /// first use, so a chat-only install does not need a snapshot first.
+    fn chat_record_server_id(&mut self) -> crate::error::Result<String> {
+        if !self.chat_server_id.trim().is_empty() {
+            return Ok(self.chat_server_id.clone());
+        }
+        let key = self.endorsement_key()?;
+        Ok(signing::key_id_of(&key.verifying_key()))
     }
 
     /// Publish/refresh the player account's server profile
@@ -4786,6 +4803,43 @@ mod tests {
         assert_eq!(body["record"]["message"], "hello from in-game chat");
         assert_eq!(body["record"]["server"], "test-server");
         assert!(body["record"]["sentAt"].is_string());
+    }
+
+    #[test]
+    fn post_chat_uses_the_signing_key_id_when_no_override_is_configured() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("post-chat-key-id");
+        let mut config = test_config(pds.url.clone());
+        config.post_chat_messages = true;
+        config.chat_server_id = String::new();
+        write_config(&dir, &config);
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir.clone());
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+
+        command_tx
+            .send(Command::PostChat {
+                message: "chat with the server key".into(),
+                automatic: false,
+            })
+            .unwrap();
+        let _ = wait_for(&event_rx, |e| matches!(e, Event::Posted { .. }));
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let key_file: signing::SigningKeyFile =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(SIGNING_KEY_FILE)).unwrap())
+                .unwrap();
+        let requests = pds.requests();
+        let create_record = requests
+            .iter()
+            .find(|r| r.path == "/xrpc/com.atproto.repo.createRecord")
+            .expect("createRecord was called");
+        let body: serde_json::Value = serde_json::from_str(&create_record.body).unwrap();
+        assert_eq!(body["record"]["server"], key_file.key_id);
     }
 
     #[test]
