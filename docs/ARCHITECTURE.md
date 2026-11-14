@@ -215,8 +215,9 @@ see "Manual check" below.
   { message, automatic }`: `automatic` (chat-hook origin) publishes only when
   `post_chat_messages` is enabled in `config.json` (default off — chat is
   public once written); `automatic: false` (the `/atmospheric chat <text>`
-  command) always publishes. The `server` field comes from
-  `config.chat_server_id` (default `horizon-client`).
+  command) always publishes. The `server` field is the worker's persisted
+  Ed25519 signing key id, matching atpcraft's `signingKey.keyId`; an explicit
+  `config.chat_server_id` overrides it.
 - Game side: a raw-target injection at HEAD of
   `horizon_client::game::chat::Game::handle_chat_input` (chat.rs is pinned in
   `compatibility.json`; the named hook list has no chat hook) mirrors every
@@ -1179,6 +1180,12 @@ M45 originally passed the raw Bluesky display name through (up to 32 characters)
 The pinned helper set still exposes only `native_set_nickname`, which is plain text and updates chat and the player list together; there is no separate list-name, display-name or chat-decorate hook in `native-hooks.json`. atpcraft's Tab name is the 16-character sanitized name and its chat line adds a gray pronoun suffix. This mod applies the sanitized name plus the same suffix as plain text to both, so the chat text matches apart from styling, while the Tab entry carries the suffix.
 
 Verified: profile tests pin unicode/punctuation stripping, whitespace-to-underscore conversion (including whitespace exposed by removed characters), the 16-character cap, the handle fallback, the both-invalid vanilla fallback and the 32-character total; the worker test expects `AppView_Name (she/her)`. No live service was contacted.
+
+### M48: signing-key server id in chat records
+
+atpcraft's chat writer receives `signingKey.keyId` and writes it as `PlayerChatRecord.server`. This mod previously wrote `config.chat_server_id`, default `horizon-client`. `chat_server_id` is now an optional override: when blank (the default), `Worker::chat_record_server_id` loads or creates the persisted Ed25519 endorsement key through the existing M6 path and uses its key id. An explicit value still wins, so existing operators can keep a custom identifier. The key id algorithm is the one M6/M13 already use (`signing::key_id_of`), so chats, snapshots and skins now name the same server key.
+
+Verified: the existing worker test pins the explicit override; a new stub-PDS test logs in, posts chat with no override, and asserts `record.server` equals the persisted `signing-key.json` key id. No new endpoint, credential or record shape.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 

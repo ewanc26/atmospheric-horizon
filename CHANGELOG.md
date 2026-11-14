@@ -38,6 +38,11 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   suffix remains because the pinned helper set has no chat-only styled hook.
   Unchanged and unusable names leave the vanilla name alone. No new endpoint,
   credential or stored data.
+- **M48 — signing-key chat server id (#118).** Chat records now default their
+  `server` field to the worker's persisted Ed25519 key id, matching atpcraft's
+  `signingKey.keyId`; `chat_server_id` remains an optional override. The key is
+  loaded or created through the existing snapshot path on first chat. No new
+  endpoint, credential or record shape.
 
 ## [0.3.1] — 2026-11-14
 
