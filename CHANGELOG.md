@@ -14,7 +14,12 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ### Added
 
-None yet.
+- **M44 — generic record browser (#107).** `/atmospheric records <did|handle>
+  <collection>` reads any public collection from the subject's own PDS with an
+  unauthenticated `com.atproto.repo.listRecords` and shows the total plus the
+  newest five records as compact JSON in the HUD (collapsed to one line and
+  truncated). Reuses the M13/M16 read path: no new endpoint and no new stored
+  data.
 
 ## [0.3.1] — 2026-11-14
 

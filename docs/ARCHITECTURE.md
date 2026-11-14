@@ -1129,6 +1129,33 @@ in the staged pinned Horizon tree, where the `native_server_players` and
 `native_run_command` helpers resolve as `pub(super)`. No live identity service
 or AppView was contacted.
 
+### M44: generic record browser
+
+`/atmospheric records <did|handle> <collection>` sends
+`Command::FetchRecords { subject, collection }`: an unauthenticated viewer for
+any public collection. It reuses the M13/M16 read path — resolve the account
+and its PDS with `presence::resolve_player`, then `presence::list_records`
+pages `com.atproto.repo.listRecords` (limit 100, bounded pages) against that
+PDS — so there is no new endpoint and no new stored data.
+
+`fetch_records` reports the total record count and the newest
+`RECORDS_HISTORY_LIMIT` (5) records, matching the M16 chat-history display
+limit. `listRecords` serves a collection newest-first; the newest few are
+reversed into display order (oldest first) and serialized as compact JSON
+strings. The worker emits
+`Event::RecordsHistory { subject, via, collection, total, items }`; the game
+side mirrors it and the HUD shows "atmospheric: 3 app.bsky.feed.post
+record(s) for did:plc:… — newest: {\"text\":\"…\"}", with the JSON collapsed
+to one line and truncated. Nothing is parsed or verified: the records are
+arbitrary lexicons, and the only network call is the subject's PDS; the query
+carries only the subject's DID and the collection name.
+
+Verified: a worker test against the stub PDS seeds an `app.bsky.feed.post`
+record and reads it back logged out, asserting the response fields and that
+listRecords was unauthenticated; runtime tests pin the command/event wire
+shapes, the HUD summary and the empty-collection wording. Real-PDS wire
+check: `pds_check` with `ATMOSPHERIC_RECORDS="<did|handle>|<collection>"`.
+
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
 `/atmospheric skin-of <did|handle>` sends `Command::FetchPlayerSkin` — the
