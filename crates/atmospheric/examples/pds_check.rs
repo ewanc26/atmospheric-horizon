@@ -115,6 +115,7 @@ fn main() {
         appview_url: "https://public.api.bsky.app".into(),
         server_api_url: env::var("ATMOSPHERIC_SERVER_API_URL").unwrap_or_default(),
         server_link_token: env::var("ATMOSPHERIC_SERVER_LINK_TOKEN").unwrap_or_default(),
+        browser_link_ttl_seconds: 600,
         join_gate_enabled: false,
         join_gate_list: String::new(),
         join_gate_sweep_seconds: 60,

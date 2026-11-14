@@ -32,6 +32,7 @@ pub struct BrowserLink {
 struct BrowserLinkRequest<'a> {
     player_uuid: &'a str,
     player_name: &'a str,
+    ttl_seconds: u64,
 }
 
 /// The link returned by the identity service after a successful claim.
@@ -143,6 +144,7 @@ pub async fn start_browser_link(
     link_token: &str,
     player_uuid: &str,
     player_name: &str,
+    ttl_seconds: u64,
 ) -> Result<BrowserLink> {
     if link_token.trim().is_empty() {
         return Err(AtmosphericError::Message(
@@ -164,6 +166,7 @@ pub async fn start_browser_link(
         .json(&BrowserLinkRequest {
             player_uuid,
             player_name: player_name.trim(),
+            ttl_seconds,
         })
         .send()
         .await
@@ -391,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_link_posts_the_uuid_and_name() {
+    fn browser_link_posts_the_uuid_name_and_lifetime() {
         let stub = start(
             "201 Created",
             r#"{"url":"https://links.example/link/token","expires_at":1800}"#,
@@ -403,6 +406,7 @@ mod tests {
                 "server-link-secret",
                 "00000000-0000-4000-8000-000000000001",
                 "Alex",
+                900,
             ))
             .unwrap();
         assert_eq!(link.url, "https://links.example/link/token");
@@ -413,6 +417,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&requests[0].1).unwrap();
         assert_eq!(body["player_uuid"], "00000000-0000-4000-8000-000000000001");
         assert_eq!(body["player_name"], "Alex");
+        assert_eq!(body["ttl_seconds"], 900);
     }
 
     #[test]
@@ -424,6 +429,7 @@ mod tests {
                 "",
                 "00000000-0000-4000-8000-000000000001",
                 "Alex",
+                600,
             ))
             .unwrap_err();
         assert!(error.to_string().contains("server_link_token"));
