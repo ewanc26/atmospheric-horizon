@@ -17,6 +17,9 @@ jobs:
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
 
+      - name: Source layout
+        run: bash scripts/check-layout.sh
+
       - name: Format
         run: cargo fmt --all --check
 
