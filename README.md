@@ -15,9 +15,9 @@ This is the successor to [jollywhoppers-socialsync](https://github.com/ewanc26/j
 
 ## Status
 
-**v0.3.0** (14 November 2026) is the current release. The mod is usable in-game today through the `atmospheric-worker` sidecar: the injected runtime is std-only, and every network or disk operation happens in the worker. Public reads work signed out; posting and record writes need a Bluesky account.
+**v0.3.1** (14 November 2026) is the current release. The mod is usable in-game today through the `atmospheric-worker` sidecar: the injected runtime is std-only, and every network or disk operation happens in the worker. Public reads work signed out; posting and record writes need a Bluesky account.
 
-Shipped in v0.3.0: OAuth and app-password login, text and screenshot posts, notifications, atpcraft-compatible chat, signed snapshots and skins, a server profile, read sides for lists, labels, presence, skins, chat history and server profiles, social-graph reads and writes, reply/like/repost, profile reads, a separate server account, the Colibri chat bridge and its follow-ups, and the optional server-side identity service with in-game and browser linking (M23–M40).
+Shipped in v0.3.1: OAuth and app-password login, text and screenshot posts, notifications, atpcraft-compatible chat, signed snapshots and skins, a server profile, read sides for lists, labels, presence, skins, chat history and server profiles, social-graph reads and writes, reply/like/repost, profile reads, a separate server account, the Colibri chat bridge and its follow-ups, the optional server-side identity service with in-game and browser linking, and the online whitelist sweep (M23–M42).
 
 Not yet: launcher registry distribution, which waits on third-party native-mod support upstream ([#28](https://github.com/ewanc26/atmospheric-horizon/issues/28)); label issuance, RPG item discovery and full player-data aspect capture/restore. The separate server account (M25), the Colibri bridge (M26–M34) and the shared UUID-to-DID map (M35–M42) are the foundations those remaining milestones build on; issuance, capture and RPG discovery remain separate milestones.
 
@@ -237,7 +237,7 @@ M35 supplies the mapping, M36 lets a player claim a link in game, M37 checks a l
 
 ## Roadmap
 
-M1–M21 shipped through v0.1.0 and v0.2.0, and M23 (social-graph writes) through M42 (online whitelist sweep) shipped in v0.3.0; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, labeler issuance, RPG discovery, aspect capture/restore, and the next read/write surfaces.
+M1–M21 shipped through v0.1.0 and v0.2.0, and M23 (social-graph writes) through M42 (online whitelist sweep) shipped in v0.3.1; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, labeler issuance, RPG discovery, aspect capture/restore, and the next read/write surfaces.
 
 ### Porting atpcraft
 
