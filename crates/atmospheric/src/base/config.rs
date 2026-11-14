@@ -14,6 +14,12 @@ fn default_chat_server_id() -> String {
     String::new()
 }
 
+/// The fallback name for the server profile when `server_name` is blank,
+/// matching atpcraft's `bluesky-client-name` fallback (M49).
+fn default_client_name() -> String {
+    "atmospheric-horizon".into()
+}
+
 /// One trusted atpcraft server endorsement key (M13 presence reads): the
 /// base64 (standard) X.509/SPKI public key, as published in the server's
 /// `at.atpcraft.server.profile` record, plus the key id — derived from the
@@ -63,15 +69,19 @@ pub struct Config {
     /// The skin model written into `at.atpcraft.player.skin` records (M9):
     /// "default" or "slim".
     pub skin_model: String,
+    /// Human name for the server profile. Blank `server_name` falls back to
+    /// this value, matching atpcraft's client-name fallback (M49).
+    pub client_name: String,
     /// Server-profile identity fields (M10); blank means "omit from the
-    /// record", except `server_name`, which falls back to the login handle.
+    /// record", except `server_name`, which falls back to `client_name`.
     pub server_name: String,
     pub server_description: String,
     pub server_address: String,
     pub server_website: String,
     pub server_contact: String,
-    /// The `capabilities` list of the server profile (M10); sorted and
-    /// deduped on write.
+    /// Optional override for the server profile's `capabilities` (M10/M49).
+    /// Empty derives the implemented features; values are sorted and deduped
+    /// on write.
     pub server_capabilities: Vec<String>,
     /// The `minecraftVersion` written into the server profile (M10).
     pub game_version: String,
@@ -135,12 +145,13 @@ impl Default for Config {
             skin_path: String::new(),
             cape_path: String::new(),
             skin_model: "default".into(),
+            client_name: default_client_name(),
             server_name: String::new(),
             server_description: String::new(),
             server_address: String::new(),
             server_website: String::new(),
             server_contact: String::new(),
-            server_capabilities: vec!["player-data-sync".into(), "skin-sync".into()],
+            server_capabilities: Vec::new(),
             game_version: "26.3".into(),
             appview_url: crate::lists::DEFAULT_APPVIEW.into(),
             server_api_url: String::new(),
@@ -205,6 +216,7 @@ mod tests {
             skin_path: String::new(),
             cape_path: String::new(),
             skin_model: "default".into(),
+            client_name: "atmospheric-horizon".into(),
             server_name: String::new(),
             server_description: String::new(),
             server_address: String::new(),
@@ -236,6 +248,7 @@ mod tests {
         assert!(back.post_death_messages);
         assert!(back.post_chat_messages);
         assert_eq!(back.chat_server_id, "my-server");
+        assert_eq!(back.client_name, "atmospheric-horizon");
         assert!(back.persist_session);
         assert_eq!(back.trusted_server_keys, config.trusted_server_keys);
         assert!(back.colibri_bridge_enabled);
@@ -272,6 +285,8 @@ mod tests {
             config.chat_server_id.is_empty(),
             "chat records default to the signing key id"
         );
+        assert_eq!(config.client_name, "atmospheric-horizon");
+        assert!(config.server_capabilities.is_empty());
         assert!(config.trusted_server_keys.is_empty());
         assert!(!config.colibri_bridge_enabled);
         assert!(config.colibri_channel_uri.is_empty());
