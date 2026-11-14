@@ -43,12 +43,13 @@ This mod talks to the network **by design**: the PDS the user configures, the pu
 
 ```bash
 bash scripts/check-layout.sh
+bash scripts/test-layout.sh
 cargo fmt
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
 ```
 
-The dependency-free layout check runs in CI's `check` job. It enforces single-word Rust filenames everywhere plus scope placement and `mod.rs` declarations in both Rust crates.
+The dependency-free layout check and its isolated fixture test run in CI's `check` job. The check enforces single-word Rust filenames everywhere plus scope placement and `mod.rs` declarations in both Rust crates.
 
 Native staging against the pinned Horizon export (when the horizon-mixins tooling is set up locally):
 
