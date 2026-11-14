@@ -78,6 +78,12 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   grant when the bridge is on. Player logins no longer request the stream
   grant. The default `atproto transition:generic` string is unchanged. No
   endpoint, credential or record shape changes.
+- **M55 — configurable browser-link lifetime (#132).** `browser_link_ttl_seconds`
+  (default 600) is sent as the optional `ttl_seconds` field when the game server
+  creates a browser link, and the server applies its existing 60–3600-second
+  pairing bound to the stored expiry. The join-gate refusal reports the
+  configured window. An omitted field keeps the service default. No endpoint or
+  record shape changes.
 
 ## [0.3.1] — 2026-11-14
 

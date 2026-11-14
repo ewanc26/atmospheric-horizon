@@ -1022,8 +1022,9 @@ refused player can type a command. M39 gives an already-connected player a
 one-command browser flow without weakening the UUID binding. The game server
 calls `POST /v1/browser/pairings` with `{player_uuid, player_name}` and
 `Authorization: Bearer $ATMOSPHERIC_SERVER_LINK_TOKEN`. The service creates a
-random 24-byte link token, stores `{uuid, name, expires_at}` in memory, and
-returns `<public_url>/link/<token>`. `server_link_token` is a new game setting;
+random 24-byte link token, stores `{uuid, name, expires_at}` in memory using
+the lifetime from the creation request (M55), and returns
+`<public_url>/link/<token>`. `server_link_token` is a new game setting;
 without it, or without `ATMOSPHERIC_SERVER_PUBLIC_URL`/
 `ATMOSPHERIC_SERVER_LINK_TOKEN` on the service, the flow is disabled with a
 clear error. The browser never sends a UUID.
@@ -1075,9 +1076,9 @@ When `join_gate_verdict` finds no link and `server_link_token` is non-empty, it
 calls the same M39 creation path inside the existing 5-second gate timeout and
 returns a refusal with the one-time URL appended. A failed creation, a missing
 service URL, or a malformed response falls back to the generic unlinked
-message, and the join still fails closed. The URL expires after ten minutes,
-is single-use, and is held only in the game's disconnect reason and the
-service's memory. No new wire field, endpoint, or stored data was added beyond
+message, and the join still fails closed. The URL expires after `browser_link_ttl_seconds` (ten minutes by default, at
+most one hour), is single-use, and is held only in the game's disconnect
+reason and the service's memory. No new wire field, endpoint, or stored data was added beyond
 the `player_name` field already carried by other identity requests.
 
 `ServerConfig` also gained a test-only `oauth_resolver` override (defaulting to
@@ -1241,6 +1242,16 @@ atpcraft's `effectiveScope()` appends the snapshot, skin and chat repo grants pl
 A hosted `oauth_client_id` metadata document must declare the union used by its logins: the custom base plus these grants. No endpoint, credential or record shape changes; an existing session keeps its granted scope until it logs in again.
 
 Verified: unit tests pin the custom-base grants, no duplication, the default's unchanged string, the player/server split and the server-only descriptor and stream grants. The config round-trip and older-settings tests still pass. No live authorization server was contacted.
+
+### M55: configurable browser-link lifetime
+
+atpcraft applies `bluesky-pairing-token-ttl-minutes` (default 10) to the in-game pairing token that opens its browser flow. This mod hard-coded the M39/M40 browser link to 600 seconds, and the authenticated create request had no lifetime field, so an operator could not shorten or lengthen the window.
+
+`browser_link_ttl_seconds` (default 600) is now sent as the optional `ttl_seconds` field on `POST /v1/browser/pairings`. The server resolves it with the same `pairing_ttl` bound as operator codes (60–3600 seconds) and stores the result in the link's `expires_at`; an out-of-range value is a 400 rather than a silent clamp. The M40 refusal reports the configured window in whole minutes. The in-memory OAuth attempt still uses its own 600-second `BROWSER_TTL_SECS`, so changing the setting does not extend a sign-in that is already in flight.
+
+The default is unchanged and an omitted field still uses the service default, so other clients of the endpoint keep working. No endpoint is added; one optional request field and one config key are. A hosted client is unaffected.
+
+Verified: config tests pin the default and a non-default round-trip; the server unit test pins a 120-second stored lifetime, and the router test asserts a 120-second response plus a 400 below 60 and above 3600; the identity client test asserts the request field; the worker gate test asserts the default 600 is sent and the refusal still carries the URL. No live identity service was contacted.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
