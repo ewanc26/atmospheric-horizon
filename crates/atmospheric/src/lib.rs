@@ -23,6 +23,14 @@ pub use config::Config;
 pub use error::AtmosphericError;
 use serde::{Deserialize, Serialize};
 
+/// One online player in an M42 whitelist sweep: the canonical UUID the
+/// identity service resolves to a DID, and the name shown on a kick.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SweepPlayer {
+    pub player_uuid: String,
+    pub player_name: String,
+}
+
 /// What the game side asks the worker thread to do.
 // Serde: the sidecar worker binary (M17) reads/writes these as newline-
 // delimited JSON over stdio, externally tagged (the serde default):
@@ -146,6 +154,12 @@ pub enum Command {
         player_uuid: String,
         player_name: String,
     },
+    /// Sweep the online players against the join gate (M42). The worker
+    /// re-reads the configured list once and resolves each player's UUID
+    /// through the identity service, then reports the linked players whose DID
+    /// has left the list. The game side throttles this to
+    /// `join_gate_sweep_seconds`.
+    JoinGateSweep { players: Vec<SweepPlayer> },
     /// Read a player's `at.atpcraft.player.chat` records (their mirrored
     /// in-game chat history) from their own PDS (M16, the read side of the
     /// M5 chat mirror). Chat records are unsigned by design, so there is no
@@ -252,9 +266,15 @@ pub enum Event {
         subject: String,
         allowed: bool,
     },
-    /// Whether the server join gate is armed (M38), and the configured list.
-    /// The runtime caches this so a login can fail closed before placement.
-    JoinGateState { enabled: bool, list: String },
+    /// Whether the server join gate is armed (M38), the configured list, and
+    /// how often the online sweep re-reads it (M42, seconds; `0` is off). The
+    /// runtime caches this so a login can fail closed before placement and the
+    /// tick hook can throttle the sweep.
+    JoinGateState {
+        enabled: bool,
+        list: String,
+        sweep_seconds: u64,
+    },
     /// The admission decision for one `JoinGateCheck` (M38). `message` is the
     /// refusal shown on the disconnect screen; empty when allowed.
     JoinGateDecision {
@@ -262,6 +282,10 @@ pub enum Event {
         allowed: bool,
         message: String,
     },
+    /// Linked online players whose DID has left the join-gate list (M42). The
+    /// game side disconnects each. Nothing is sent when the sweep is clean or
+    /// the list read failed, so a transient failure never kicks anyone.
+    JoinGateKicks { players: Vec<SweepPlayer> },
     /// A player's chat history (M16): the DID (`subject`), the PDS it was
     /// read from (`via`), the total parseable record count, and the newest
     /// few messages (oldest first). Chat records carry no endorsement, so
@@ -452,6 +476,16 @@ mod tests {
             .unwrap(),
             r#"{"ColibriPlayerJoined":{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}}"#
         );
+        assert_eq!(
+            serde_json::to_string(&Command::JoinGateSweep {
+                players: vec![SweepPlayer {
+                    player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                    player_name: "Alex".into(),
+                }],
+            })
+            .unwrap(),
+            r#"{"JoinGateSweep":{"players":[{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}]}}"#
+        );
         // SaveConfig carries the full Config; the game side sends the Settings
         // subset and container-level serde(default) fills the rest.
         let json = serde_json::to_string(&Command::SaveConfig {
@@ -529,6 +563,12 @@ mod tests {
                 request_id: 7,
                 player_uuid: "00000000-0000-4000-8000-000000000001".into(),
                 player_name: "Alex".into(),
+            },
+            Command::JoinGateSweep {
+                players: vec![SweepPlayer {
+                    player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                    player_name: "Alex".into(),
+                }],
             },
             Command::FetchChat {
                 subject: "did:plc:z".into(),
@@ -636,6 +676,25 @@ mod tests {
             .unwrap(),
             r#"{"PlayerSnapshot":{"subject":"did:plc:x","via":"https://pds.example","snapshot":null}}"#
         );
+        assert_eq!(
+            serde_json::to_string(&Event::JoinGateState {
+                enabled: true,
+                list: "at://l".into(),
+                sweep_seconds: 60,
+            })
+            .unwrap(),
+            r#"{"JoinGateState":{"enabled":true,"list":"at://l","sweep_seconds":60}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Event::JoinGateKicks {
+                players: vec![SweepPlayer {
+                    player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                    player_name: "Alex".into(),
+                }],
+            })
+            .unwrap(),
+            r#"{"JoinGateKicks":{"players":[{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}]}}"#
+        );
         let events = vec![
             Event::Session(session::SessionState::Failed {
                 message: "m".into(),
@@ -660,11 +719,18 @@ mod tests {
             Event::JoinGateState {
                 enabled: true,
                 list: "l".into(),
+                sweep_seconds: 60,
             },
             Event::JoinGateDecision {
                 request_id: 7,
                 allowed: false,
                 message: "denied".into(),
+            },
+            Event::JoinGateKicks {
+                players: vec![SweepPlayer {
+                    player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                    player_name: "Alex".into(),
+                }],
             },
             Event::ChatHistory {
                 subject: "s".into(),

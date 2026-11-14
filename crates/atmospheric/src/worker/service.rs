@@ -7,7 +7,7 @@
 //! the crate testable without a game.
 
 use crate::{
-    Command, Config, Event, actions, chats,
+    Command, Config, Event, SweepPlayer, actions, chats,
     colibri::{self, ChannelRef, StreamEvent},
     error::AtmosphericError,
     graph, identity, interactions,
@@ -24,7 +24,7 @@ use crate::{
 };
 use ed25519_dalek::VerifyingKey;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::mpsc::{Receiver, Sender},
     time::{Duration, Instant},
@@ -60,6 +60,10 @@ const COLIBRI_PRESENCE_WINDOW: Duration = Duration::from_secs(5);
 
 /// How long the M38 login gate waits for the identity map and list read.
 const JOIN_GATE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the M42 online sweep waits for the list refresh and the per-player
+/// link lookups. Longer than one login gate because it covers every online
+/// player; a timeout kicks nobody.
+const JOIN_GATE_SWEEP_TIMEOUT: Duration = Duration::from_secs(30);
 const JOIN_GATE_NO_LIST: &str = "This server's Bluesky join gate has no whitelist list configured.";
 const JOIN_GATE_UNLINKED: &str =
     "This server requires a linked Bluesky account. Contact the server operator.";
@@ -598,6 +602,9 @@ impl Worker {
             } => {
                 self.check_join_gate(request_id, &player_uuid, &player_name)
                     .await;
+            }
+            Command::JoinGateSweep { players } => {
+                self.join_gate_sweep(players).await;
             }
             Command::FetchChat { subject } => {
                 // A public read against the subject's own PDS: works logged
@@ -1152,12 +1159,21 @@ impl Worker {
     }
 
     /// Publish the current arm state to the runtime (M38). Called at startup
-    /// and after a settings save, so a later login knows whether to ask.
+    /// and after a settings save, so a later login knows whether to ask. The
+    /// sweep period rides along (M42) so the tick hook can throttle the online
+    /// sweep; `0` disables it, and a positive value is floored at 60 seconds
+    /// (atpcraft's list-cache floor).
     fn emit_join_gate_state(&self) {
         let config = self.load_config().unwrap_or_default();
+        let sweep_seconds = if config.join_gate_sweep_seconds == 0 {
+            0
+        } else {
+            config.join_gate_sweep_seconds.max(60)
+        };
         self.emit(Event::JoinGateState {
             enabled: config.join_gate_enabled,
             list: config.join_gate_list,
+            sweep_seconds,
         });
     }
 
@@ -1259,6 +1275,62 @@ impl Worker {
             ),
             Err(_) => JOIN_GATE_UNLINKED.into(),
         }
+    }
+
+    /// Sweep the online players against the join gate (M42, atpcraft's
+    /// `startWhitelistSweep` / `computeWhitelistKicks`). The runtime already
+    /// throttled this to the configured period and supplied the online
+    /// players. A failed list refresh — or a timeout — kicks nobody; the
+    /// game side only disconnects the players reported here.
+    async fn join_gate_sweep(&self, players: Vec<SweepPlayer>) {
+        if players.is_empty() {
+            return;
+        }
+        let config = self.load_config().unwrap_or_default();
+        if !config.join_gate_enabled
+            || config.join_gate_list.trim().is_empty()
+            || config.server_api_url.trim().is_empty()
+        {
+            return;
+        }
+        match tokio::time::timeout(
+            JOIN_GATE_SWEEP_TIMEOUT,
+            self.join_gate_sweep_kicks(&config, &players),
+        )
+        .await
+        {
+            Ok(Ok(kicks)) if !kicks.is_empty() => {
+                self.emit(Event::JoinGateKicks { players: kicks })
+            }
+            // A clean sweep, a failed refresh or a timeout: nothing to do.
+            _ => {}
+        }
+    }
+
+    /// The kick list for one sweep: the online players whose linked DID is not
+    /// on a freshly read list. A failed list read propagates, so the caller
+    /// kicks nobody. A per-player link lookup error — or an unlinked player —
+    /// skips that player, matching atpcraft, which only kicks DIDs it can
+    /// confirm are gone.
+    async fn join_gate_sweep_kicks(
+        &self,
+        config: &Config,
+        players: &[SweepPlayer],
+    ) -> crate::error::Result<Vec<SweepPlayer>> {
+        let (_, members) = self.fetch_list(&config.join_gate_list).await?;
+        let members: HashSet<&str> = members.iter().map(String::as_str).collect();
+        let mut kicks = Vec::new();
+        for player in players {
+            let Ok(Some(link)) =
+                identity::fetch_link(&self.http, &config.server_api_url, &player.player_uuid).await
+            else {
+                continue;
+            };
+            if !members.contains(link.did.as_str()) {
+                kicks.push(player.clone());
+            }
+        }
+        Ok(kicks)
     }
 
     /// Read the labels the AppView attaches to a subject's view (M12, the
@@ -2782,6 +2854,7 @@ mod tests {
             server_link_token: String::new(),
             join_gate_enabled: false,
             join_gate_list: String::new(),
+            join_gate_sweep_seconds: 60,
             trusted_server_keys: Vec::new(),
             colibri_bridge_enabled: false,
             colibri_channel_uri: String::new(),
@@ -3930,6 +4003,124 @@ mod tests {
     }
 
     #[test]
+    fn join_gate_sweep_kicks_only_linked_non_members() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("join-gate-sweep");
+        let mut config = test_config(pds.url.clone());
+        config.appview_url = pds.url.clone();
+        config.server_api_url = pds.url.clone();
+        config.join_gate_enabled = true;
+        config.join_gate_list = "at://did:plc:owner/app.bsky.graph.list/3abc".into();
+        write_config(&dir, &config);
+        let (events, event_rx) = std::sync::mpsc::channel();
+        let (oauth_tx, _oauth_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (colibri_tx, _colibri_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut worker = Worker::new(
+            WorkerOptions::new(dir.clone()),
+            events,
+            oauth_tx,
+            colibri_tx,
+        );
+        worker.resolver = stub_resolver(&pds.url);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let alice = SweepPlayer {
+            player_uuid: "00000000-0000-4000-8000-0000000000a3".into(),
+            player_name: "Alice".into(),
+        };
+        let remote = SweepPlayer {
+            player_uuid: "00000000-0000-4000-8000-0000000000a1".into(),
+            player_name: "Remote".into(),
+        };
+        let unlinked = SweepPlayer {
+            player_uuid: "00000000-0000-4000-8000-0000000000a2".into(),
+            player_name: "Unlinked".into(),
+        };
+
+        // Alice is on the list, Remote is linked but off it, Unlinked has no
+        // link. Only Remote is reported for a kick.
+        runtime.block_on(worker.join_gate_sweep(vec![
+            alice.clone(),
+            remote.clone(),
+            unlinked.clone(),
+        ]));
+        match event_rx.try_recv() {
+            Ok(Event::JoinGateKicks { players }) => {
+                assert_eq!(players, vec![remote.clone()]);
+            }
+            other => panic!("expected JoinGateKicks, got {other:?}"),
+        }
+
+        // A clean sweep (everyone a member or unlinked) is silent.
+        runtime.block_on(worker.join_gate_sweep(vec![alice.clone(), unlinked.clone()]));
+        assert!(event_rx.try_recv().is_err(), "a clean sweep is silent");
+
+        // An empty player list never even reads the list.
+        runtime.block_on(worker.join_gate_sweep(Vec::new()));
+        assert!(event_rx.try_recv().is_err(), "an empty sweep is silent");
+
+        // A failed list read kicks nobody: atpcraft's fail-safe.
+        config.join_gate_list = "https://example.com/nope".into();
+        write_config(&dir, &config);
+        runtime.block_on(worker.join_gate_sweep(vec![remote.clone()]));
+        assert!(
+            event_rx.try_recv().is_err(),
+            "a failed list refresh kicks nobody"
+        );
+
+        // A disabled gate is a no-op.
+        config.join_gate_enabled = false;
+        write_config(&dir, &config);
+        runtime.block_on(worker.join_gate_sweep(vec![remote.clone()]));
+        assert!(event_rx.try_recv().is_err(), "a disabled gate is silent");
+    }
+
+    #[test]
+    fn join_gate_state_carries_the_floored_sweep_period() {
+        let dir = temp_dir("join-gate-state");
+        let mut config = test_config("https://pds.example".into());
+        config.join_gate_enabled = true;
+        config.join_gate_list = "at://did:plc:owner/app.bsky.graph.list/3abc".into();
+
+        let (events, event_rx) = std::sync::mpsc::channel();
+        let (oauth_tx, _oauth_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (colibri_tx, _colibri_rx) = tokio::sync::mpsc::unbounded_channel();
+        let worker = Worker::new(
+            WorkerOptions::new(dir.clone()),
+            events,
+            oauth_tx,
+            colibri_tx,
+        );
+
+        // Off stays off.
+        config.join_gate_sweep_seconds = 0;
+        write_config(&dir, &config);
+        worker.emit_join_gate_state();
+        match event_rx.try_recv() {
+            Ok(Event::JoinGateState { sweep_seconds, .. }) => assert_eq!(sweep_seconds, 0),
+            other => panic!("expected JoinGateState, got {other:?}"),
+        }
+
+        // A positive value is floored at 60 seconds (atpcraft's floor).
+        config.join_gate_sweep_seconds = 5;
+        write_config(&dir, &config);
+        worker.emit_join_gate_state();
+        match event_rx.try_recv() {
+            Ok(Event::JoinGateState { sweep_seconds, .. }) => assert_eq!(sweep_seconds, 60),
+            other => panic!("expected JoinGateState, got {other:?}"),
+        }
+
+        // A larger value passes through.
+        config.join_gate_sweep_seconds = 300;
+        write_config(&dir, &config);
+        worker.emit_join_gate_state();
+        match event_rx.try_recv() {
+            Ok(Event::JoinGateState { sweep_seconds, .. }) => assert_eq!(sweep_seconds, 300),
+            other => panic!("expected JoinGateState, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn colibri_remote_profile_prompt_targets_the_linked_player() {
         let pds = StubPds::start(false);
         let dir = temp_dir("colibri-remote-profile");
@@ -4208,6 +4399,7 @@ mod tests {
             server_link_token: String::new(),
             join_gate_enabled: false,
             join_gate_list: String::new(),
+            join_gate_sweep_seconds: 90,
             trusted_server_keys: Vec::new(),
             colibri_bridge_enabled: false,
             colibri_channel_uri: String::new(),
@@ -4234,6 +4426,7 @@ mod tests {
         assert!(back.post_chat_messages);
         assert_eq!(back.chat_server_id, "my-server");
         assert!(back.persist_session);
+        assert_eq!(back.join_gate_sweep_seconds, 90);
     }
 
     /// A minimal PNG header (magic + IHDR with 2560x1440) for image tests.

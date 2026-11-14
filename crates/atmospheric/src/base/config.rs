@@ -91,6 +91,11 @@ pub struct Config {
     /// The public Bluesky list used by the join gate (M38): an
     /// `at://…/app.bsky.graph.list/<rkey>` URI or a bsky.app list URL.
     pub join_gate_list: String,
+    /// How often the online whitelist sweep re-reads `join_gate_list` and
+    /// disconnects a linked player whose DID has left it (M42). Seconds; `0`
+    /// disables the sweep. The worker clamps it to at least 60 seconds when it
+    /// is on, matching atpcraft's list-cache floor.
+    pub join_gate_sweep_seconds: u64,
     /// Trusted atpcraft server endorsement keys (M13 presence reads): when
     /// reading a player's `at.atpcraft.player.snapshot` record, endorsements
     /// from these key ids are accepted alongside the mod's own signing key.
@@ -140,6 +145,7 @@ impl Default for Config {
             server_link_token: String::new(),
             join_gate_enabled: false,
             join_gate_list: String::new(),
+            join_gate_sweep_seconds: 60,
             trusted_server_keys: Vec::new(),
             colibri_bridge_enabled: false,
             colibri_channel_uri: String::new(),
@@ -209,6 +215,7 @@ mod tests {
             server_link_token: "server-link-secret".into(),
             join_gate_enabled: true,
             join_gate_list: "at://did:plc:owner/app.bsky.graph.list/3gate".into(),
+            join_gate_sweep_seconds: 120,
             trusted_server_keys: vec![TrustedServerKey {
                 key_id: String::new(),
                 public_key: "MCowBQYDK2VwAyEA...".into(),
@@ -239,6 +246,7 @@ mod tests {
             back.join_gate_list,
             "at://did:plc:owner/app.bsky.graph.list/3gate"
         );
+        assert_eq!(back.join_gate_sweep_seconds, 120);
         assert!(!back.colibri_server_events_enabled);
         assert!(!back.colibri_server_events_fallback_enabled);
     }
@@ -264,6 +272,7 @@ mod tests {
         assert!(config.colibri_channel_uri.is_empty());
         assert!(!config.join_gate_enabled);
         assert!(config.join_gate_list.is_empty());
+        assert_eq!(config.join_gate_sweep_seconds, 60);
         assert_eq!(config.colibri_appview_url, "https://api.colibri.social");
         assert!(config.server_api_url.is_empty());
         assert!(config.colibri_server_events_fallback_enabled);
