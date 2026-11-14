@@ -1253,6 +1253,16 @@ The default is unchanged and an omitted field still uses the service default, so
 
 Verified: config tests pin the default and a non-default round-trip; the server unit test pins a 120-second stored lifetime, and the router test asserts a 120-second response plus a 400 below 60 and above 3600; the identity client test asserts the request field; the worker gate test asserts the default 600 is sent and the refusal still carries the URL. No live identity service was contacted.
 
+### M56: label signing core (labeler part 1)
+
+atpcraft signs every emitted label with a secp256k1 (K-256) key over the label's canonical DRISL/DAG-CBOR form, excluding `sig`, and publishes the compressed public key as a `did:key` `#atproto_label` verification method. This mod had only the M12 read side, so it had no encoder or signer to build the labeler service on.
+
+`atmospheric-server`'s new `labeler` scope adds `Label` (`com.atproto.label.defs#label`) and `LabelSigner`. The signer loads a 32-byte secret or generates one, exposes the compressed public key and its multibase `did:key` (`0xe7 0x01` multicodec + base58btc), signs the SHA-256 digest of the unsigned canonical CBOR map and normalizes the 64-byte compact signature to low-S, and verifies it. The encoder writes only the subset a label uses (definite-length maps, text, unsigned integers, booleans) and sorts keys length-first then bytewise: `cts`, optional `cid`/`exp`, `neg` only when true, `src`, `uri`, `val`, `ver`. The `sig` field is deliberately not part of the signing input.
+
+No endpoint, PLC operation, declaration record, label store or game trigger is added here; #112 tracks the serving and identity work built on this layer. No request, credential or stored record changes, and the module is not yet called by the server binary.
+
+Verified: exact canonical byte vectors for a minimal label and one with all optionals (including key order and `neg`), the secp256k1 generator-point public key for secret 1, `did:key` prefix and multicodec round-trip, secret validation, deterministic 64-byte low-S signatures, tamper rejection and cross-key rejection. No network was used.
+
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
 `/atmospheric skin-of <did|handle>` sends `Command::FetchPlayerSkin` — the
