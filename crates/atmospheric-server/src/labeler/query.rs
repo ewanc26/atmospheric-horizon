@@ -14,6 +14,17 @@ pub struct Query {
 }
 
 impl Query {
+    /// Parse the optional `cursor` of `subscribeLabels`. A missing, negative or
+    /// non-numeric cursor means the full history, matching `queryLabels` and
+    /// atpcraft's lenient parameter handling.
+    pub fn subscribe_cursor(raw: &str) -> Option<u64> {
+        form_urlencoded::parse(raw.as_bytes()).find_map(|(key, value)| {
+            (key == "cursor")
+                .then(|| value.parse::<u64>().ok())
+                .flatten()
+        })
+    }
+
     /// Parse a raw query string. `uriPatterns` is required and at least one
     /// non-empty pattern must remain after splitting.
     pub fn parse(raw: &str) -> Result<Self, String> {
@@ -92,5 +103,14 @@ mod tests {
         let query = Query::parse("uriPatterns=*&limit=999").unwrap();
         assert_eq!(query.limit, 250);
         assert_eq!(Query::parse("uriPatterns=*&cursor=12").unwrap().cursor, 12);
+    }
+
+    #[test]
+    fn subscription_cursor_is_optional_and_lenient() {
+        assert_eq!(Query::subscribe_cursor("cursor=0"), Some(0));
+        assert_eq!(Query::subscribe_cursor("cursor=42&other=x"), Some(42));
+        assert_eq!(Query::subscribe_cursor("other=x"), None);
+        assert_eq!(Query::subscribe_cursor("cursor=-1"), None);
+        assert_eq!(Query::subscribe_cursor("cursor=nope"), None);
     }
 }

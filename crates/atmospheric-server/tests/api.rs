@@ -594,6 +594,61 @@ async fn labeler_emits_and_serves_query_labels() {
 }
 
 #[tokio::test]
+async fn public_xrpc_reads_allow_cross_origin_browsers() {
+    let path = temp_path("cors");
+    let store = LinkStore::open(&path).unwrap();
+    let labeler = Labeler::open(path.parent().unwrap().join("labeler"), "did:plc:labeler").unwrap();
+    let mut config = config();
+    config.labeler = Some(labeler);
+    let router = app(store, config);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/xrpc/com.atproto.label.queryLabels?uriPatterns=%2A")
+                .header(header::ORIGIN, "https://bsky.app")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+
+    let preflight = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/xrpc/com.atproto.label.queryLabels")
+                .header(header::ORIGIN, "https://bsky.app")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "atproto-accept-labelers, atproto-proxy",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preflight.status(), StatusCode::OK);
+    assert_eq!(
+        preflight.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+        "*"
+    );
+    let allowed = preflight.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS]
+        .to_str()
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(allowed.contains("atproto-accept-labelers"), "{allowed}");
+    assert!(allowed.contains("atproto-proxy"), "{allowed}");
+
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[tokio::test]
 async fn pairing_claims_once_and_survives_a_restart() {
     let path = temp_path("pairing");
     let store = LinkStore::open(&path).unwrap();
