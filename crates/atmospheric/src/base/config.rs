@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 /// Credentials are app passwords, never account passwords. The config file
 /// lives in the mod's own storage folder (see the Horizon mod storage API) —
 /// not in a world save, and not next to one.
-/// The default `chat_server_id` written into `at.atpcraft.player.chat`
-/// records: this client mod has no server identity of its own.
+/// The default `chat_server_id`: blank means chat records use the worker's
+/// persisted Ed25519 signing key id, matching atpcraft. An operator can still
+/// set an explicit value to override it.
 fn default_chat_server_id() -> String {
-    "horizon-client".into()
+    String::new()
 }
 
 /// One trusted atpcraft server endorsement key (M13 presence reads): the
@@ -43,7 +44,8 @@ pub struct Config {
     /// Publish every chat message as an `at.atpcraft.player.chat` record.
     /// Off by default: chat is public once written to the repo.
     pub post_chat_messages: bool,
-    /// The `server` field written into chat records (atpcraft port).
+    /// Optional override for the `server` field in chat records. Empty uses
+    /// the worker's Ed25519 signing key id, matching atpcraft's chat writer.
     pub chat_server_id: String,
     /// Persist the session's refresh token so restarts resume without the
     /// app password (`session.json` in the mod's storage folder).
@@ -266,7 +268,10 @@ mod tests {
             !config.post_chat_messages,
             "chat publishing defaults to off"
         );
-        assert_eq!(config.chat_server_id, "horizon-client");
+        assert!(
+            config.chat_server_id.is_empty(),
+            "chat records default to the signing key id"
+        );
         assert!(config.trusted_server_keys.is_empty());
         assert!(!config.colibri_bridge_enabled);
         assert!(config.colibri_channel_uri.is_empty());
