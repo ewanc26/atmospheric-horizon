@@ -15,7 +15,7 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 ### Fixed
 
 - **Injected notice helpers (#92).** Keep `Text::component()` values alive in
-  `colibri_notice.rs` and `death.rs`, so the mixin bundle compiles against the
+  `colibri/notice.rs` and `death.rs`, so the mixin bundle compiles against the
   pinned Horizon revision.
 
 ### Added

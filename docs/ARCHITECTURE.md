@@ -23,7 +23,9 @@ New and migrated Rust source follows `<scope>/[<subscope>/]<atom>.rs`: the direc
 
 `crates/atmospheric-server` is the first complete slice: `api/` holds the router, state and handler atoms; `browser/` the one-time link state; `error/` the HTTP error mapping; `model/` the wire types and validation; `oauth/` the client, DPoP, resolver and encoding atoms; `page/` the browser HTML; and `store/` the in-memory store plus atomic file persistence. The public `app`, `ServerConfig`, `model`, `oauth` and `store` paths are unchanged.
 
-Entry points (`lib.rs`, `main.rs`) and the injected `runtime.rs` keep their required paths. The worker and mixin helpers remain flat until their scopes are migrated.
+The mixin helpers now follow the same rule: `colibri/` holds `join`, `leave` and `notice`; `gate/` holds `login`; the remaining helpers are single-word atoms at the mixin scope root.
+
+Entry points (`lib.rs`, `main.rs`) and the injected `runtime.rs` keep their required paths. The worker and protocol modules remain flat until their scopes are migrated.
 
 ### The injected module: `mixins/atmospheric/runtime.rs`
 
@@ -57,7 +59,7 @@ crates, no game imports. Its only job is channel plumbing:
   window exists. M37's remote profile prompts use a separate queue and the
   tick hook sends them with `native_tell`, so a server tick can prompt a
   joining player without a window.
-- The server-side `broadcast_message` injection (`colibri_notice.rs`) reads
+- The server-side `broadcast_message`  injection (`colibri/notice.rs`) reads
   the line's translation key and forwards only join/leave/death/advancement
   lines to the worker, which writes them as the server account.
 
@@ -670,7 +672,7 @@ Colibri AppView was contacted.
 
 Horizon's server-side `broadcast_message` hook (`hook_version = 1`, the
 `broadcast_message` name from `native-hooks.json`) runs before a server system
-line is logged and sent. `mixins/atmospheric/colibri_notice.rs` takes the
+line is logged and sent. `mixins/atmospheric/colibri/notice.rs` takes the
 line's `Text`, reads its `translate` key and asks the std-only runtime
 `is_colibri_notice` classifier. That accepts exactly atpcraft's categories:
 `multiplayer.player.joined`, `multiplayer.player.joined.renamed`,
@@ -700,15 +702,15 @@ was contacted.
 ### M29: Colibri presence fallback and approval notice
 
 The connection hooks `player_logged_in` and `player_logged_out`
-(`hook_version = 1`, server side) call `colibri_join.rs` and
-`colibri_leave.rs`. Each localises the join/leave line through
+(`hook_version = 1`, server side) call `colibri/join.rs` and
+`colibri/leave.rs`. Each localises the join/leave line through
 `Text::translate`, then sends `GameCommand::ColibriPresence { kind, text }`.
 The join helper also sends M37's `GameCommand::ColibriPlayerJoined` with the
 player's UUID. The worker waits **3 seconds** (`COLIBRI_PRESENCE_WAIT`) and asks whether a
 matching line arrived within **5 seconds** before or after the event
 (`COLIBRI_PRESENCE_WINDOW`), the same window atpcraft uses.
 
-`colibri_notice.rs` marks handled lines through `ColibriHandled { kind }`.
+`colibri/notice.rs` marks handled lines through `ColibriHandled { kind }`.
 Join and leave lines mark their kind; a textless line marks `None`, which
 counts for both kinds. This matters when a chat mod intentionally hides a
 line: the hidden line must suppress the fallback, not trigger a duplicate.
@@ -936,7 +938,7 @@ wire shape.
 M30 could only inspect the local player because it had no UUID-to-DID map.
 M37 uses the map M35 built and the claim path M36 added: the server-side
 `player_logged_in` hook now binds `player: u128` alongside `name`, and
-`colibri_join.rs` sends `GameCommand::ColibriPlayerJoined` with the canonical
+`colibri/join.rs` sends `GameCommand::ColibriPlayerJoined` with the canonical
 hyphenated UUID and the joining name. The presence fallback is unchanged.
 
 While the bridge is active, the worker reads `server_api_url` and resolves
@@ -971,7 +973,7 @@ M15 could decide list membership and M35/M36 could link a UUID to a DID, but
 nothing refused a join. M38 uses Horizon's pinned `player_login` hook, which
 runs after the server accepts the connection but before the player is placed.
 The hook binds `player: u128`, `cancel: &mut bool` and
-`reason: &mut Option<Text>`; `gate_login.rs` asks the runtime for a refusal
+`reason: &mut Option<Text>`; `gate/login.rs` asks the runtime for a refusal
 and, when it gets one, cancels with that text on the disconnect screen.
 
 `Worker::emit_join_gate_state` publishes `{enabled, list}` at startup and
@@ -1058,7 +1060,7 @@ contacted.
 
 M39's browser flow was only reachable from `/atmospheric link`, but M38 runs
 before a refused player can type a command. M40 closes that gap without a new
-server endpoint or a second link store. `gate_login.rs` already has the
+server endpoint or a second link store. `gate/login.rs` already has the
 joining player's name; it now passes it through `join_gate_refusal` and
 `Command::JoinGateCheck` as `player_name`. The runtime adds the field to the
 JSON command, and the worker uses it only for the identity service's existing
