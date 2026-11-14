@@ -31,6 +31,13 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   `/lexicons/{nsid}.json`, with an HTML index and permissive CORS. The schemas
   match the records the mod writes and are compiled into the binary; no
   filesystem read, outbound request, credential or stored player data is added.
+- **M47 — atpcraft-compatible linked-player names (#116).** A linked player's
+  display name is reduced to a valid 16-character Minecraft name (keep
+  `[A-Za-z0-9_]` and whitespace, collapse whitespace to `_`, strip the rest and
+  cap), with the handle's username as the fallback; the plain-text pronoun
+  suffix remains because the pinned helper set has no chat-only styled hook.
+  Unchanged and unusable names leave the vanilla name alone. No new endpoint,
+  credential or stored data.
 
 ## [0.3.1] — 2026-11-14
 
