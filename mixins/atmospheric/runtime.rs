@@ -16,7 +16,7 @@ use std::sync::{
 pub const ID: &str = "atmospheric";
 /// The mod's name and version, as Options > Mods lists them.
 pub const NAME: &str = "Atmospheric";
-pub const VERSION: &str = "0.2.0";
+pub const VERSION: &str = "0.3.0";
 /// The mod's description on its Options > Mods row.
 pub const DESCRIPTION: &str = "Post to Bluesky from Horizon: a keybind posts your location, /atmospheric posts text or logs in. Talks only to the PDS you configure.";
 /// The keybind's name, label and default key, as Options > Mods lists them.
