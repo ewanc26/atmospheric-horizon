@@ -21,7 +21,7 @@ The optional `atmospheric-server` binary is not in this diagram: it is a separat
 
 All Rust source follows `<scope>/[<subscope>/]<atom>.rs`: the directory names the domain scope, the final file is a single-word atom, and `mod.rs` only declares the scope. The injected module and Cargo entry points keep their required paths, and crate-root re-exports preserve the public protocol module paths. `scripts/check-layout.sh` is the dependency-free CI guard: it rejects non-atom Rust filenames everywhere, requires scope placement and `mod.rs` in both Rust crates, and keeps explicit exceptions for Cargo target paths such as `atmospheric-worker.rs`.
 
-`crates/atmospheric-server` uses the same rule: `api/` holds the router, state and handler atoms (including M46's `lexicon` handler); `browser/` the one-time link state; `error/` the HTTP error mapping; `model/` the wire types and validation; `oauth/` the client, DPoP, resolver and encoding atoms; `page/` the browser HTML; and `store/` the in-memory store plus atomic file persistence. The compile-time lexicon documents live in `crates/atmospheric-server/lexicons/`. The public `app`, `ServerConfig`, `model`, `oauth` and `store` paths are unchanged.
+`crates/atmospheric-server` uses the same rule: `api/` holds the router, state and handler atoms (including M46's `lexicon` handler); `browser/` the one-time link state; `error/` the HTTP error mapping; `labeler/` the M56/M57 signing, key, log, state and query atoms; `model/` the wire types and validation; `oauth/` the client, DPoP, resolver and encoding atoms; `page/` the browser HTML; and `store/` the in-memory store plus atomic file persistence. The compile-time lexicon documents live in `crates/atmospheric-server/lexicons/`. The public `app`, `ServerConfig`, `model`, `oauth` and `store` paths are unchanged.
 
 `crates/atmospheric` now follows the same rule: `account/` holds `identity`, `oauth` and `session`; `base/` holds `config`, `error`, `records`, `signing` and `tid`; `social/` holds the Bluesky read/write and digest atoms; `colibri/bridge.rs` holds the bridge; and `worker/service.rs` owns the worker. Public paths such as `atmospheric::oauth`, `atmospheric::records` and `atmospheric::worker` are unchanged.
 
@@ -420,8 +420,9 @@ Stub tests cover reference parsing, two-page pagination, and the error path.
 
 Issue #29 kept only the client-side halves of the labeler item: (a) reading
 labels on a subject, and (b) resolving a labeler's DID-document service
-endpoint. Label issuance stays server-side (a client mod cannot host the
-labeler HTTP endpoint).
+endpoint. Label issuance stays server-side; M56/M57 now provide the signing,
+durable log and `queryLabels` layer described above (a client mod still cannot
+host the labeler HTTP endpoint).
 
 - `social/labels.rs` parses a subject reference — an `at://` URI (account or
   record), a bare DID, a handle, or a bsky.app profile/post/list URL — and
@@ -543,11 +544,13 @@ stored on disk. The direct profile record is read from the PDS; its avatar is
 a blob reference, so only the AppView's avatar URL is carried in the digest.
 
 atpcraft's remaining server-side surfaces (RPG item discovery, full aspect
-capture/restore and labeler issuance) are not implemented yet; the README port
-table records each one. M25 supplies the separate server account, M26/M27 run
-the operational Colibri bridge, M35 supplies the shared player-to-DID map,
-M36 claims links from the game, M37 checks linked players on join and M38
-enforces the configured list; issuance and capture remain separate milestones.
+capture/restore and the serving/identity parts of the labeler) are not
+implemented yet; the README port table records each one. M56/M57 cover label
+signing, durable storage and querying. M25 supplies the separate server
+account, M26/M27 run the operational Colibri bridge, M35 supplies the shared
+player-to-DID map, M36 claims links from the game, M37 checks linked players on
+join and M38 enforces the configured list; the remaining labeler service and
+capture remain separate milestones.
 
 Verified: `profiles` unit tests (whitespace normalisation, direct-record
 precedence, clearing on a successful record without pronouns, AppView
@@ -899,8 +902,9 @@ per data directory, not for multiple replicas sharing a volume.
 M36 wires the explicit `/atmospheric link <code>` claim, M37 wires the
 public join-time link lookup, M38 consumes the same map for login-gate
 enforcement, and M39 adds browser OAuth link creation and callback routes.
-The service is still the foundation for labeler issuance and RPG/player-data
-work; those consumers remain separate and must not be described as delivered.
+The service is still the foundation for the remaining labeler identity and
+declaration work and for RPG/player-data work; those consumers remain separate
+and must not be described as delivered.
 
 Verified: `model` unit tests cover UUID, name, DID, handle, code and TTL
 validation; store tests cover reopen persistence, `linked_at` preservation,
@@ -1259,9 +1263,21 @@ atpcraft signs every emitted label with a secp256k1 (K-256) key over the label's
 
 `atmospheric-server`'s new `labeler` scope adds `Label` (`com.atproto.label.defs#label`) and `LabelSigner`. The signer loads a 32-byte secret or generates one, exposes the compressed public key and its multibase `did:key` (`0xe7 0x01` multicodec + base58btc), signs the SHA-256 digest of the unsigned canonical CBOR map and normalizes the 64-byte compact signature to low-S, and verifies it. The encoder writes only the subset a label uses (definite-length maps, text, unsigned integers, booleans) and sorts keys length-first then bytewise: `cts`, optional `cid`/`exp`, `neg` only when true, `src`, `uri`, `val`, `ver`. The `sig` field is deliberately not part of the signing input.
 
-No endpoint, PLC operation, declaration record, label store or game trigger is added here; #112 tracks the serving and identity work built on this layer. No request, credential or stored record changes, and the module is not yet called by the server binary.
+No endpoint, PLC operation or declaration record is added in M56; M57 adds the durable log, key persistence and the query/emit routes on top. The `app.bsky.labeler.service` declaration, PLC identity update, `subscribeLabels` stream and game triggers remain in #112.
 
 Verified: exact canonical byte vectors for a minimal label and one with all optionals (including key order and `neg`), the secp256k1 generator-point public key for secret 1, `did:key` prefix and multicodec round-trip, secret validation, deterministic 64-byte low-S signatures, tamper rejection and cross-key rejection. No network was used.
+
+### M57: label log and queryLabels (labeler part 2)
+
+M56 produced signatures but had nowhere to keep or serve them. M57 adds the server half needed before identity and game-trigger work: a durable append-only label log, an active-state index, an owner-only K-256 key file, an admin emission route, and the spec `queryLabels` read.
+
+`Labeler` lives under `atmospheric-server`'s `labeler` scope. On open it validates the configured service DID (a `did:plc` or `did:web`), loads or creates `<data>/labeler/signing-key.json` in the atpcraft-compatible `privateKey`/`publicKey` base64 JSON shape with mode 0600, and replays `<data>/labeler/labels.jsonl`. Each line is `{seq, label}` where `label` is the spec shape and `sig` is DAG-JSON `{"$bytes": ...}`; sequence numbers start at 1 and survive restart. Malformed lines are skipped so a partially written last line does not prevent startup. The active index keeps the latest assertion per `(uri, val)`, removes it on a negation, and filters expired assertions. `cts` is stamped by the server, and a supplied `exp` must parse as RFC 3339.
+
+`POST /v1/labeler/labels` is admin-token protected and accepts only `uri`, `val`, optional `neg`, `cid` and `exp`; `src` is the configured service DID. It signs the canonical CBOR and appends before serving. `GET /xrpc/com.atproto.label.queryLabels` is public; `uriPatterns` is required and accepts repeated or comma-separated values, `sources` filters by label `src`, `limit` defaults to 50 and clamps to 1–250, and `cursor` is the last sequence from the previous page. `*` and trailing-`*` patterns match atpcraft. Errors use the XRPC `{error, message}` envelope; a disabled labeler returns `NotEnabled` 503. The query response contains labels only (no sequence wrapper), with the cursor string when the page is full.
+
+The service is enabled only when `ATMOSPHERIC_SERVER_LABELER_DID` is set; otherwise the routes return the disabled error and no key is generated. No declaration record, PLC operation, `subscribeLabels` WebSocket or game trigger is added; those remain in #112. No outbound request is added — all reads and writes are local.
+
+Verified: 32 server unit tests and 6 API tests, including key reuse and 0600 permissions, exact signed JSON shape and round-trip, log replay and sequence continuation, assertion/negation/expiry state, repeated/comma query parsing, admin auth, query filtering/pagination, persistence and input rejection. No live labeler or PDS was contacted.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 

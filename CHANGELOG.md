@@ -89,6 +89,14 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   the unsigned label, and K-256 key handling with multibase `did:key` plus
   64-byte low-S signatures. This is the first slice of #112; no endpoint, PLC
   update, declaration record, label store or game trigger is added yet.
+- **M57 — label log and queryLabels (#136).** Add the server-side labeler
+  state: owner-only K-256 key persistence, an append-only JSONL label log with
+  sequence recovery, an active-state index rebuilt on restart, the admin
+  `POST /v1/labeler/labels` signing/append route, and the public
+  `GET /xrpc/com.atproto.label.queryLabels` route with patterns, sources,
+  expiry and cursor pagination. The `app.bsky.labeler.service` declaration,
+  PLC identity update, `subscribeLabels` stream and game triggers remain in
+  #112.
 
 ## [0.3.1] — 2026-11-14
 
