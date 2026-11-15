@@ -28,6 +28,9 @@ pub struct LabelDigest {
     pub val: String,
     /// The labeler's DID (`src`).
     pub src: String,
+    /// The labeled subject (`uri`): a DID or an AT-URI.
+    #[serde(default)]
+    pub uri: String,
     /// A negation label (overwrites a previous label of the same value).
     #[serde(default)]
     pub neg: bool,
@@ -44,6 +47,7 @@ impl LabelDigest {
         Some(Self {
             val: value["val"].as_str()?.to_string(),
             src: value["src"].as_str()?.to_string(),
+            uri: value["uri"].as_str().unwrap_or_default().to_string(),
             neg: value["neg"].as_bool().unwrap_or(false),
             cts: value["cts"].as_str()?.to_string(),
             exp: value["exp"].as_str().map(str::to_owned),

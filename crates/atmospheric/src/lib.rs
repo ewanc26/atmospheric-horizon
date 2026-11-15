@@ -16,7 +16,7 @@ pub use account::{identity, oauth, plc, session};
 pub use base::{config, error, records, signing, tid};
 pub use social::{
     actions, chats, graph, interactions, labeler, labels, lists, notifications, presence, profiles,
-    servers, skins,
+    servers, skins, triggers,
 };
 
 pub use config::Config;
@@ -172,6 +172,15 @@ pub enum Command {
     /// has left the list. The game side throttles this to
     /// `join_gate_sweep_seconds`.
     JoinGateSweep { players: Vec<SweepPlayer> },
+    /// A linked player joined the server (M61): assert the `player` and
+    /// `online` labels for their DID when the labeler triggers are configured.
+    LabelerPlayerJoined { player_uuid: String },
+    /// A player disconnected (M61): negate their `online` label.
+    LabelerPlayerLeft { player_uuid: String },
+    /// Re-evaluate the online players' labels (M61). The game side throttles
+    /// this to one sweep a minute; the worker refreshes stale `player` badges
+    /// and re-asserts a missing `online` label.
+    LabelerSweep { players: Vec<SweepPlayer> },
     /// Read a player's `at.atpcraft.player.chat` records (their mirrored
     /// in-game chat history) from their own PDS (M16, the read side of the
     /// M5 chat mirror). Chat records are unsigned by design, so there is no
@@ -540,6 +549,30 @@ mod tests {
             })
             .unwrap(),
             r#"{"JoinGateSweep":{"players":[{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}]}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::LabelerPlayerJoined {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+            })
+            .unwrap(),
+            r#"{"LabelerPlayerJoined":{"player_uuid":"00000000-0000-4000-8000-000000000001"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::LabelerPlayerLeft {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+            })
+            .unwrap(),
+            r#"{"LabelerPlayerLeft":{"player_uuid":"00000000-0000-4000-8000-000000000001"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::LabelerSweep {
+                players: vec![SweepPlayer {
+                    player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                    player_name: "Alex".into(),
+                }],
+            })
+            .unwrap(),
+            r#"{"LabelerSweep":{"players":[{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}]}}"#
         );
         // SaveConfig carries the full Config; the game side sends the Settings
         // subset and container-level serde(default) fills the rest.

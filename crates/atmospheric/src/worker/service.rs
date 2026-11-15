@@ -21,6 +21,7 @@ use crate::{
     session::{self, Agent, SessionState, StoredSession},
     signing::{self, SigningKey},
     skins,
+    social::triggers,
     tid::TidGen,
 };
 use ed25519_dalek::VerifyingKey;
@@ -187,6 +188,9 @@ pub fn spawn(
                 let mut worker = Worker::new(options, events, oauth_tx, colibri_tx);
                 worker.emit(Event::Session(SessionState::LoggedOut));
                 worker.emit_join_gate_state();
+                // M61: negate `online` labels left by an unclean game stop.
+                // A no-op unless the labeler triggers are configured.
+                worker.recover_labeler_online().await;
                 // Resume persisted player and server sessions (refresh
                 // tokens) if there are any.
                 worker.try_resume().await;
@@ -719,6 +723,13 @@ impl Worker {
             Command::JoinGateSweep { players } => {
                 self.join_gate_sweep(players).await;
             }
+            Command::LabelerPlayerJoined { player_uuid } => {
+                self.labeler_player_joined(&player_uuid).await;
+            }
+            Command::LabelerPlayerLeft { player_uuid } => {
+                self.labeler_player_left(&player_uuid).await;
+            }
+            Command::LabelerSweep { players } => self.labeler_sweep(&players).await,
             Command::FetchChat { subject } => {
                 // A public read against the subject's own PDS: works logged
                 // out, no token refresh.
@@ -2387,6 +2398,117 @@ impl Worker {
         self.emit_server_account(SessionState::LoggedOut);
     }
 
+    /// Whether the M61 game triggers are configured: the labeler is enabled
+    /// and both the identity service and its admin token are set.
+    fn labeler_triggers(&self) -> Option<(String, String)> {
+        let config = self.load_config().ok()?;
+        if !config.labeler_enabled
+            || config.server_api_url.trim().is_empty()
+            || config.server_admin_token.trim().is_empty()
+        {
+            return None;
+        }
+        Some((
+            config
+                .server_api_url
+                .trim()
+                .trim_end_matches('/')
+                .to_string(),
+            config.server_admin_token,
+        ))
+    }
+
+    /// A linked player joined (M61): assert `player` and `online` for their
+    /// DID. Best-effort, like every automatic trigger: an unreachable service
+    /// or an unlinked player stays silent.
+    async fn labeler_player_joined(&mut self, player_uuid: &str) {
+        self.labeler_online(&[player_uuid.to_string()]).await;
+    }
+
+    /// Ensure the labels for these UUIDs' linked DIDs (M61). The identity
+    /// reads and label query happen before any write, so a failed lookup never
+    /// produces a partial set.
+    async fn labeler_online(&mut self, player_uuids: &[String]) {
+        let Some((base, token)) = self.labeler_triggers() else {
+            return;
+        };
+        let mut dids: Vec<String> = Vec::new();
+        for player_uuid in player_uuids {
+            if let Ok(Some(link)) = identity::fetch_link(&self.http, &base, player_uuid).await
+                && !dids.contains(&link.did)
+            {
+                dids.push(link.did);
+            }
+        }
+        if dids.is_empty() {
+            return;
+        }
+        let Ok(labels) = triggers::fetch_active(&self.http, &base, &dids).await else {
+            return;
+        };
+        let now = triggers::now_unix();
+        for did in &dids {
+            let active =
+                triggers::active_labels(labels.iter().filter(|label| label.uri == *did).cloned());
+            for action in triggers::online_actions(&active, now) {
+                let _ = triggers::emit(&self.http, &base, &token, did, &action).await;
+            }
+        }
+    }
+
+    /// A player disconnected (M61): negate their active `online` label. The
+    /// rolling `player` badge deliberately survives.
+    async fn labeler_player_left(&mut self, player_uuid: &str) {
+        let Some((base, token)) = self.labeler_triggers() else {
+            return;
+        };
+        let Ok(Some(link)) = identity::fetch_link(&self.http, &base, player_uuid).await else {
+            return;
+        };
+        let Ok(labels) =
+            triggers::fetch_active(&self.http, &base, std::slice::from_ref(&link.did)).await
+        else {
+            return;
+        };
+        let active = triggers::active_labels(labels);
+        for action in triggers::logout_actions(&active) {
+            let _ = triggers::emit(&self.http, &base, &token, &link.did, &action).await;
+        }
+    }
+
+    /// Re-evaluate the online players (M61). The tick hook throttles this to
+    /// [`crate::labeler::LABELER_SWEEP_SECONDS`]-style once a minute.
+    async fn labeler_sweep(&mut self, players: &[SweepPlayer]) {
+        let player_uuids: Vec<String> = players
+            .iter()
+            .map(|player| player.player_uuid.clone())
+            .collect();
+        self.labeler_online(&player_uuids).await;
+    }
+
+    /// Negate `online` labels left by an unclean game stop (M61). This runs
+    /// once when the worker starts, before any player can join. A no-op when
+    /// the triggers are not configured or the labeler is unreachable.
+    async fn recover_labeler_online(&mut self) {
+        let Some((base, token)) = self.labeler_triggers() else {
+            return;
+        };
+        let patterns = ["*".to_string()];
+        let Ok(labels) = triggers::fetch_active(&self.http, &base, &patterns).await else {
+            return;
+        };
+        for did in triggers::online_subjects(&labels) {
+            let _ = triggers::emit(
+                &self.http,
+                &base,
+                &token,
+                &did,
+                &triggers::negate(triggers::ONLINE_LABEL),
+            )
+            .await;
+        }
+    }
+
     /// Read the labeler's public identity from the identity service, merge its
     /// key and endpoint into the server account's current PLC operation, and
     /// submit the signed operation (M60). Every existing rotation key, alias,
@@ -3330,6 +3452,7 @@ mod tests {
             appview_url: "https://public.api.bsky.app".into(),
             server_api_url: String::new(),
             server_link_token: String::new(),
+            server_admin_token: String::new(),
             browser_link_ttl_seconds: 600,
             join_gate_enabled: false,
             join_gate_list: String::new(),
@@ -3355,6 +3478,7 @@ mod tests {
         body: String,
         body_bytes: Vec<u8>,
         authorized: bool,
+        admin_authorized: bool,
     }
 
     /// A stub PDS on loopback: createSession, getSession, createRecord,
@@ -3504,6 +3628,7 @@ mod tests {
         let mut content_length = 0usize;
         let mut authorized = false;
         let mut refresh_authorized = false;
+        let mut admin_authorized = false;
         for line in lines {
             let lower = line.to_ascii_lowercase();
             if let Some(value) = lower.strip_prefix("content-length:") {
@@ -3515,6 +3640,9 @@ mod tests {
                 }
                 if lower.contains("bearer stub-refresh") {
                     refresh_authorized = true;
+                }
+                if lower.contains("bearer stub-admin") {
+                    admin_authorized = true;
                 }
             }
         }
@@ -3536,6 +3664,7 @@ mod tests {
             body: body_string.clone(),
             body_bytes: body.clone(),
             authorized,
+            admin_authorized,
         });
 
         let (status, payload): (&str, String) = if path
@@ -3565,6 +3694,15 @@ mod tests {
                     r#"{"cursor":"c2","seenAt":"2026-11-12T12:00:00.000Z","notifications":[{"uri":"at://did:plc:alice/app.bsky.feed.like/1","cid":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy","indexedAt":"2026-11-12T10:00:00.000Z","isRead":false,"reason":"like","record":{"$type":"app.bsky.feed.like"},"author":{"did":"did:plc:alice","handle":"alice.test"}},{"uri":"at://did:plc:bob/app.bsky.feed.post/2","cid":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy","indexedAt":"2026-11-12T11:00:00.000Z","isRead":false,"reason":"reply","record":{"$type":"app.bsky.feed.post","text":"nice post!"},"author":{"did":"did:plc:bob","handle":"bob.test"}}]}"#.to_string(),
                 )
             }
+        } else if path == "/v1/labeler/labels" {
+            if admin_authorized {
+                ("201 Created", r#"{"seq":1}"#.to_string())
+            } else {
+                (
+                    "401 Unauthorized",
+                    r#"{"error":"Unauthorized"}"#.to_string(),
+                )
+            }
         } else if path == "/v1/pairings/claim" {
             (
                 "200 OK",
@@ -3590,6 +3728,11 @@ mod tests {
             (
                 "200 OK",
                 r#"{"player_uuid":"00000000-0000-4000-8000-0000000000a3","player_name":"Alice","did":"did:plc:alice","handle":"alice.test","linked_at":1760000000}"#.to_string(),
+            )
+        } else if path == "/v1/links/00000000-0000-4000-8000-0000000000a4" {
+            (
+                "200 OK",
+                r#"{"player_uuid":"00000000-0000-4000-8000-0000000000a4","player_name":"Carol","did":"did:plc:carol","handle":"carol.test","linked_at":1760000000}"#.to_string(),
             )
         } else {
             match path.split('?').next().unwrap_or(&path) {
@@ -3855,7 +3998,27 @@ mod tests {
                 // The stub doubles as a labeler for the M12 queryLabels read:
                 // two pages, cursor "2" on the first.
                 "/xrpc/com.atproto.label.queryLabels" => {
-                    if !path.contains("uriPatterns=") {
+                    if path.contains("uriPatterns=*") || path.contains("uriPatterns=%2A") {
+                        (
+                            "200 OK",
+                            r#"{"labels":[{"ver":1,"src":"did:plc:labeler","uri":"did:plc:alice","val":"online","cts":"2026-11-15T10:00:00.000Z"}]}"#.to_string(),
+                        )
+                    } else if path.contains("did%3Aplc%3Aremote") || path.contains("did:plc:remote") {
+                        (
+                            "200 OK",
+                            r#"{"labels":[{"ver":1,"src":"did:plc:labeler","uri":"did:plc:remote","val":"player","cts":"2026-11-15T10:00:00.000Z","exp":"2999-01-01T00:00:00.000Z"}]}"#.to_string(),
+                        )
+                    } else if path.contains("did%3Aplc%3Aalice") || path.contains("did:plc:alice") {
+                        (
+                            "200 OK",
+                            r#"{"labels":[{"ver":1,"src":"did:plc:labeler","uri":"did:plc:alice","val":"player","cts":"2026-11-15T10:00:00.000Z","exp":"2999-01-01T00:00:00.000Z"},{"ver":1,"src":"did:plc:labeler","uri":"did:plc:alice","val":"online","cts":"2026-11-15T10:00:00.000Z"}]}"#.to_string(),
+                        )
+                    } else if path.contains("did%3Aplc%3Acarol") || path.contains("did:plc:carol") {
+                        (
+                            "200 OK",
+                            r#"{"labels":[{"ver":1,"src":"did:plc:labeler","uri":"did:plc:carol","val":"player","cts":"2026-11-15T10:00:00.000Z","exp":"2000-01-01T00:00:00.000Z"}]}"#.to_string(),
+                        )
+                    } else if !path.contains("uriPatterns=") {
                         (
                             "400 Bad Request",
                             r#"{"error":"InvalidRequest","message":"Parameter 'uriPatterns' is required"}"#.to_string(),
@@ -4510,6 +4673,101 @@ mod tests {
     }
 
     #[test]
+    fn labeler_triggers_assert_presence_and_negate_on_logout() {
+        let pds = StubPds::start(false);
+        let mut config = test_config(pds.url.clone());
+        config.labeler_enabled = true;
+        config.server_api_url = pds.url.clone();
+        config.server_admin_token = "stub-admin".into();
+        let dir = temp_dir("labeler-triggers");
+        write_config(&dir, &config);
+        let (events, _event_rx) = std::sync::mpsc::channel();
+        let (oauth_tx, _oauth_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (colibri_tx, _colibri_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut worker = Worker::new(WorkerOptions::new(dir), events, oauth_tx, colibri_tx);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        runtime.block_on(worker.labeler_player_joined("00000000-0000-4000-8000-0000000000a1"));
+        let emitted = emitted_labels(&pds);
+        assert_eq!(
+            emitted.len(),
+            1,
+            "a fresh badge only needs presence: {emitted:?}"
+        );
+        assert_eq!(emitted[0]["uri"], "did:plc:remote");
+        assert_eq!(emitted[0]["val"], "online");
+        assert_eq!(emitted[0]["neg"], false);
+        assert!(emitted[0].get("exp").is_none());
+        assert!(
+            pds.requests()
+                .iter()
+                .find(|request| request.path == "/v1/labeler/labels")
+                .unwrap()
+                .admin_authorized,
+            "emission must carry the admin token"
+        );
+
+        runtime.block_on(worker.labeler_player_left("00000000-0000-4000-8000-0000000000a3"));
+        let emitted = emitted_labels(&pds);
+        assert_eq!(emitted.len(), 2, "logout negates exactly one label");
+        assert_eq!(emitted[1]["uri"], "did:plc:alice");
+        assert_eq!(emitted[1]["val"], "online");
+        assert_eq!(emitted[1]["neg"], true);
+    }
+
+    #[test]
+    fn labeler_sweep_refreshes_a_stale_badge_and_recovery_negates_online() {
+        let pds = StubPds::start(false);
+        let mut config = test_config(pds.url.clone());
+        config.labeler_enabled = true;
+        config.server_api_url = pds.url.clone();
+        config.server_admin_token = "stub-admin".into();
+        let dir = temp_dir("labeler-sweep");
+        write_config(&dir, &config);
+        let (events, _event_rx) = std::sync::mpsc::channel();
+        let (oauth_tx, _oauth_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (colibri_tx, _colibri_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut worker = Worker::new(WorkerOptions::new(dir), events, oauth_tx, colibri_tx);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        runtime.block_on(worker.labeler_sweep(&[SweepPlayer {
+            player_uuid: "00000000-0000-4000-8000-0000000000a4".into(),
+            player_name: "Carol".into(),
+        }]));
+        let emitted = emitted_labels(&pds);
+        assert_eq!(
+            emitted.len(),
+            2,
+            "a stale badge is refreshed, then presence asserted"
+        );
+        assert_eq!(emitted[0]["uri"], "did:plc:carol");
+        assert_eq!(emitted[0]["val"], "player");
+        assert_eq!(emitted[0]["neg"], false);
+        let expiry = emitted[0]["exp"].as_str().unwrap();
+        assert!(
+            expiry > triggers::format_utc(triggers::now_unix()).as_str(),
+            "the refreshed expiry is in the future: {expiry}"
+        );
+        assert_eq!(emitted[1]["val"], "online");
+
+        runtime.block_on(worker.recover_labeler_online());
+        let emitted = emitted_labels(&pds);
+        assert_eq!(emitted.len(), 3);
+        assert_eq!(emitted[2]["uri"], "did:plc:alice");
+        assert_eq!(emitted[2]["val"], "online");
+        assert_eq!(emitted[2]["neg"], true);
+    }
+
+    /// Every label body the stub's admin route accepted, oldest first.
+    fn emitted_labels(pds: &StubPds) -> Vec<serde_json::Value> {
+        pds.requests()
+            .into_iter()
+            .filter(|request| request.path == "/v1/labeler/labels")
+            .map(|request| serde_json::from_str(&request.body).unwrap())
+            .collect()
+    }
+
+    #[test]
     fn join_gate_sweep_kicks_only_linked_non_members() {
         let pds = StubPds::start(false);
         let dir = temp_dir("join-gate-sweep");
@@ -4958,6 +5216,7 @@ mod tests {
             appview_url: "https://public.api.bsky.app".into(),
             server_api_url: String::new(),
             server_link_token: String::new(),
+            server_admin_token: String::new(),
             browser_link_ttl_seconds: 900,
             join_gate_enabled: false,
             join_gate_list: String::new(),

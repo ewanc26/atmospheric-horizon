@@ -49,7 +49,9 @@ fn atmospheric_tick(game: &mut crate::game::Game<'_>) {
     // linked players whose DID has left it; each is disconnected with
     // atpcraft's reason. The worker never schedules this itself, so the tick is
     // the only clock.
-    if m::join_gate_sweep_due() {
+    let join_gate_due = m::join_gate_sweep_due();
+    let labeler_due = m::labeler_sweep_due();
+    if join_gate_due || labeler_due {
         let players: Vec<m::SweepPlayer> = game
             .native_server_players()
             .into_iter()
@@ -58,7 +60,12 @@ fn atmospheric_tick(game: &mut crate::game::Game<'_>) {
                 player_name: player.name,
             })
             .collect();
-        m::join_gate_sweep(players);
+        if join_gate_due {
+            m::join_gate_sweep(players.clone());
+        }
+        if labeler_due {
+            m::labeler_sweep(players);
+        }
     }
     for kicked in m::drain_join_gate_kicks() {
         game.native_run_command(&format!(
