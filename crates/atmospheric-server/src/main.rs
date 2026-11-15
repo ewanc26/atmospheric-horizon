@@ -1,6 +1,7 @@
 use atmospheric_server::{
     ServerConfig, app,
     labeler::Labeler,
+    skin::SkinSigner,
     store::{LinkStore, default_links_path},
 };
 use std::{env, net::SocketAddr, path::PathBuf};
@@ -51,6 +52,27 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "atmospheric-server: browser linking is disabled; set ATMOSPHERIC_SERVER_PUBLIC_URL and ATMOSPHERIC_SERVER_LINK_TOKEN"
         );
     }
+    let skin_signer = env::var("ATMOSPHERIC_SERVER_SKIN_KEY")
+        .ok()
+        .map(|path| path.trim().to_owned())
+        .filter(|path| !path.is_empty())
+        .map(|path| -> Result<SkinSigner, Box<dyn std::error::Error>> {
+            let raw = std::fs::read_to_string(&path)?;
+            let file: atmospheric::signing::SigningKeyFile = serde_json::from_str(&raw)?;
+            let signer = SkinSigner::from_file(file)
+                .map_err(|error| std::io::Error::other(format!("skin signing key: {error}")))?;
+            println!(
+                "atmospheric-server: browser skin upload enabled (key {})",
+                signer.key_id()
+            );
+            Ok(signer)
+        })
+        .transpose()?;
+    if skin_signer.is_none() {
+        eprintln!(
+            "atmospheric-server: browser skin upload disabled; set ATMOSPHERIC_SERVER_SKIN_KEY to the game's signing-key.json"
+        );
+    }
     let labeler_did = env::var("ATMOSPHERIC_SERVER_LABELER_DID")
         .ok()
         .map(|did| did.trim().to_owned())
@@ -81,6 +103,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         public_url,
         oauth_resolver: None,
         labeler,
+        skin_signer,
     };
     axum::serve(listener, app(store, config))
         .with_graceful_shutdown(shutdown_signal())

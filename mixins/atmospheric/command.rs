@@ -3,6 +3,8 @@
 // text; /atmospheric notifications polls now (the worker also polls on a
 // timer); /atmospheric chat <text> publishes one chat record (atpcraft port);
 // /atmospheric skin [path] [default|slim] publishes a skin record (M9);
+// /atmospheric skin upload opens a browser upload link for the linked player
+// (M64);
 // /atmospheric list <reference> reads a public list (M11); /atmospheric gate
 // <list> <did|handle> decides join-gate membership, fail-closed (M15);
 // /atmospheric labels
@@ -35,7 +37,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric player-data capture|restore [player], /atmospheric rpg discover [player], /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric colibri start|stop|reconnect|status|send <text>, /atmospheric link [code], /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric records <did|handle> <collection>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric labeler-identity [status|request|submit <token>], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric player-data capture|restore [player], /atmospheric rpg discover [player], /atmospheric skin [path] [default|slim], /atmospheric skin upload, /atmospheric server, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric colibri start|stop|reconnect|status|send <text>, /atmospheric link [code], /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric records <did|handle> <collection>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric labeler-identity [status|request|submit <token>], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -236,6 +238,19 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
                     "atmospheric: /atmospheric rpg discover <player> — run it on a server with the player online",
                 ),
             }
+        }
+    } else if rest == "skin upload" {
+        *ran = true;
+        match game.native_acting_player() {
+            Some(player) => {
+                m::start_skin_upload(m::uuid_text(player.uuid), &player.name);
+                game.native_chat(
+                    "atmospheric: creating a one-time browser skin-upload link for you…",
+                );
+            }
+            None => game.native_chat(
+                "atmospheric: /atmospheric skin upload — run it as the linked player",
+            ),
         }
     } else if rest == "skin" || rest.starts_with("skin ") {
         let args: Vec<&str> = rest

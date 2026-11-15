@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 const CLAIM_PATH: &str = "/v1/pairings/claim";
 const LINKS_PATH: &str = "/v1/links";
 const BROWSER_LINK_PATH: &str = "/v1/browser/pairings";
+const BROWSER_SKIN_PATH: &str = "/v1/browser/skins";
 
 #[derive(Debug, Serialize)]
 struct ClaimRequest<'a> {
@@ -146,6 +147,50 @@ pub async fn start_browser_link(
     player_name: &str,
     ttl_seconds: u64,
 ) -> Result<BrowserLink> {
+    start_browser_url(
+        http,
+        base,
+        link_token,
+        player_uuid,
+        player_name,
+        ttl_seconds,
+        BROWSER_LINK_PATH,
+    )
+    .await
+}
+
+/// Ask the identity service for a one-time browser skin-upload URL (M64).
+/// Like the M39 link, the UUID comes from the game and the browser cannot
+/// choose it. The player must already be linked; the service checks that.
+pub async fn start_skin_upload(
+    http: &reqwest::Client,
+    base: &str,
+    link_token: &str,
+    player_uuid: &str,
+    player_name: &str,
+    ttl_seconds: u64,
+) -> Result<BrowserLink> {
+    start_browser_url(
+        http,
+        base,
+        link_token,
+        player_uuid,
+        player_name,
+        ttl_seconds,
+        BROWSER_SKIN_PATH,
+    )
+    .await
+}
+
+async fn start_browser_url(
+    http: &reqwest::Client,
+    base: &str,
+    link_token: &str,
+    player_uuid: &str,
+    player_name: &str,
+    ttl_seconds: u64,
+    path: &str,
+) -> Result<BrowserLink> {
     if link_token.trim().is_empty() {
         return Err(AtmosphericError::Message(
             "server_link_token is not configured".into(),
@@ -159,7 +204,7 @@ pub async fn start_browser_link(
     if player_name.trim().is_empty() {
         return Err(AtmosphericError::Message("player_name is empty".into()));
     }
-    let url = service_url(base, BROWSER_LINK_PATH)?;
+    let url = service_url(base, path)?;
     let response = http
         .post(url)
         .bearer_auth(link_token.trim())
@@ -418,6 +463,27 @@ mod tests {
         assert_eq!(body["player_uuid"], "00000000-0000-4000-8000-000000000001");
         assert_eq!(body["player_name"], "Alex");
         assert_eq!(body["ttl_seconds"], 900);
+    }
+
+    #[test]
+    fn skin_upload_uses_its_own_browser_route() {
+        let stub = start(
+            "201 Created",
+            r#"{"url":"https://links.example/skin/token","expires_at":1800}"#,
+        );
+        let link = runtime()
+            .block_on(start_skin_upload(
+                &reqwest::Client::new(),
+                &format!("{}/", stub.url),
+                "server-link-secret",
+                "00000000-0000-4000-8000-000000000001",
+                "Alex",
+                600,
+            ))
+            .unwrap();
+        assert_eq!(link.url, "https://links.example/skin/token");
+        let requests = stub.requests.lock().unwrap();
+        assert_eq!(requests[0].0, "/v1/browser/skins");
     }
 
     #[test]

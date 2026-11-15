@@ -13,12 +13,14 @@ mod label;
 mod lexicon;
 mod link;
 mod pairing;
+mod skin;
 
 use crate::{
     browser::BrowserLinks,
     error::ApiError,
     labeler::Labeler,
     oauth::{OAuthClient, Resolver},
+    skin::{SkinSigner, SkinUploads},
     store::LinkStore,
 };
 use axum::{
@@ -30,7 +32,7 @@ use axum::{
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
-const LINK_PAGE_LIMIT: usize = 16 * 1024;
+const LINK_PAGE_LIMIT: usize = 2 * 1024 * 1024;
 
 /// Service configuration. All fields are optional so the identity map can run
 /// with browser linking disabled, exactly as before M39.
@@ -49,6 +51,9 @@ pub struct ServerConfig {
     pub oauth_resolver: Option<Resolver>,
     /// The labeler service, when `ATMOSPHERIC_SERVER_LABELER_DID` is set.
     pub labeler: Option<Labeler>,
+    /// The game worker's Ed25519 endorsement key, when the operator has made
+    /// it available for browser skin publishing.
+    pub skin_signer: Option<SkinSigner>,
 }
 
 #[derive(Clone)]
@@ -59,6 +64,9 @@ pub struct AppState {
     link_token: Option<Arc<str>>,
     public_url: Option<Arc<str>>,
     oauth: Option<OAuthClient>,
+    skin_oauth: Option<OAuthClient>,
+    skin_uploads: SkinUploads,
+    skin_signer: Option<SkinSigner>,
     labeler: Option<Labeler>,
 }
 
@@ -78,7 +86,10 @@ impl AppState {
         let resolver = config.oauth_resolver.unwrap_or_default();
         let oauth = public_url
             .as_deref()
-            .map(|url| OAuthClient::new(url, resolver));
+            .map(|url| OAuthClient::new(url, resolver.clone()));
+        let skin_oauth = public_url
+            .as_deref()
+            .map(|url| OAuthClient::with_redirect(url, resolver, "/skin/callback"));
         Self {
             store,
             browser: BrowserLinks::default(),
@@ -86,6 +97,9 @@ impl AppState {
             link_token: token(config.link_token),
             public_url,
             oauth,
+            skin_oauth,
+            skin_uploads: SkinUploads::default(),
+            skin_signer: config.skin_signer,
             labeler: config.labeler,
         }
     }
@@ -176,6 +190,7 @@ pub fn app(store: LinkStore, config: ServerConfig) -> Router {
             "/v1/browser/pairings",
             post(browser::create_browser_pairing),
         )
+        .route("/v1/browser/skins", post(skin::create_skin_upload))
         .route("/oauth-client-metadata.json", get(browser::client_metadata))
         .route("/lexicons", get(lexicon::index))
         .route("/lexicons/{file}", get(lexicon::document))
@@ -183,6 +198,11 @@ pub fn app(store: LinkStore, config: ServerConfig) -> Router {
         .route(
             "/link/{token}",
             get(browser::link_page).post(browser::start_browser_link),
+        )
+        .route("/skin/callback", get(skin::skin_callback))
+        .route(
+            "/skin/{token}",
+            get(skin::skin_page).post(skin::skin_upload),
         )
         .fallback(not_found)
         .layer(DefaultBodyLimit::max(LINK_PAGE_LIMIT))

@@ -2,6 +2,7 @@ use super::{
     dpop::DpopKey,
     encoding::{normalize_base, pkce_challenge, random_token, url_encode},
     resolver::Resolver,
+    session::OAuthSession,
 };
 
 pub const SCOPE: &str = "atproto transition:generic";
@@ -16,6 +17,7 @@ pub struct PendingAuthorization {
     pub issuer: String,
     pub did: String,
     pub handle: String,
+    pub pds: String,
 }
 
 pub struct Started {
@@ -39,6 +41,12 @@ pub struct OAuthClient {
 
 impl OAuthClient {
     pub fn new(public_url: &str, resolver: Resolver) -> Self {
+        Self::with_redirect(public_url, resolver, "/link/callback")
+    }
+
+    /// A client with a different public callback path, used by the M64 skin
+    /// upload flow. The metadata document declares both callbacks.
+    pub fn with_redirect(public_url: &str, resolver: Resolver, path: &str) -> Self {
         let base = normalize_base(public_url);
         Self {
             http: reqwest::Client::builder()
@@ -47,7 +55,7 @@ impl OAuthClient {
                 .unwrap_or_else(|_| reqwest::Client::new()),
             resolver,
             client_id: format!("{base}/oauth-client-metadata.json"),
-            redirect_uri: format!("{base}/link/callback"),
+            redirect_uri: format!("{base}{path}"),
         }
     }
 
@@ -108,6 +116,7 @@ impl OAuthClient {
                 issuer: endpoints.issuer,
                 did,
                 handle,
+                pds,
             },
         })
     }
@@ -119,6 +128,22 @@ impl OAuthClient {
         code: &str,
         issuer: Option<&str>,
     ) -> Result<Identity, String> {
+        let session = self.finish_session(pending, code, issuer).await?;
+        Ok(Identity {
+            did: session.did,
+            handle: session.handle,
+        })
+    }
+
+    /// Finish the login and keep the DPoP-bound token for the one follow-up
+    /// write (M64 skin upload). Nothing is persisted; the caller drops it after
+    /// publishing.
+    pub async fn finish_session(
+        &self,
+        pending: &PendingAuthorization,
+        code: &str,
+        issuer: Option<&str>,
+    ) -> Result<OAuthSession, String> {
         let issuer = issuer
             .map(str::trim)
             .filter(|issuer| !issuer.is_empty())
@@ -160,10 +185,19 @@ impl OAuthClient {
         if !scope.split_whitespace().any(|grant| grant == "atproto") {
             return Err("the authorization server did not grant the atproto scope".into());
         }
-        Ok(Identity {
-            did: did.to_string(),
-            handle: pending.handle.clone(),
-        })
+        let access_token = response
+            .get("access_token")
+            .and_then(|value| value.as_str())
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| "the authorization server returned no access token".to_string())?;
+        Ok(OAuthSession::new(
+            did.to_string(),
+            pending.handle.clone(),
+            pending.pds.clone(),
+            access_token.to_string(),
+            pending.key.clone(),
+            self.http.clone(),
+        ))
     }
 
     async fn post_form(
@@ -218,7 +252,10 @@ pub fn client_metadata(public_url: &str) -> serde_json::Value {
         "client_id": format!("{base}/oauth-client-metadata.json"),
         "client_name": "atmospheric-horizon",
         "client_uri": base,
-        "redirect_uris": [format!("{base}/link/callback")],
+        "redirect_uris": [
+            format!("{base}/link/callback"),
+            format!("{base}/skin/callback")
+        ],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "scope": SCOPE,

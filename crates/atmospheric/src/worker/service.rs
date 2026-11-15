@@ -649,6 +649,10 @@ impl Worker {
                 player_uuid,
                 player_name,
             } => self.start_browser_link(&player_uuid, &player_name).await,
+            Command::StartSkinUpload {
+                player_uuid,
+                player_name,
+            } => self.start_skin_upload(&player_uuid, &player_name).await,
             Command::PostText { text } => {
                 self.ensure_oauth_fresh().await;
                 let result = match (&self.agent, &self.did) {
@@ -2414,6 +2418,46 @@ impl Worker {
         .await
         {
             Ok(link) => self.emit(Event::BrowserLink {
+                player_uuid: player_uuid.to_owned(),
+                url: link.url,
+                expires_at: link.expires_at,
+            }),
+            Err(error) => self.fail(error.to_string()),
+        }
+    }
+
+    /// Start M64 browser skin uploading for an online, already-linked player.
+    async fn start_skin_upload(&self, player_uuid: &str, player_name: &str) {
+        let config = match self.load_config() {
+            Ok(config) => config,
+            Err(error) => {
+                self.fail(format!("could not read the settings file: {error}"));
+                return;
+            }
+        };
+        if config.server_api_url.trim().is_empty() {
+            self.fail(
+                "server_api_url is not configured: set the M35 identity service URL in config.json",
+            );
+            return;
+        }
+        if config.server_link_token.trim().is_empty() {
+            self.fail(
+                "server_link_token is not configured: copy the identity service's ATMOSPHERIC_SERVER_LINK_TOKEN into config.json",
+            );
+            return;
+        }
+        match identity::start_skin_upload(
+            &self.http,
+            &config.server_api_url,
+            &config.server_link_token,
+            player_uuid,
+            player_name,
+            config.browser_link_ttl_seconds,
+        )
+        .await
+        {
+            Ok(link) => self.emit(Event::SkinUploadLink {
                 player_uuid: player_uuid.to_owned(),
                 url: link.url,
                 expires_at: link.expires_at,

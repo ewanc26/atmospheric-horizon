@@ -12,6 +12,7 @@ pub mod labeler;
 pub mod model;
 pub mod oauth;
 mod page;
+pub mod skin;
 pub mod store;
 
 pub use api::{ServerConfig, app};
