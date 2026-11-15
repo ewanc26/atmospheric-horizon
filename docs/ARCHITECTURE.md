@@ -1539,6 +1539,33 @@ pinned `horizon-mixins` staging tool is not present, and no live Minecraft
 server, identity service or PDS was contacted. atpcraft was used only as a
 wire-behaviour reference.
 
+### M66: profile avatar and banner uploads
+
+`/atmospheric profile-set avatar|banner <path>` reads a local image from the
+machine running the game and writes it to the logged-in account's
+`app.bsky.actor.profile` record. The worker validates the file's magic bytes,
+accepts only `image/png` and `image/jpeg`, and enforces the profile lexicon's
+1,000,000-byte cap before any network call. It fetches the current record,
+uploads the bytes with `com.atproto.repo.uploadBlob`, converts the returned
+blob reference to JSON and merges it into the existing record. Every other
+field survives: the other image, `displayName`, `description`, `pronouns`,
+links, pinned post and `createdAt`. The merged record is written with
+`com.atproto.repo.putRecord` and PDS validation on, and the result is reported
+as `Event::ProfileUpdated` with the field and record URI.
+
+No new endpoint or config key is added: the existing `blob:*/*` player grant
+covers the upload, and the runtime still carries only strings. The image path
+is read by the worker, the only layer allowed to touch disk.
+
+Verified with merge tests (one blob replaced, the other and every text field
+preserved, text fields rejected), runtime wire-shape tests, and a stub-PDS
+worker test that checks both uploads, both validated `putRecord` bodies, the
+returned blob sizes and the preserved fields. The real-PDS check uploaded an
+avatar and a banner, confirmed each write kept the other image and every
+non-image field, then restored the original images from the Bluesky CDN after
+the PDS garbage-collected the superseded blobs; the restored image CIDs
+differ, while all non-image fields matched the pre-check record exactly.
+
 ### M65: profile-field editing
 
 `/atmospheric profile-set <name|description|pronouns> [text]` writes one text
