@@ -9,6 +9,9 @@
 // <subject> reads labels off a subject's AppView view and /atmospheric labeler
 // <did> [subject] queries a labeler directly (M12); /atmospheric player
 // <did|handle> reads a player's latest verified snapshot record (M13);
+// /atmospheric player-data capture|restore [player] queues aspect capture or a
+// verified restore for the next server tick, and /atmospheric rpg discover
+// [player] scans statistics and renamed stacks (M63, linked self only);
 // /atmospheric skin-of <did|handle> reads their verified skin record and
 // downloads the blobs (M14); /atmospheric chat-of <did|handle> reads their
 // mirrored chat history (M16); /atmospheric server-of <did|handle> reads their
@@ -32,7 +35,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric colibri start|stop|reconnect|status|send <text>, /atmospheric link [code], /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric records <did|handle> <collection>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric labeler-identity [status|request|submit <token>], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric player-data capture|restore [player], /atmospheric rpg discover [player], /atmospheric skin [path] [default|slim], /atmospheric server, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric colibri start|stop|reconnect|status|send <text>, /atmospheric link [code], /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric records <did|handle> <collection>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric labeler-identity [status|request|submit <token>], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -154,6 +157,85 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
                 game.native_chat("atmospheric: publishing the snapshot record…");
             }
             None => game.native_chat("atmospheric: no player in this world"),
+        }
+    } else if rest == "player-data" || rest.starts_with("player-data ") {
+        let args: Vec<&str> = rest
+            .strip_prefix("player-data")
+            .unwrap_or("")
+            .split_whitespace()
+            .collect();
+        *ran = true;
+        let action = args.first().copied().unwrap_or_default();
+        let requested = args.get(1).copied();
+        let players = game.native_server_players();
+        let target = requested
+            .and_then(|name| {
+                players
+                    .iter()
+                    .find(|player| player.name.eq_ignore_ascii_case(name))
+            })
+            .cloned()
+            .or_else(|| game.native_acting_player());
+        match (action, target) {
+            ("capture", Some(player)) => {
+                m::queue_player_capture(&m::uuid_text(player.uuid), &player.name);
+                game.native_tell(
+                    player.uuid,
+                    horizon_client::text::Text::literal(
+                        "atmospheric: capturing your player data on the next tick…",
+                    ),
+                );
+            }
+            ("restore", Some(player)) => {
+                m::fetch_player_data(&m::uuid_text(player.uuid), &player.name);
+                game.native_tell(
+                    player.uuid,
+                    horizon_client::text::Text::literal(
+                        "atmospheric: fetching your latest verified snapshot…",
+                    ),
+                );
+            }
+            ("capture" | "restore", None) => game.native_chat(
+                "atmospheric: /atmospheric player-data capture|restore <player> — run it on a server with the player online",
+            ),
+            _ => game.native_chat(
+                "atmospheric: /atmospheric player-data capture|restore [player]",
+            ),
+        }
+    } else if rest == "rpg" || rest.starts_with("rpg ") {
+        let args: Vec<&str> = rest
+            .strip_prefix("rpg")
+            .unwrap_or("")
+            .split_whitespace()
+            .collect();
+        *ran = true;
+        if args.first() != Some(&"discover") {
+            game.native_chat("atmospheric: /atmospheric rpg discover [player]");
+        } else {
+            let requested = args.get(1).copied();
+            let players = game.native_server_players();
+            let target = requested
+                .and_then(|name| {
+                    players
+                        .iter()
+                        .find(|player| player.name.eq_ignore_ascii_case(name))
+                })
+                .cloned()
+                .or_else(|| game.native_acting_player());
+            match target {
+                Some(player) => {
+                    m::queue_rpg_scan(&m::uuid_text(player.uuid), &player.name);
+                    game.native_tell(
+                        player.uuid,
+                        horizon_client::text::Text::literal(
+                            "atmospheric: scanning your item statistics and inventory for RPG discoveries…",
+                        ),
+                    );
+                }
+                None => game.native_chat(
+                    "atmospheric: /atmospheric rpg discover <player> — run it on a server with the player online",
+                ),
+            }
         }
     } else if rest == "skin" || rest.starts_with("skin ") {
         let args: Vec<&str> = rest

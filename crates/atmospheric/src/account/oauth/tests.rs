@@ -924,6 +924,28 @@ fn a_custom_base_gets_the_required_player_grants_once() {
 }
 
 #[test]
+fn rpg_grants_are_requested_only_when_discovery_is_on() {
+    let base = "atproto";
+    let player = scope_for_rpg(base, false, "did:web:api.colibri.social", false);
+    assert!(!player.contains(RPG_ITEM_GRANT));
+    let player = scope_for_rpg(base, false, "did:web:api.colibri.social", true);
+    assert_eq!(player.matches(RPG_ITEM_GRANT).count(), 1);
+    assert!(!player.contains(RPG_GIVE_GRANT));
+    assert_eq!(
+        scope_for_rpg(&player, false, "did:web:api.colibri.social", true),
+        player
+    );
+
+    let server = scope_for_server_rpg(base, false, "did:web:api.colibri.social", false, true);
+    assert_eq!(server.matches(RPG_ITEM_GRANT).count(), 1);
+    assert_eq!(server.matches(RPG_GIVE_GRANT).count(), 1);
+    assert_eq!(
+        scope_for_server_rpg(&server, false, "did:web:api.colibri.social", false, true),
+        server
+    );
+}
+
+#[test]
 fn the_server_scope_adds_its_grants_and_a_broad_base_needs_none() {
     let base = "atproto";
     let player = scope_for(base, false, "did:web:api.colibri.social");

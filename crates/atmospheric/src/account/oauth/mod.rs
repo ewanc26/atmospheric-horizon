@@ -41,6 +41,11 @@ const PLAYER_GRANTS: [&str; 4] = [
     "blob:*/*",
 ];
 
+/// The player-held RPG item write (M63), requested only while discovery is on.
+const RPG_ITEM_GRANT: &str = "repo:equipment.rpg.item?action=create&action=update&action=delete";
+/// The provider attestation write on the server account (M63).
+const RPG_GIVE_GRANT: &str = "repo:equipment.rpg.give?action=create&action=update&action=delete";
+
 /// The server account's descriptor write (M10/M25/M51). Only the server login
 /// requests it; a player login never writes `at.atpcraft.server.profile`.
 const SERVER_PROFILE_GRANT: &str =
@@ -83,6 +88,16 @@ fn append_missing(scope: &mut String, grant: &str) {
 /// [`scope_for_server`]). Each grant is added at most once, so a base that
 /// already declares one does not duplicate it.
 pub fn scope_for(base: &str, bridge_enabled: bool, _appview_did: &str) -> String {
+    scope_for_rpg(base, bridge_enabled, _appview_did, false)
+}
+
+/// [`scope_for`] plus the RPG item grant when discovery is enabled (M63).
+pub fn scope_for_rpg(
+    base: &str,
+    bridge_enabled: bool,
+    _appview_did: &str,
+    rpg_enabled: bool,
+) -> String {
     let mut scope = base.trim().to_owned();
     if scope.is_empty() {
         scope = DEFAULT_SCOPE.into();
@@ -90,6 +105,9 @@ pub fn scope_for(base: &str, bridge_enabled: bool, _appview_did: &str) -> String
     if !has_transition_generic(&scope) {
         for grant in PLAYER_GRANTS {
             append_missing(&mut scope, grant);
+        }
+        if rpg_enabled {
+            append_missing(&mut scope, RPG_ITEM_GRANT);
         }
     }
     if bridge_enabled {
@@ -115,12 +133,26 @@ pub fn scope_for_server(
     appview_did: &str,
     labeler_enabled: bool,
 ) -> String {
-    let mut scope = scope_for(base, bridge_enabled, appview_did);
+    scope_for_server_rpg(base, bridge_enabled, appview_did, labeler_enabled, false)
+}
+
+/// [`scope_for_server`] plus the RPG provider grant (M63).
+pub fn scope_for_server_rpg(
+    base: &str,
+    bridge_enabled: bool,
+    appview_did: &str,
+    labeler_enabled: bool,
+    rpg_enabled: bool,
+) -> String {
+    let mut scope = scope_for_rpg(base, bridge_enabled, appview_did, rpg_enabled);
     if !has_transition_generic(&scope) {
         append_missing(&mut scope, SERVER_PROFILE_GRANT);
         if labeler_enabled {
             append_missing(&mut scope, LABELER_SERVICE_GRANT);
             append_missing(&mut scope, IDENTITY_GRANT);
+        }
+        if rpg_enabled {
+            append_missing(&mut scope, RPG_GIVE_GRANT);
         }
     }
     if bridge_enabled {

@@ -133,6 +133,28 @@ pub enum GameCommand {
     /// Publish the player's state as an `at.atpcraft.player.snapshot` record
     /// (M6, atpcraft port).
     PostSnapshot { summary: SnapshotSummary },
+    /// Publish a snapshot with opaque aspect blobs (M63). The worker checks
+    /// that the player's UUID is linked to the logged-in account; a player
+    /// can only capture their own state.
+    PostPlayerData {
+        player_uuid: String,
+        player_name: String,
+        summary: SnapshotSummary,
+        aspects: Vec<PlayerAspect>,
+    },
+    /// Fetch the logged-in account's latest verified snapshot and download
+    /// its supported aspects for an online player (M63).
+    FetchPlayerData {
+        player_uuid: String,
+        player_name: String,
+    },
+    /// Publish discovered RPG items (M63): provider attestations from the
+    /// server account, player records from the linked player's account.
+    PublishRpgItems {
+        player_uuid: String,
+        player_name: String,
+        discoveries: Vec<RpgDiscovery>,
+    },
     /// Publish the player's skin (and optional cape) as an
     /// `at.atpcraft.player.skin` record (M9, atpcraft port). `None` paths fall
     /// back to the settings file's `skin_path`/`cape_path`.
@@ -465,6 +487,23 @@ pub struct LabelerPlayer {
     pub dragon_kills: u64,
 }
 
+/// One opaque aspect carried between the game and the worker (M63). `data` is
+/// standard base64 of the raw blob bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerAspect {
+    pub name: String,
+    pub data: String,
+}
+
+/// One RPG item discovery (M63), keyed exactly like atpcraft's discovery set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RpgDiscovery {
+    pub key: String,
+    pub item_id: String,
+    pub title: String,
+    pub renamed: bool,
+}
+
 /// Events the worker thread reports back to the game side.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -557,6 +596,14 @@ pub enum ModEvent {
         via: String,
         // Boxed: PlayerDigest is the enum's largest variant.
         snapshot: Box<Option<PlayerDigest>>,
+    },
+    /// Downloaded aspects from the logged-in account's latest verified
+    /// snapshot (M63), ready for the tick to apply.
+    PlayerDataRestore {
+        player_uuid: String,
+        player_name: String,
+        version: i64,
+        aspects: Vec<PlayerAspect>,
     },
     /// An account's profile (M24): the resolved DID (`subject`), the PDS the
     /// direct record was read from (`via`), and the combined digest with
@@ -683,6 +730,15 @@ pub fn status_text(event: &ModEvent) -> String {
         | ModEvent::JoinGateDecision { .. }
         | ModEvent::JoinGateKicks { .. }
         | ModEvent::PlayerProfile { .. } => String::new(),
+        ModEvent::PlayerDataRestore {
+            player_name,
+            version,
+            aspects,
+            ..
+        } => format!(
+            "atmospheric: restoring {} aspect(s) for {player_name} from snapshot v{version}",
+            aspects.len()
+        ),
         ModEvent::ChatHistory {
             subject,
             total,
@@ -975,6 +1031,13 @@ static JOIN_GATE_KICKS: OnceLock<Mutex<Vec<SweepPlayer>>> = OnceLock::new();
 const LABELER_SWEEP_SECONDS: u64 = 60;
 static LABELER_LAST_SWEEP: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
 static LABELER_SWEEP_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// M63 work the server tick performs outside a player's turn: capture/restore
+/// requests and scans. The command hook only enqueues; the tick reads live
+/// inventories (Horizon refuses that inside a player's turn).
+static PLAYER_CAPTURES: OnceLock<Mutex<Vec<SweepPlayer>>> = OnceLock::new();
+static RPG_SCANS: OnceLock<Mutex<Vec<SweepPlayer>>> = OnceLock::new();
+type PlayerRestore = (String, String, i64, Vec<PlayerAspect>);
+static PLAYER_RESTORES: OnceLock<Mutex<Vec<PlayerRestore>>> = OnceLock::new();
 
 /// How many status lines the HUD shows at once.
 pub const STATUS_LINES_MAX: usize = 3;
@@ -1028,6 +1091,18 @@ fn join_gate_kicks_slot() -> &'static Mutex<Vec<SweepPlayer>> {
 
 fn labeler_last_sweep_slot() -> &'static Mutex<Option<std::time::Instant>> {
     LABELER_LAST_SWEEP.get_or_init(|| Mutex::new(None))
+}
+
+fn player_captures_slot() -> &'static Mutex<Vec<SweepPlayer>> {
+    PLAYER_CAPTURES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn rpg_scans_slot() -> &'static Mutex<Vec<SweepPlayer>> {
+    RPG_SCANS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn player_restores_slot() -> &'static Mutex<Vec<PlayerRestore>> {
+    PLAYER_RESTORES.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 /// Cache worker gate events. They are control messages, not HUD lines.
@@ -1101,6 +1176,21 @@ pub fn drain_events(max: usize) -> Vec<ModEvent> {
     }
     for event in &drained {
         note_join_gate(event);
+        if let ModEvent::PlayerDataRestore {
+            player_uuid,
+            player_name,
+            version,
+            aspects,
+        } = event
+            && let Ok(mut queue) = player_restores_slot().lock()
+        {
+            queue.push((
+                player_uuid.clone(),
+                player_name.clone(),
+                *version,
+                aspects.clone(),
+            ));
+        }
     }
     if let Ok(mut chat) = COLIBRI_CHAT.get_or_init(|| Mutex::new(Vec::new())).lock() {
         for event in &drained {
@@ -1542,6 +1632,146 @@ pub fn is_colibri_notice(key: &str) -> bool {
 /// Ask the worker to publish a player-state snapshot record (M6).
 pub fn post_snapshot(summary: SnapshotSummary) {
     send(GameCommand::PostSnapshot { summary });
+}
+
+/// Queue a player's aspect capture for the next server tick (M63). The tick
+/// reads inventories outside the command's player turn.
+pub fn queue_player_capture(player_uuid: &str, player_name: &str) {
+    if let Ok(mut queue) = player_captures_slot().lock() {
+        queue.push(SweepPlayer {
+            player_uuid: player_uuid.into(),
+            player_name: player_name.into(),
+        });
+    }
+}
+
+/// Take the capture requests queued since the last tick.
+pub fn drain_player_captures() -> Vec<SweepPlayer> {
+    player_captures_slot()
+        .lock()
+        .map(|mut queue| std::mem::take(&mut *queue))
+        .unwrap_or_default()
+}
+
+/// Queue an RPG inventory/statistics scan for the next server tick (M63).
+pub fn queue_rpg_scan(player_uuid: &str, player_name: &str) {
+    if let Ok(mut queue) = rpg_scans_slot().lock() {
+        queue.push(SweepPlayer {
+            player_uuid: player_uuid.into(),
+            player_name: player_name.into(),
+        });
+    }
+}
+
+/// Take the RPG scans queued since the last tick.
+pub fn drain_rpg_scans() -> Vec<SweepPlayer> {
+    rpg_scans_slot()
+        .lock()
+        .map(|mut queue| std::mem::take(&mut *queue))
+        .unwrap_or_default()
+}
+
+/// Take the restore events the worker produced.
+pub fn drain_player_restores() -> Vec<PlayerRestore> {
+    player_restores_slot()
+        .lock()
+        .map(|mut queue| std::mem::take(&mut *queue))
+        .unwrap_or_default()
+}
+
+/// Publish a captured snapshot with aspects (M63).
+pub fn post_player_data(
+    player_uuid: &str,
+    player_name: &str,
+    summary: SnapshotSummary,
+    aspects: Vec<PlayerAspect>,
+) {
+    send(GameCommand::PostPlayerData {
+        player_uuid: player_uuid.into(),
+        player_name: player_name.into(),
+        summary,
+        aspects,
+    });
+}
+
+/// Ask the worker to fetch and verify the logged-in account's latest snapshot
+/// and download its aspects for a player (M63).
+pub fn fetch_player_data(player_uuid: &str, player_name: &str) {
+    send(GameCommand::FetchPlayerData {
+        player_uuid: player_uuid.into(),
+        player_name: player_name.into(),
+    });
+}
+
+/// Ask the worker to publish RPG item discoveries (M63).
+pub fn publish_rpg_items(player_uuid: &str, player_name: &str, discoveries: Vec<RpgDiscovery>) {
+    send(GameCommand::PublishRpgItems {
+        player_uuid: player_uuid.into(),
+        player_name: player_name.into(),
+        discoveries,
+    });
+}
+
+/// Standard base64 with padding, for aspect bytes on the JSON channel.
+pub fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let value = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((value >> 18) & 63) as usize] as char);
+        out.push(TABLE[((value >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((value >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(value & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Decode standard base64, with or without padding.
+pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    fn value(ch: u8) -> Option<u32> {
+        match ch {
+            b'A'..=b'Z' => Some((ch - b'A') as u32),
+            b'a'..=b'z' => Some((ch - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((ch - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    let bytes = match bytes.iter().position(|b| *b == b'=') {
+        Some(at) => &bytes[..at],
+        None => &bytes[..],
+    };
+    if bytes.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        let mut word = 0u32;
+        for (i, byte) in chunk.iter().enumerate() {
+            word |= value(*byte)? << (18 - i * 6);
+        }
+        out.push((word >> 16) as u8);
+        if chunk.len() > 2 {
+            out.push((word >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(word as u8);
+        }
+    }
+    Some(out)
 }
 
 /// Ask the worker to publish a skin record (M9). `None` paths mean "use the
@@ -2408,6 +2638,47 @@ fn req_int(obj: &[(String, Json)], key: &str) -> Option<i128> {
     as_int(jget(obj, key)?)
 }
 
+fn summary_json(summary: &SnapshotSummary) -> Json {
+    jobj(vec![
+        ("username", jstr(&summary.username)),
+        ("dimension", jstr(&summary.dimension)),
+        (
+            "position",
+            jobj(vec![
+                ("x", jint(summary.x)),
+                ("y", jint(summary.y)),
+                ("z", jint(summary.z)),
+            ]),
+        ),
+        ("health", jstr(&summary.health)),
+        ("food", jint(summary.food)),
+        ("xp_level", jint(summary.xp_level)),
+        ("game_mode", jstr(&summary.game_mode)),
+    ])
+}
+
+fn aspects_json(aspects: &[PlayerAspect]) -> Json {
+    Json::Arr(
+        aspects
+            .iter()
+            .map(|aspect| {
+                jobj(vec![
+                    ("name", jstr(&aspect.name)),
+                    ("data", jstr(&aspect.data)),
+                ])
+            })
+            .collect(),
+    )
+}
+
+fn decode_aspect(value: &Json) -> Option<PlayerAspect> {
+    let obj = as_obj(value)?;
+    Some(PlayerAspect {
+        name: req_str(obj, "name")?,
+        data: req_str(obj, "data")?,
+    })
+}
+
 /// Encode a game-side command as one JSON line in the sidecar wire format
 /// (serde's externally tagged default, as pinned in the crate's lib tests):
 /// unit variants are bare strings, struct variants `{"Variant":{...}}`.
@@ -2511,25 +2782,58 @@ fn encode_command(command: &GameCommand) -> String {
         )]),
         GameCommand::PostSnapshot { summary } => jobj(vec![(
             "PostSnapshot",
-            jobj(vec![(
-                "summary",
-                jobj(vec![
-                    ("username", jstr(&summary.username)),
-                    ("dimension", jstr(&summary.dimension)),
-                    (
-                        "position",
-                        jobj(vec![
-                            ("x", jint(summary.x)),
-                            ("y", jint(summary.y)),
-                            ("z", jint(summary.z)),
-                        ]),
+            jobj(vec![("summary", summary_json(summary))]),
+        )]),
+        GameCommand::PostPlayerData {
+            player_uuid,
+            player_name,
+            summary,
+            aspects,
+        } => jobj(vec![(
+            "PostPlayerData",
+            jobj(vec![
+                ("player_uuid", jstr(player_uuid)),
+                ("player_name", jstr(player_name)),
+                ("summary", summary_json(summary)),
+                ("aspects", aspects_json(aspects)),
+            ]),
+        )]),
+        GameCommand::FetchPlayerData {
+            player_uuid,
+            player_name,
+        } => jobj(vec![(
+            "FetchPlayerData",
+            jobj(vec![
+                ("player_uuid", jstr(player_uuid)),
+                ("player_name", jstr(player_name)),
+            ]),
+        )]),
+        GameCommand::PublishRpgItems {
+            player_uuid,
+            player_name,
+            discoveries,
+        } => jobj(vec![(
+            "PublishRpgItems",
+            jobj(vec![
+                ("player_uuid", jstr(player_uuid)),
+                ("player_name", jstr(player_name)),
+                (
+                    "discoveries",
+                    Json::Arr(
+                        discoveries
+                            .iter()
+                            .map(|discovery| {
+                                jobj(vec![
+                                    ("key", jstr(&discovery.key)),
+                                    ("item_id", jstr(&discovery.item_id)),
+                                    ("title", jstr(&discovery.title)),
+                                    ("renamed", jbool(discovery.renamed)),
+                                ])
+                            })
+                            .collect(),
                     ),
-                    ("health", jstr(&summary.health)),
-                    ("food", jint(summary.food)),
-                    ("xp_level", jint(summary.xp_level)),
-                    ("game_mode", jstr(&summary.game_mode)),
-                ]),
-            )]),
+                ),
+            ]),
         )]),
         GameCommand::PostSkin {
             skin_path,
@@ -2998,6 +3302,19 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 subject: req_str(obj, "subject")?,
                 via: req_str(obj, "via")?,
                 snapshot: Box::new(snapshot),
+            })
+        }
+        "PlayerDataRestore" => {
+            let obj = payload_obj()?;
+            let aspects = as_arr(jget(obj, "aspects")?)?
+                .iter()
+                .map(decode_aspect)
+                .collect::<Option<Vec<_>>>()?;
+            Some(ModEvent::PlayerDataRestore {
+                player_uuid: req_str(obj, "player_uuid")?,
+                player_name: req_str(obj, "player_name")?,
+                version: req_int(obj, "version")? as i64,
+                aspects,
             })
         }
         "Profile" => {
