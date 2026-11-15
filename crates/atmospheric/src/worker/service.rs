@@ -7,7 +7,7 @@
 //! the crate testable without a game.
 
 use crate::{
-    Command, Config, Event, LabelerPlayer, SweepPlayer, actions, chats,
+    Command, Config, Event, LabelerPlayer, PlayerAspect, SweepPlayer, actions, chats,
     colibri::{self, ChannelRef, StreamEvent},
     error::AtmosphericError,
     graph, identity, interactions, labeler,
@@ -17,13 +17,14 @@ use crate::{
     presence::{self, PlayerDigest},
     profiles,
     records::{self, SnapshotRecord},
-    servers,
+    rpg, servers,
     session::{self, Agent, SessionState, StoredSession},
     signing::{self, SigningKey},
     skins,
     social::triggers,
     tid::TidGen,
 };
+use base64::Engine as _;
 use ed25519_dalek::VerifyingKey;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -65,6 +66,19 @@ const JOIN_GATE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How many of the newest generic records the HUD shows (M44), matching the
 /// M16 chat-history limit.
 const RECORDS_HISTORY_LIMIT: usize = 5;
+
+/// The aspect names M63 can restore, matching the atpcraft `Aspect` values
+/// Horizon has full setters for.
+const PLAYER_DATA_ASPECTS: [&str; 5] = [
+    "inventory",
+    "ender_chest",
+    "equipment",
+    "advancements",
+    "stats",
+];
+/// A single aspect blob's cap, below the PDS upload limit and enough for a
+/// real inventory/statistics JSON.
+const MAX_ASPECT_BYTES: usize = 8 * 1024 * 1024;
 
 /// How long the M42 online sweep waits for the list refresh and the per-player
 /// link lookups. Longer than one login gate because it covers every online
@@ -450,8 +464,8 @@ fn server_profile_name(config: &Config) -> String {
 /// The server profile's capabilities (M49): an explicit override wins;
 /// otherwise derive the features that are actually implemented. `skin-sync`
 /// is always present (M9/M14); `join-gate` appears when the gate is armed;
-/// `labeler` appears when the M59 declaration is enabled. `player-data-sync`
-/// stays absent until #111.
+/// `labeler` appears when the M59 declaration is enabled; `player-data-sync`
+/// appears when the M35 identity service is configured for M63.
 fn server_profile_capabilities(config: &Config) -> Vec<String> {
     if !config.server_capabilities.is_empty() {
         return config.server_capabilities.clone();
@@ -461,6 +475,9 @@ fn server_profile_capabilities(config: &Config) -> Vec<String> {
         capabilities.push("join-gate".into());
     }
     capabilities.push("skin-sync".into());
+    if !config.server_api_url.trim().is_empty() {
+        capabilities.push("player-data-sync".into());
+    }
     if config.labeler_enabled {
         capabilities.push("labeler".into());
     }
@@ -660,9 +677,55 @@ impl Worker {
             }
             Command::PostSnapshot { mut summary } => {
                 self.ensure_oauth_fresh().await;
-                let result = self.post_snapshot(&mut summary).await;
+                let result = self.post_snapshot(&mut summary, Vec::new()).await;
                 match result {
                     Ok(uri) => self.emit(Event::Posted { uri }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::PostPlayerData {
+                player_uuid,
+                player_name,
+                mut summary,
+                aspects,
+            } => {
+                self.ensure_oauth_fresh().await;
+                let result = self
+                    .post_player_data(&player_uuid, &player_name, &mut summary, aspects)
+                    .await;
+                match result {
+                    Ok(uri) => self.emit(Event::Status(format!(
+                        "atmospheric: captured {player_name}'s player data — {uri}"
+                    ))),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::FetchPlayerData {
+                player_uuid,
+                player_name,
+            } => match self.fetch_player_data(&player_uuid, &player_name).await {
+                Ok((version, aspects)) => self.emit(Event::PlayerDataRestore {
+                    player_uuid,
+                    player_name,
+                    version,
+                    aspects,
+                }),
+                Err(error) => self.fail(error.to_string()),
+            },
+            Command::PublishRpgItems {
+                player_uuid,
+                player_name,
+                discoveries,
+            } => {
+                self.ensure_oauth_fresh().await;
+                self.ensure_server_oauth_fresh().await;
+                match self
+                    .publish_rpg_items(&player_uuid, &player_name, discoveries)
+                    .await
+                {
+                    Ok(count) => self.emit(Event::Status(format!(
+                        "atmospheric: published {count} RPG item(s) for {player_name}"
+                    ))),
                     Err(error) => self.fail(error.to_string()),
                 }
             }
@@ -998,13 +1061,266 @@ impl Worker {
         actions::post_image(agent, did, bytes, alt_text, text).await
     }
 
+    /// The logged-in DID, after checking that `player_uuid` is linked to it
+    /// through the M35 identity service (M63). Player-data capture, restore
+    /// and RPG records are self-service: without this check a server operator
+    /// could write a guest's snapshot into their own repo, and an RPG item
+    /// could be attributed to the wrong account.
+    async fn linked_self(
+        &self,
+        player_uuid: &str,
+        player_name: &str,
+    ) -> crate::error::Result<String> {
+        let Some(did) = self.did.as_deref() else {
+            return Err(AtmosphericError::NotLoggedIn);
+        };
+        let config = self.load_config()?;
+        if config.server_api_url.trim().is_empty() {
+            return Err(AtmosphericError::Message(
+                "server_api_url is not configured; player-data requires the identity service link map"
+                    .into(),
+            ));
+        }
+        let Some(link) =
+            identity::fetch_link(&self.http, &config.server_api_url, player_uuid).await?
+        else {
+            return Err(AtmosphericError::Message(format!(
+                "{player_name} is not linked to a Bluesky account; run /atmospheric link first"
+            )));
+        };
+        if link.did != did {
+            return Err(AtmosphericError::Message(format!(
+                "{player_name} is linked to {}, not the logged-in account; player-data is self-service",
+                link.did
+            )));
+        }
+        Ok(did.to_string())
+    }
+
+    /// Upload the supported aspects and publish an endorsed snapshot (M63).
+    async fn post_player_data(
+        &mut self,
+        player_uuid: &str,
+        player_name: &str,
+        summary: &mut records::SnapshotSummary,
+        aspects: Vec<PlayerAspect>,
+    ) -> crate::error::Result<String> {
+        let _did = self.linked_self(player_uuid, player_name).await?;
+        if aspects.is_empty() {
+            return Err(AtmosphericError::Message(
+                "no aspect was captured; nothing to publish".into(),
+            ));
+        }
+        if aspects.len() > PLAYER_DATA_ASPECTS.len() {
+            return Err(AtmosphericError::Message(
+                "too many aspects for one snapshot".into(),
+            ));
+        }
+        let Some(agent) = self.agent.as_ref() else {
+            return Err(AtmosphericError::NotLoggedIn);
+        };
+        let mut uploaded = Vec::with_capacity(aspects.len());
+        for aspect in aspects {
+            if !PLAYER_DATA_ASPECTS.contains(&aspect.name.as_str()) {
+                return Err(AtmosphericError::Message(format!(
+                    "unsupported player-data aspect: {}",
+                    aspect.name
+                )));
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&aspect.data)
+                .map_err(|_| {
+                    AtmosphericError::Message(format!(
+                        "aspect {} is not standard base64",
+                        aspect.name
+                    ))
+                })?;
+            if bytes.len() > MAX_ASPECT_BYTES {
+                return Err(AtmosphericError::Message(format!(
+                    "aspect {} is {} bytes; the limit is {MAX_ASPECT_BYTES}",
+                    aspect.name,
+                    bytes.len()
+                )));
+            }
+            let blob = actions::upload_blob(agent, bytes).await?;
+            uploaded.push(records::Aspect {
+                name: aspect.name,
+                blob,
+            });
+        }
+        uploaded.sort_by(|left, right| left.name.cmp(&right.name));
+        summary.username = player_name.to_string();
+        self.post_snapshot(summary, uploaded).await
+    }
+
+    /// Fetch and verify the logged-in account's latest snapshot, then download
+    /// the supported aspect blobs for the game to apply (M63). The endorsement
+    /// must verify against the mod's own key or `trusted_server_keys`; no
+    /// unverified aspect is ever applied.
+    async fn fetch_player_data(
+        &self,
+        player_uuid: &str,
+        player_name: &str,
+    ) -> crate::error::Result<(i64, Vec<PlayerAspect>)> {
+        let did = self.linked_self(player_uuid, player_name).await?;
+        let config = self.load_config()?;
+        let (_, pds) = presence::resolve_player(&self.http, &self.resolver, &did).await?;
+        let records =
+            presence::list_records(&self.http, &pds, &did, records::SNAPSHOT_COLLECTION).await?;
+        let Some((_, value)) = presence::latest(&records) else {
+            return Err(AtmosphericError::Message(format!(
+                "no snapshot records for {player_name} yet; run /atmospheric player-data capture first"
+            )));
+        };
+        let keys = self.verification_keys(&config);
+        let verdict = presence::verify(&did, &value, &keys);
+        if !matches!(verdict, records::EndorsementVerdict::Verified { .. }) {
+            return Err(AtmosphericError::Message(format!(
+                "the latest snapshot for {player_name} did not verify ({verdict:?})"
+            )));
+        }
+        let version = value["version"].as_i64().unwrap_or_default();
+        let mut aspects = Vec::new();
+        for aspect in value["aspects"].as_array().into_iter().flatten() {
+            let Some(name) = aspect["name"].as_str() else {
+                continue;
+            };
+            if !PLAYER_DATA_ASPECTS.contains(&name) {
+                continue;
+            }
+            let bytes = if let Some(cid) = aspect["blob"]["ref"]["$link"].as_str() {
+                let url = format!(
+                    "{}/xrpc/com.atproto.sync.getBlob?did={did}&cid={cid}",
+                    pds.trim_end_matches('/')
+                );
+                let response = self
+                    .http
+                    .get(url)
+                    .send()
+                    .await
+                    .map_err(AtmosphericError::protocol)?;
+                if !response.status().is_success() {
+                    return Err(AtmosphericError::Message(format!(
+                        "could not download aspect {name}: HTTP {}",
+                        response.status()
+                    )));
+                }
+                response
+                    .bytes()
+                    .await
+                    .map_err(AtmosphericError::protocol)?
+                    .to_vec()
+            } else if let Some(encoded) = aspect["inline"]["$bytes"].as_str() {
+                records::decode_b64_flexible(encoded).ok_or_else(|| {
+                    AtmosphericError::Message(format!("aspect {name} has invalid inline bytes"))
+                })?
+            } else {
+                continue;
+            };
+            if bytes.len() > MAX_ASPECT_BYTES {
+                return Err(AtmosphericError::Message(format!(
+                    "aspect {name} is {} bytes; the limit is {MAX_ASPECT_BYTES}",
+                    bytes.len()
+                )));
+            }
+            aspects.push(PlayerAspect {
+                name: name.to_string(),
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            });
+        }
+        if aspects.is_empty() {
+            return Err(AtmosphericError::Message(format!(
+                "the latest snapshot for {player_name} has no restorable aspects"
+            )));
+        }
+        aspects.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok((version, aspects))
+    }
+
+    /// Write the RPG give/item pair for each new discovery (M63). The give
+    /// record is the server account's attestation; the item record lives in
+    /// the linked player's own repo. Both use deterministic keys, so a later
+    /// scan upserts instead of duplicating.
+    async fn publish_rpg_items(
+        &self,
+        player_uuid: &str,
+        player_name: &str,
+        discoveries: Vec<crate::RpgDiscovery>,
+    ) -> crate::error::Result<usize> {
+        let config = self.load_config()?;
+        if !config.rpg_items_enabled {
+            return Err(AtmosphericError::Message(
+                "RPG item discovery is off; set rpg_items_enabled in config.json".into(),
+            ));
+        }
+        let did = self.linked_self(player_uuid, player_name).await?;
+        let Some(player_agent) = self.agent.as_ref() else {
+            return Err(AtmosphericError::NotLoggedIn);
+        };
+        let (Some(server_agent), Some(provider)) =
+            (self.server_agent.as_ref(), self.server_did.as_deref())
+        else {
+            return Err(AtmosphericError::Message(
+                "the server account is not logged in; run /atmospheric server-account login <handle>"
+                    .into(),
+            ));
+        };
+        let context = format!("Discovered on {}", server_profile_name(&config));
+        let limit = config.rpg_items_max_per_scan.max(1);
+        let now = atrium_api::types::string::Datetime::now()
+            .as_str()
+            .to_string();
+        let mut seen = HashSet::new();
+        let mut written = 0;
+        for discovery in discoveries {
+            if written >= limit {
+                break;
+            }
+            if rpg::items::canonical_key(&discovery).is_none()
+                || !seen.insert(discovery.key.clone())
+            {
+                continue;
+            }
+            let rkey = rpg::items::give_rkey(&did, &discovery.key);
+            let give = rpg::items::give_record(&did, &discovery, &now, Some(&context));
+            let give_unknown: atrium_api::types::Unknown = serde_json::from_value(give)?;
+            actions::put_record(
+                server_agent,
+                provider,
+                rpg::items::GIVE_COLLECTION,
+                &rkey,
+                give_unknown,
+            )
+            .await?;
+            let item = rpg::items::item_record(
+                &discovery,
+                &rpg::items::give_uri(provider, &rkey),
+                provider,
+                &now,
+                Some(&context),
+            );
+            let item_unknown: atrium_api::types::Unknown = serde_json::from_value(item)?;
+            actions::put_record(
+                player_agent,
+                &did,
+                rpg::items::ITEM_COLLECTION,
+                &discovery.key,
+                item_unknown,
+            )
+            .await?;
+            written += 1;
+        }
+        Ok(written)
+    }
+
     /// Publish a player snapshot (M6): load or generate the endorsement key,
     /// build the record at the next version, sign the canonical payload, and
     /// write it under the key id as rkey. The version persists so a restart
-    /// never rolls back.
+    /// never rolls back. M63 passes the uploaded aspects here.
     async fn post_snapshot(
         &mut self,
         summary: &mut records::SnapshotSummary,
+        aspects: Vec<records::Aspect>,
     ) -> crate::error::Result<String> {
         let (Some(agent), Some(did)) = (&self.agent, &self.did) else {
             return Err(AtmosphericError::NotLoggedIn);
@@ -1028,7 +1344,7 @@ impl Worker {
             version: self.snapshot_version + 1,
             issued_at: atrium_api::types::string::Datetime::now(),
             summary: summary.clone(),
-            aspects: vec![],
+            aspects,
             endorsements: vec![],
         };
         let payload = record.signable_payload(did, &key_id);
@@ -2196,16 +2512,18 @@ impl Worker {
         let scope = config
             .as_ref()
             .map(|config| match target {
-                OAuthTarget::Server => oauth::scope_for_server(
+                OAuthTarget::Server => oauth::scope_for_server_rpg(
                     &config.oauth_scope,
                     config.colibri_bridge_enabled,
                     &config.colibri_appview_did,
                     config.labeler_enabled,
+                    config.rpg_items_enabled,
                 ),
-                OAuthTarget::Player => oauth::scope_for(
+                OAuthTarget::Player => oauth::scope_for_rpg(
                     &config.oauth_scope,
                     config.colibri_bridge_enabled,
                     &config.colibri_appview_did,
+                    config.rpg_items_enabled,
                 ),
             })
             .unwrap_or_else(|| oauth::DEFAULT_SCOPE.into());
@@ -3458,6 +3776,8 @@ mod tests {
             join_gate_sweep_seconds: 60,
             trusted_server_keys: Vec::new(),
             colibri_bridge_enabled: false,
+            rpg_items_enabled: false,
+            rpg_items_max_per_scan: 10,
             colibri_channel_uri: String::new(),
             colibri_appview_url: "https://api.colibri.social".into(),
             colibri_appview_did: "did:web:api.colibri.social".into(),
@@ -5279,6 +5599,8 @@ mod tests {
             browser_link_ttl_seconds: 900,
             join_gate_enabled: false,
             join_gate_list: String::new(),
+            rpg_items_enabled: false,
+            rpg_items_max_per_scan: 10,
             join_gate_sweep_seconds: 90,
             trusted_server_keys: Vec::new(),
             colibri_bridge_enabled: false,
@@ -5333,6 +5655,11 @@ mod tests {
         assert_eq!(
             server_profile_capabilities(&config),
             vec!["join-gate", "skin-sync", "labeler"]
+        );
+        config.server_api_url = "https://links.example.com".into();
+        assert_eq!(
+            server_profile_capabilities(&config),
+            vec!["join-gate", "skin-sync", "player-data-sync", "labeler"]
         );
         config.server_capabilities = vec!["labeler".into(), "skin-sync".into()];
         assert_eq!(

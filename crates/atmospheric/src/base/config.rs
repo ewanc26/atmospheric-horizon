@@ -157,6 +157,14 @@ pub struct Config {
     /// When a chat mod rewrites or hides the vanilla join/leave line, use the
     /// connection event as a fallback after a short wait (M29). Default on.
     pub colibri_server_events_fallback_enabled: bool,
+    /// Publish discovered RPG items as `equipment.rpg.give` attestations from
+    /// the server account and `equipment.rpg.item` records from the linked
+    /// player's account (M63). Off by default, matching atpcraft's
+    /// `rpg-items-enabled`.
+    pub rpg_items_enabled: bool,
+    /// How many new RPG discoveries to publish per scan (M63). The rest are
+    /// skipped until a later scan; atpcraft defaults to 10.
+    pub rpg_items_max_per_scan: usize,
 }
 
 impl Default for Config {
@@ -201,6 +209,8 @@ impl Default for Config {
             colibri_appview_did: "did:web:api.colibri.social".into(),
             colibri_server_events_enabled: true,
             colibri_server_events_fallback_enabled: true,
+            rpg_items_enabled: false,
+            rpg_items_max_per_scan: 10,
         }
     }
 }
@@ -281,6 +291,8 @@ mod tests {
             colibri_appview_did: "did:web:appview.example".into(),
             colibri_server_events_enabled: false,
             colibri_server_events_fallback_enabled: false,
+            rpg_items_enabled: true,
+            rpg_items_max_per_scan: 3,
         };
         let raw = config.to_json().unwrap();
         let back = Config::from_json(&raw).unwrap();
@@ -298,6 +310,8 @@ mod tests {
         assert_eq!(back.client_name, "atmospheric-horizon");
         assert!(back.persist_session);
         assert_eq!(back.trusted_server_keys, config.trusted_server_keys);
+        assert!(back.rpg_items_enabled);
+        assert_eq!(back.rpg_items_max_per_scan, 3);
         assert!(back.colibri_bridge_enabled);
         assert_eq!(back.colibri_channel_uri, config.colibri_channel_uri);
         assert_eq!(back.colibri_appview_url, "https://appview.example");

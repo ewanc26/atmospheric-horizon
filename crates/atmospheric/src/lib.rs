@@ -9,6 +9,7 @@
 mod account;
 mod base;
 pub mod colibri;
+mod rpg;
 mod social;
 pub mod worker;
 
@@ -44,6 +45,32 @@ pub struct LabelerPlayer {
     pub mob_kills: u64,
     pub deaths: u64,
     pub dragon_kills: u64,
+}
+
+/// One opaque player-data aspect carried between the game and the worker
+/// (M63). `data` is standard base64; the worker uploads the decoded bytes as
+/// an atpcraft aspect blob (`inventory`, `ender_chest`, `equipment`,
+/// `advancements` or `stats`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerAspect {
+    pub name: String,
+    pub data: String,
+}
+
+/// One item discovery the server can publish as an `equipment.rpg.give`
+/// attestation and, for the linked local account, an `equipment.rpg.item`
+/// record (M63). The game computes the key exactly as atpcraft's
+/// `DiscoveryKey` does, so repeated scans replace the same records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RpgDiscovery {
+    /// Stable key and player record key (at most 50 characters).
+    pub key: String,
+    /// Registry id, e.g. `minecraft:diamond_sword`.
+    pub item_id: String,
+    /// Display name (`title`).
+    pub title: String,
+    /// True when the discovery came from a custom-named stack.
+    pub renamed: bool,
 }
 
 /// What the game side asks the worker thread to do.
@@ -144,6 +171,32 @@ pub enum Command {
     /// endorsed with the mod's own Ed25519 key (atpcraft port, M6). An empty
     /// `summary.username` is filled from the configured identifier.
     PostSnapshot { summary: records::SnapshotSummary },
+    /// Publish a player-data snapshot with opaque aspect blobs (M63). The
+    /// worker checks that `player_uuid` is linked to the logged-in DID, so a
+    /// player can only publish their own state, then uploads each aspect and
+    /// signs the snapshot. `data` is standard base64.
+    PostPlayerData {
+        player_uuid: String,
+        player_name: String,
+        summary: records::SnapshotSummary,
+        aspects: Vec<PlayerAspect>,
+    },
+    /// Fetch the logged-in account's latest verified snapshot and download its
+    /// supported aspect blobs for `player_uuid` (M63). The link must point at
+    /// the worker's own DID; this is the self-service restore half.
+    FetchPlayerData {
+        player_uuid: String,
+        player_name: String,
+    },
+    /// Publish RPG item discoveries (M63). The worker checks the UUID-to-DID
+    /// link, writes each `equipment.rpg.give` attestation from the server
+    /// account and each `equipment.rpg.item` record from the player's own
+    /// account, up to `rpg_items_max_per_scan` new keys.
+    PublishRpgItems {
+        player_uuid: String,
+        player_name: String,
+        discoveries: Vec<RpgDiscovery>,
+    },
     /// Publish the player's skin (and optional cape) as an
     /// `at.atpcraft.player.skin` record, endorsed with the mod's own Ed25519
     /// key and upserted at the key id (atpcraft port, M9). `None` paths fall
@@ -376,6 +429,15 @@ pub enum Event {
         via: String,
         // Boxed: PlayerDigest is the enum's largest variant.
         snapshot: Box<Option<presence::PlayerDigest>>,
+    },
+    /// Downloaded aspects from the logged-in account's latest verified
+    /// snapshot (M63), for the game to apply to an online player. Each
+    /// `data` value is standard base64.
+    PlayerDataRestore {
+        player_uuid: String,
+        player_name: String,
+        version: i64,
+        aspects: Vec<PlayerAspect>,
     },
     /// An account's profile (M24, atpcraft profile pronouns): the resolved DID
     /// (`subject`), the PDS the direct record was read from (`via`), and the
