@@ -296,6 +296,11 @@ pub enum Command {
     /// when the field is absent; a failed read falls back to the AppView.
     /// The subject is a DID or a handle. Unauthenticated — works logged out.
     FetchProfile { subject: String },
+    /// Update one text field of the logged-in account's Bluesky profile
+    /// (`app.bsky.actor.profile` at rkey `self`, M65). `field` is `name`,
+    /// `description` or `pronouns`; an empty `value` clears it. Every other
+    /// field in the record is preserved.
+    SetProfileField { field: String, value: String },
     /// Read a player's latest `at.atpcraft.player.skin` record from their own
     /// PDS, verify its endorsement, and — only when it verifies — download
     /// the skin/cape blobs into the mod's storage folder (M14, the atpcraft
@@ -455,6 +460,8 @@ pub enum Event {
         via: String,
         profile: Box<profiles::ProfileDigest>,
     },
+    /// One field of the logged-in account's profile was updated (M65).
+    ProfileUpdated { field: String, uri: String },
     /// The latest skin record of a player (M14, skin-sync read side): the DID
     /// (`subject`), the PDS it was read from (`via`), and the digest with its
     /// endorsement verdict and any downloaded blobs (`None` when the repo has

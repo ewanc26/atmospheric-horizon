@@ -127,6 +127,29 @@ pub async fn put_record(
     rkey: &str,
     record: Unknown,
 ) -> Result<String> {
+    put_record_with_validation(agent, did, collection, rkey, record, false).await
+}
+
+/// Upsert one record with PDS lexicon validation on (M65). The profile record
+/// uses this so a field the lexicon rejects is reported instead of stored.
+pub async fn put_record_validated(
+    agent: &Agent,
+    did: &str,
+    collection: &str,
+    rkey: &str,
+    record: Unknown,
+) -> Result<String> {
+    put_record_with_validation(agent, did, collection, rkey, record, true).await
+}
+
+async fn put_record_with_validation(
+    agent: &Agent,
+    did: &str,
+    collection: &str,
+    rkey: &str,
+    record: Unknown,
+    validate: bool,
+) -> Result<String> {
     let input = atrium_api::com::atproto::repo::put_record::InputData {
         collection: collection.parse().expect("valid NSID"),
         record,
@@ -138,7 +161,7 @@ pub async fn put_record(
             .map_err(|_| AtmosphericError::Message(format!("invalid record key: {rkey}")))?,
         swap_commit: None,
         swap_record: None,
-        validate: Some(false),
+        validate: Some(validate),
     };
     let output = agent
         .api

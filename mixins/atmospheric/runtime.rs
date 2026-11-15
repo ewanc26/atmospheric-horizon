@@ -238,6 +238,9 @@ pub enum GameCommand {
     /// the account's own PDS, with atpcraft's pronoun precedence. Works
     /// logged out.
     FetchProfile { subject: String },
+    /// Update one text field of the logged-in account's profile (M65): `name`,
+    /// `description` or `pronouns`; an empty value clears it.
+    SetProfileField { field: String, value: String },
     /// Read a player's latest `at.atpcraft.player.skin` record from their own
     /// PDS, verify its endorsement, and — only when verified — download the
     /// skin/cape blobs into the mod's storage folder (M14, atpcraft skin-sync
@@ -620,6 +623,8 @@ pub enum ModEvent {
         via: String,
         profile: Box<ProfileDigest>,
     },
+    /// One field of the logged-in account's profile was updated (M65).
+    ProfileUpdated { field: String, uri: String },
     /// The latest skin record of a player (M14, skin-sync read side): the DID
     /// (`subject`), the PDS it was read from (`via`), and the digest with its
     /// endorsement verdict and any downloaded blobs (`None` when the repo has
@@ -829,6 +834,9 @@ pub fn status_text(event: &ModEvent) -> String {
                 )
             }
         },
+        ModEvent::ProfileUpdated { field, uri } => {
+            format!("atmospheric: updated profile {field} — {uri}")
+        }
         ModEvent::Profile {
             subject, profile, ..
         } => {
@@ -2119,6 +2127,14 @@ pub fn fetch_profile(subject: &str) {
     });
 }
 
+/// Update one text field of the logged-in account's Bluesky profile (M65).
+pub fn set_profile_field(field: &str, value: &str) {
+    send(GameCommand::SetProfileField {
+        field: field.into(),
+        value: value.into(),
+    });
+}
+
 /// Ask the worker to read a player's latest skin record, verify its
 /// endorsement, and download the blobs when verified (M14). `subject` is a
 /// DID or a handle.
@@ -2996,6 +3012,10 @@ fn encode_command(command: &GameCommand) -> String {
             "FetchProfile",
             jobj(vec![("subject", jstr(subject))]),
         )]),
+        GameCommand::SetProfileField { field, value } => jobj(vec![(
+            "SetProfileField",
+            jobj(vec![("field", jstr(field)), ("value", jstr(value))]),
+        )]),
         GameCommand::FetchPlayerSkin { subject } => jobj(vec![(
             "FetchPlayerSkin",
             jobj(vec![("subject", jstr(subject))]),
@@ -3388,6 +3408,13 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 player_name: req_str(obj, "player_name")?,
                 version: req_int(obj, "version")? as i64,
                 aspects,
+            })
+        }
+        "ProfileUpdated" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::ProfileUpdated {
+                field: req_str(obj, "field")?,
+                uri: req_str(obj, "uri")?,
             })
         }
         "Profile" => {
@@ -4581,6 +4608,13 @@ mod tests {
             r#"{"FetchRecords":{"subject":"a.test","collection":"app.bsky.feed.post"}}"#
         );
         assert_eq!(
+            encode_command(&GameCommand::SetProfileField {
+                field: "pronouns".into(),
+                value: "they/them".into(),
+            }),
+            r#"{"SetProfileField":{"field":"pronouns","value":"they/them"}}"#
+        );
+        assert_eq!(
             encode_command(&GameCommand::CheckPlayerProfile {
                 player_uuid: "00000000-0000-4000-8000-000000000002".into(),
                 player_name: "Alex".into(),
@@ -5153,6 +5187,15 @@ mod tests {
                     pronouns: Some("they/them".into()),
                     avatar: "a".into(),
                 }),
+            })
+        );
+        assert_eq!(
+            decode_event(
+                r#"{"ProfileUpdated":{"field":"pronouns","uri":"at://did:plc:a/app.bsky.actor.profile/self"}}"#
+            ),
+            Some(ModEvent::ProfileUpdated {
+                field: "pronouns".into(),
+                uri: "at://did:plc:a/app.bsky.actor.profile/self".into(),
             })
         );
         assert_eq!(

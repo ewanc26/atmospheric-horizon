@@ -653,6 +653,13 @@ impl Worker {
                 player_uuid,
                 player_name,
             } => self.start_skin_upload(&player_uuid, &player_name).await,
+            Command::SetProfileField { field, value } => {
+                self.ensure_oauth_fresh().await;
+                match self.set_profile_field(&field, &value).await {
+                    Ok(uri) => self.emit(Event::ProfileUpdated { field, uri }),
+                    Err(error) => self.fail(format!("could not update the profile: {error}")),
+                }
+            }
             Command::PostText { text } => {
                 self.ensure_oauth_fresh().await;
                 let result = match (&self.agent, &self.did) {
@@ -1155,6 +1162,50 @@ impl Worker {
         uploaded.sort_by(|left, right| left.name.cmp(&right.name));
         summary.username = player_name.to_string();
         self.post_snapshot(summary, uploaded).await
+    }
+
+    /// Update one text field of the logged-in account's profile (M65). The
+    /// existing record is fetched and merged, so the avatar, banner, links,
+    /// pinned post and any other field survive. An empty value clears the
+    /// field. The write asks the PDS to validate the merged record.
+    async fn set_profile_field(&self, field: &str, value: &str) -> crate::error::Result<String> {
+        let (Some(agent), Some(did)) = (&self.agent, &self.did) else {
+            return Err(AtmosphericError::NotLoggedIn);
+        };
+        if profiles::writable_field(field).is_none() {
+            return Err(AtmosphericError::Message(format!(
+                "unsupported profile field '{field}'; use name, description or pronouns"
+            )));
+        }
+        let existing = actions::get_record(
+            agent,
+            did,
+            profiles::PROFILE_COLLECTION,
+            profiles::PROFILE_RKEY,
+        )
+        .await?;
+        let existing = existing
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| {
+                AtmosphericError::Message(format!("could not read the profile record: {error}"))
+            })?;
+        let now = atrium_api::types::string::Datetime::now()
+            .as_str()
+            .to_string();
+        let record = profiles::merge_field(existing, field, value, &now)?;
+        let record: atrium_api::types::Unknown =
+            serde_json::from_value(record).map_err(|error| {
+                AtmosphericError::Message(format!("invalid profile record: {error}"))
+            })?;
+        actions::put_record_validated(
+            agent,
+            did,
+            profiles::PROFILE_COLLECTION,
+            profiles::PROFILE_RKEY,
+            record,
+        )
+        .await
     }
 
     /// Fetch and verify the logged-in account's latest snapshot, then download
@@ -6313,6 +6364,79 @@ mod tests {
             record["endorsements"][0]["sig"]["$bytes"].as_str().unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn profile_field_write_preserves_the_record_and_can_clear() {
+        let pds = StubPds::start(false);
+        pds.seed_record(
+            profiles::PROFILE_COLLECTION,
+            profiles::PROFILE_RKEY,
+            serde_json::json!({
+                "$type": profiles::PROFILE_COLLECTION,
+                "displayName": "ewan",
+                "pronouns": "he/him",
+                "avatar": {
+                    "$type": "blob",
+                    "ref": {"$link": "bafyavatar"},
+                    "mimeType": "image/png",
+                    "size": 3
+                },
+                "createdAt": "2025-01-01T00:00:00.000Z"
+            }),
+        );
+        let dir = temp_dir("profile-field");
+        write_config(&dir, &test_config(pds.url.clone()));
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+
+        command_tx
+            .send(Command::SetProfileField {
+                field: "pronouns".into(),
+                value: "they/them".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::ProfileUpdated { .. })) {
+            Event::ProfileUpdated { field, uri } => {
+                assert_eq!(field, "pronouns");
+                assert!(uri.ends_with("/app.bsky.actor.profile/self"), "{uri}");
+            }
+            other => panic!("expected ProfileUpdated, got {other:?}"),
+        }
+
+        command_tx
+            .send(Command::SetProfileField {
+                field: "pronouns".into(),
+                value: String::new(),
+            })
+            .unwrap();
+        let _ = wait_for(&event_rx, |e| matches!(e, Event::ProfileUpdated { .. }));
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let puts: Vec<_> = pds
+            .requests()
+            .into_iter()
+            .filter(|request| request.path == "/xrpc/com.atproto.repo.putRecord")
+            .collect();
+        assert_eq!(
+            puts.len(),
+            2,
+            "one write for the update and one for the clear"
+        );
+        let first: serde_json::Value = serde_json::from_str(&puts[0].body).unwrap();
+        assert_eq!(first["validate"], true);
+        assert_eq!(first["record"]["pronouns"], "they/them");
+        assert_eq!(first["record"]["displayName"], "ewan");
+        assert_eq!(first["record"]["avatar"]["mimeType"], "image/png");
+        assert_eq!(first["record"]["createdAt"], "2025-01-01T00:00:00.000Z");
+        let second: serde_json::Value = serde_json::from_str(&puts[1].body).unwrap();
+        assert!(second["record"].get("pronouns").is_none());
+        assert_eq!(second["record"]["displayName"], "ewan");
+        assert_eq!(second["record"]["avatar"]["$type"], "blob");
     }
 
     #[test]
