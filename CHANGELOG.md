@@ -163,6 +163,13 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   pinned post, `createdAt` and any other field. Empty text clears the field.
   A narrow OAuth scope gains the `app.bsky.actor.profile` write grant. Live
   checks against a real PDS update and restore a profile field.
+- **M66 — profile avatar and banner uploads (#152).** Add
+  `/atmospheric profile-set avatar|banner <path>` for the logged-in account.
+  Local PNG/JPEG files up to 1,000,000 bytes are uploaded as blobs, merged
+  into `app.bsky.actor.profile` at rkey `self`, and written with PDS
+  validation, preserving every other field. The existing `blob:*/*` grant
+  covers the uploads. Live checks uploaded both images and restored the
+  original images.
 
 ## [0.3.1] — 2026-11-14
 
