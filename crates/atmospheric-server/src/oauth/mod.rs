@@ -9,6 +9,7 @@ mod client;
 mod dpop;
 mod encoding;
 mod resolver;
+mod session;
 #[cfg(test)]
 mod tests;
 
@@ -16,3 +17,4 @@ pub use client::{Identity, OAuthClient, PendingAuthorization, SCOPE, Started, cl
 pub use dpop::DpopKey;
 pub(crate) use encoding::random_token;
 pub use resolver::Resolver;
+pub use session::OAuthSession;

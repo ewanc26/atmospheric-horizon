@@ -44,6 +44,18 @@ fn atmospheric_tick(game: &mut crate::game::Game<'_>) {
             )),
         );
     }
+    for upload in m::drain_skin_uploads() {
+        let Some(uuid) = m::uuid_value(&upload.player_uuid) else {
+            continue;
+        };
+        game.native_tell(
+            uuid,
+            horizon_client::text::Text::literal(&format!(
+                "atmospheric: open {} to upload and publish your skin",
+                upload.url
+            )),
+        );
+    }
     // M42: sweep the online players against the join gate. The worker checks
     // the list through its M52 cache, refreshing when stale, and reports the
     // linked players whose DID has left it; each is disconnected with

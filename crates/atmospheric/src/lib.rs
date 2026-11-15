@@ -167,6 +167,13 @@ pub enum Command {
         player_uuid: String,
         player_name: String,
     },
+    /// Start M64 browser skin uploading for an online, already-linked player.
+    /// The worker asks the identity service for a one-time URL; the browser
+    /// OAuth result is bound to this UUID and checked against the link.
+    StartSkinUpload {
+        player_uuid: String,
+        player_name: String,
+    },
     /// Publish the player's state as an `at.atpcraft.player.snapshot` record,
     /// endorsed with the mod's own Ed25519 key (atpcraft port, M6). An empty
     /// `summary.username` is filled from the configured identifier.
@@ -513,6 +520,13 @@ pub enum Event {
         url: String,
         expires_at: u64,
     },
+    /// A one-time browser skin-upload URL (M64) for `player_uuid`. The link is
+    /// bound to the player's existing DID link and must only be shown to them.
+    SkinUploadLink {
+        player_uuid: String,
+        url: String,
+        expires_at: u64,
+    },
 }
 
 #[cfg(test)]
@@ -592,6 +606,14 @@ mod tests {
             })
             .unwrap(),
             r#"{"StartBrowserLink":{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::StartSkinUpload {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
+            })
+            .unwrap(),
+            r#"{"StartSkinUpload":{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}}"#
         );
         assert_eq!(
             serde_json::to_string(&Command::ColibriHandled {
@@ -693,6 +715,10 @@ mod tests {
                 code: "ABCD-EFGH".into(),
             },
             Command::StartBrowserLink {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
+            },
+            Command::StartSkinUpload {
                 player_uuid: "00000000-0000-4000-8000-000000000001".into(),
                 player_name: "Alex".into(),
             },
@@ -971,6 +997,11 @@ mod tests {
             Event::BrowserLink {
                 player_uuid: "00000000-0000-4000-8000-000000000001".into(),
                 url: "https://links.example/link/token".into(),
+                expires_at: 1_800_000_000,
+            },
+            Event::SkinUploadLink {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                url: "https://links.example/skin/token".into(),
                 expires_at: 1_800_000_000,
             },
         ];

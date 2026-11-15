@@ -75,6 +75,17 @@ fn oauth_stub() -> (String, Captured) {
                         r#"{"access_token":"access","token_type":"DPoP","sub":"did:plc:stubuser","scope":"atproto transition:generic"}"#
                             .to_string()
                     }
+                    ("POST", "/xrpc/com.atproto.repo.uploadBlob") => {
+                        r#"{"blob":{"$type":"blob","ref":{"$link":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy"},"mimeType":"image/png","size":8}}"#
+                            .to_string()
+                    }
+                    ("GET", "/xrpc/com.atproto.repo.getRecord") => {
+                        r#"{"error":"RecordNotFound"}"#.to_string()
+                    }
+                    ("POST", "/xrpc/com.atproto.repo.putRecord") => {
+                        r#"{"uri":"at://did:plc:stubuser/at.atpcraft.player.skin/key","cid":"bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy"}"#
+                            .to_string()
+                    }
                     _ => r#"{"error":"not found"}"#.to_string(),
                 };
                 let status = if payload.contains("\"error\"") {
@@ -148,6 +159,57 @@ fn browser_oauth_start_and_finish_against_a_stub() {
         .unwrap();
     assert!(token.2.contains("grant_type=authorization_code"));
     assert!(token.2.contains("code_verifier="));
+}
+
+#[test]
+fn completed_session_keeps_its_token_for_one_authenticated_write() {
+    let (base, requests) = oauth_stub();
+    let client = OAuthClient::new(
+        "https://links.example",
+        Resolver {
+            handle_service: base.clone(),
+            plc_directory: base.clone(),
+        },
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let started = runtime.block_on(client.start("stub.test")).unwrap();
+    let session = runtime
+        .block_on(client.finish_session(&started.pending, "code", Some(&base)))
+        .unwrap();
+    assert_eq!(session.did, "did:plc:stubuser");
+    assert_eq!(session.pds, base);
+    let uploaded = runtime
+        .block_on(session.upload_blob(b"\x89PNG\r\n\x1a\nrest"))
+        .unwrap();
+    assert_eq!(uploaded["blob"]["mimeType"], "image/png");
+    assert!(
+        runtime
+            .block_on(session.get_record("at.atpcraft.player.skin", "key"))
+            .unwrap()
+            .is_none()
+    );
+    let written = runtime
+        .block_on(session.put_record(
+            "at.atpcraft.player.skin",
+            "key",
+            serde_json::json!({"$type": "at.atpcraft.player.skin"}),
+        ))
+        .unwrap();
+    assert!(
+        written["uri"]
+            .as_str()
+            .unwrap()
+            .contains("at.atpcraft.player.skin")
+    );
+    let requests = requests.lock().unwrap();
+    assert!(requests.iter().any(|(method, path, body)| {
+        method == "POST"
+            && path == "/xrpc/com.atproto.repo.putRecord"
+            && body.contains("\"repo\":\"did:plc:stubuser\"")
+    }));
 }
 
 #[test]

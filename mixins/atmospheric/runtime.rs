@@ -130,6 +130,13 @@ pub enum GameCommand {
         player_uuid: String,
         player_name: String,
     },
+    /// Ask the identity service for a one-time browser skin-upload URL (M64).
+    /// The player must already be linked; the browser login is checked against
+    /// that same DID before anything is published.
+    StartSkinUpload {
+        player_uuid: String,
+        player_name: String,
+    },
     /// Publish the player's state as an `at.atpcraft.player.snapshot` record
     /// (M6, atpcraft port).
     PostSnapshot { summary: SnapshotSummary },
@@ -673,6 +680,13 @@ pub enum ModEvent {
         url: String,
         expires_at: u64,
     },
+    /// A one-time browser skin-upload URL (M64); only the requesting player
+    /// should see it.
+    SkinUploadLink {
+        player_uuid: String,
+        url: String,
+        expires_at: u64,
+    },
 }
 
 /// The HUD wording for an endorsement verdict (M13/M14).
@@ -945,6 +959,9 @@ pub fn status_text(event: &ModEvent) -> String {
         }
         ModEvent::BrowserLink { url, .. } => {
             format!("atmospheric: link your Bluesky account at {url}")
+        }
+        ModEvent::SkinUploadLink { url, .. } => {
+            format!("atmospheric: upload your skin at {url}")
         }
         ModEvent::SocialGraph {
             kind,
@@ -1259,6 +1276,25 @@ pub fn drain_events(max: usize) -> Vec<ModEvent> {
             links.remove(0);
         }
     }
+    if let Ok(mut links) = REMOTE_SKIN_UPLOADS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+    {
+        for event in &drained {
+            if let ModEvent::SkinUploadLink {
+                player_uuid, url, ..
+            } = event
+            {
+                links.push(RemoteSkinUpload {
+                    player_uuid: player_uuid.clone(),
+                    url: url.clone(),
+                });
+            }
+        }
+        while links.len() > 32 {
+            links.remove(0);
+        }
+    }
     if let Ok(mut status) = status_slot().lock() {
         let now = std::time::Instant::now();
         prune_expired(&mut status, now);
@@ -1353,6 +1389,15 @@ pub struct RemoteBrowserLink {
 
 static REMOTE_BROWSER_LINKS: OnceLock<Mutex<Vec<RemoteBrowserLink>>> = OnceLock::new();
 
+/// A one-time browser skin-upload URL queued for one player (M64).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteSkinUpload {
+    pub player_uuid: String,
+    pub url: String,
+}
+
+static REMOTE_SKIN_UPLOADS: OnceLock<Mutex<Vec<RemoteSkinUpload>>> = OnceLock::new();
+
 /// One linked player's in-game nickname queued for `native_set_nickname` (M45).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteNickname {
@@ -1374,6 +1419,15 @@ pub fn drain_colibri_prompts() -> Vec<RemoteColibriPrompt> {
 /// Take the one-time browser links queued for targeted delivery (M39).
 pub fn drain_browser_links() -> Vec<RemoteBrowserLink> {
     REMOTE_BROWSER_LINKS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .map(|mut links| std::mem::take(&mut *links))
+        .unwrap_or_default()
+}
+
+/// Take the one-time skin-upload links queued for targeted delivery (M64).
+pub fn drain_skin_uploads() -> Vec<RemoteSkinUpload> {
+    REMOTE_SKIN_UPLOADS
         .get_or_init(|| Mutex::new(Vec::new()))
         .lock()
         .map(|mut links| std::mem::take(&mut *links))
@@ -1565,6 +1619,15 @@ pub fn post_colibri_presence(kind: &str, text: &str) {
 /// Start a one-time browser link for an online player (M39).
 pub fn start_browser_link(player_uuid: String, player_name: &str) {
     send(GameCommand::StartBrowserLink {
+        player_uuid,
+        player_name: player_name.into(),
+    });
+}
+
+/// Start a one-time browser skin-upload link for an online, linked player
+/// (M64).
+pub fn start_skin_upload(player_uuid: String, player_name: &str) {
+    send(GameCommand::StartSkinUpload {
         player_uuid,
         player_name: player_name.into(),
     });
@@ -2780,6 +2843,16 @@ fn encode_command(command: &GameCommand) -> String {
                 ("player_name", jstr(player_name)),
             ]),
         )]),
+        GameCommand::StartSkinUpload {
+            player_uuid,
+            player_name,
+        } => jobj(vec![(
+            "StartSkinUpload",
+            jobj(vec![
+                ("player_uuid", jstr(player_uuid)),
+                ("player_name", jstr(player_name)),
+            ]),
+        )]),
         GameCommand::PostSnapshot { summary } => jobj(vec![(
             "PostSnapshot",
             jobj(vec![("summary", summary_json(summary))]),
@@ -3409,6 +3482,14 @@ fn decode_event(line: &str) -> Option<ModEvent> {
         "BrowserLink" => {
             let obj = payload_obj()?;
             Some(ModEvent::BrowserLink {
+                player_uuid: req_str(obj, "player_uuid")?,
+                url: req_str(obj, "url")?,
+                expires_at: req_int(obj, "expires_at")? as u64,
+            })
+        }
+        "SkinUploadLink" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::SkinUploadLink {
                 player_uuid: req_str(obj, "player_uuid")?,
                 url: req_str(obj, "url")?,
                 expires_at: req_int(obj, "expires_at")? as u64,
@@ -4579,6 +4660,13 @@ mod tests {
             }),
             r#"{"StartBrowserLink":{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}}"#
         );
+        assert_eq!(
+            encode_command(&GameCommand::StartSkinUpload {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Alex".into(),
+            }),
+            r#"{"StartSkinUpload":{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}}"#
+        );
         // The flat game-side x/y/z map onto the nested `position` object.
         assert_eq!(
             encode_command(&GameCommand::PostSnapshot {
@@ -4859,6 +4947,16 @@ mod tests {
             Some(ModEvent::BrowserLink {
                 player_uuid: "00000000-0000-4000-8000-000000000001".into(),
                 url: "https://links.example/link/token".into(),
+                expires_at: 1800,
+            })
+        );
+        assert_eq!(
+            decode_event(
+                r#"{"SkinUploadLink":{"player_uuid":"00000000-0000-4000-8000-000000000001","url":"https://links.example/skin/token","expires_at":1800}}"#
+            ),
+            Some(ModEvent::SkinUploadLink {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                url: "https://links.example/skin/token".into(),
                 expires_at: 1800,
             })
         );

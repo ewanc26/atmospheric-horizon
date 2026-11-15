@@ -27,6 +27,7 @@ fn config() -> ServerConfig {
         public_url: Some("https://links.example".into()),
         oauth_resolver: None,
         labeler: None,
+        skin_signer: None,
     }
 }
 

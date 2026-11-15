@@ -7,7 +7,11 @@ license = "AGPL-3.0-only"
 description = "Server-side player identity linking for atmospheric-horizon"
 
 [dependencies]
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
+# Skin record signing reuses the game worker's exact atpcraft record types and
+# Ed25519 canonical payload; the server never reimplements that wire format.
+atmospheric = { path = "../atmospheric" }
+atrium-api = "0.26"
 base64 = "0.22"
 # Label signing (M56): secp256k1 ECDSA and multibase did:key encoding for the
 # labeler's #atproto_label key. RustCrypto, MIT OR Apache-2.0.

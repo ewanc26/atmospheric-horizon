@@ -23,6 +23,8 @@ pub enum ApiError {
     BrowserDisabled,
     #[error("labeler is disabled; set ATMOSPHERIC_SERVER_LABELER_DID")]
     LabelerDisabled,
+    #[error("skin upload is disabled; set ATMOSPHERIC_SERVER_SKIN_KEY")]
+    SkinDisabled,
     #[error("missing or invalid admin bearer token")]
     Unauthorized,
     #[error("internal server error")]
@@ -42,9 +44,10 @@ impl ApiError {
         match self {
             Self::Invalid(_) => StatusCode::BAD_REQUEST,
             Self::NotFound(_) | Self::PairingUnavailable => StatusCode::NOT_FOUND,
-            Self::AdminDisabled | Self::BrowserDisabled | Self::LabelerDisabled => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            Self::AdminDisabled
+            | Self::BrowserDisabled
+            | Self::LabelerDisabled
+            | Self::SkinDisabled => StatusCode::SERVICE_UNAVAILABLE,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Internal | Self::Io(_) | Self::Json(_) | Self::Join(_) | Self::Corrupt(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR

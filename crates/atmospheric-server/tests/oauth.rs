@@ -54,6 +54,7 @@ fn config(resolver: Resolver) -> ServerConfig {
         public_url: Some("https://links.example".into()),
         oauth_resolver: Some(resolver),
         labeler: None,
+        skin_signer: None,
     }
 }
 
