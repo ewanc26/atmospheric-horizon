@@ -100,6 +100,9 @@ Everything else, with zero Horizon imports so it builds and tests with plain
 - `labeler` — M59 server-account `app.bsky.labeler.service` declaration at
   rkey `self`: the curated 11-value vocabulary and its client metadata, with
   `createdAt` preservation across republishes
+- `triggers` — M61 player-activity label evaluation: the `player`/`online`
+  desired state, the 30-day badge with a daily refresh, logout negation,
+  startup recovery and the admin emission/query calls
 - `presence` — M13 verified reads of other players' `at.atpcraft.player.snapshot`
   records (`com.atproto.repo.listRecords` on the subject's own PDS, highest
   version, Ed25519 endorsement verification)
@@ -450,7 +453,7 @@ mod still cannot host the labeler HTTP endpoint).
   player accounts); logged out with no subject it fails fast as
   "not logged in" before any labeler HTTP call.
 - Both emit `Event::Labels { subject, via, labels }` with
-  `labels::LabelDigest { val, src, neg, cts, exp }` reduced from
+  `labels::LabelDigest { val, src, uri, neg, cts, exp }` reduced from
   `com.atproto.label.defs#label`; the game side mirrors it as plain data and
   the HUD summarizes it ("atmospheric: 2 label(s) on did:plc:… via …:
   player, -spam"). Wire shapes come from the lexicons/spec only — no code is
@@ -547,14 +550,14 @@ stored on disk. The direct profile record is read from the PDS; its avatar is
 a blob reference, so only the AppView's avatar URL is carried in the digest.
 
 atpcraft's remaining server-side surfaces (RPG item discovery, full aspect
-capture/restore and the labeler's game triggers) are not implemented yet; the
-README port table records each one. M56–M60 cover label signing, durable
-storage, querying, streaming, the server-account declaration and its PLC
-identity publication. M25 supplies the separate server account, M26/M27 run the
-operational Colibri bridge, M35 supplies the shared player-to-DID map, M36 claims
-links from the game, M37 checks linked players on join and M38 enforces the
-configured list; the remaining game triggers and capture remain separate
-milestones.
+capture/restore and the stat-driven labeler labels) are not implemented yet; the
+README port table records each one. M56–M61 cover label signing, durable
+storage, querying, streaming, the server-account declaration, its PLC identity
+publication and the game triggers for `player`/`online`. M25 supplies the
+separate server account, M26/M27 run the operational Colibri bridge, M35
+supplies the shared player-to-DID map, M36 claims links from the game, M37 checks
+linked players on join and M38 enforces the configured list; the remaining stat
+labels and capture remain separate milestones.
 
 Verified: `profiles` unit tests (whitespace normalisation, direct-record
 precedence, clearing on a successful record without pronouns, AppView
@@ -588,9 +591,9 @@ and the mod's persisted Ed25519 endorsement key; `createdAt` is preserved.
 The session file contains a DPoP private key and a refresh token, so it is a
 secret exactly like `session.json`; the README's Network use section records
 it. The account is the foundation, not the whole server-side feature: the
-labeler's game triggers and aspect sync still need their own milestones;
-M56–M60 add the labeler service, declaration and PLC identity, and M38 supplies
-linked-account join enforcement. M26 builds the first Colibri surface on this
+stat-driven labeler labels and aspect sync still need their own milestones;
+M56–M61 add the labeler service, declaration, PLC identity and game triggers,
+and M38 supplies linked-account join enforcement. M26 builds the first Colibri surface on this
 account.
 
 Verified: a worker test runs the full stub OAuth flow for the server account,
@@ -907,9 +910,10 @@ per data directory, not for multiple replicas sharing a volume.
 M36 wires the explicit `/atmospheric link <code>` claim, M37 wires the
 public join-time link lookup, M38 consumes the same map for login-gate
 enforcement, and M39 adds browser OAuth link creation and callback routes.
-The service is still the foundation for the labeler's game triggers and for
+The service is still the foundation for the stat-driven labeler labels and for
 RPG/player-data work; those consumers remain separate and must not be described
-as delivered.
+as delivered. Label emission is wired (M61), but the game supplies only
+join/logout/sweep events, not op level or vanilla statistics.
 
 Verified: `model` unit tests cover UUID, name, DID, handle, code and TTL
 validation; store tests cover reopen persistence, `linked_at` preservation,
@@ -1268,7 +1272,7 @@ atpcraft signs every emitted label with a secp256k1 (K-256) key over the label's
 
 `atmospheric-server`'s new `labeler` scope adds `Label` (`com.atproto.label.defs#label`) and `LabelSigner`. The signer loads a 32-byte secret or generates one, exposes the compressed public key and its multibase `did:key` (`0xe7 0x01` multicodec + base58btc), signs the SHA-256 digest of the unsigned canonical CBOR map and normalizes the 64-byte compact signature to low-S, and verifies it. The encoder writes only the subset a label uses (definite-length maps, text, unsigned integers, booleans) and sorts keys length-first then bytewise: `cts`, optional `cid`/`exp`, `neg` only when true, `src`, `uri`, `val`, `ver`. The `sig` field is deliberately not part of the signing input.
 
-No endpoint, PLC operation or declaration record is added in M56; M57 adds the durable log, key persistence and the query/emit routes on top, M58 adds the live subscription stream, and M59 adds the server-account declaration. The game triggers remain in #112; M60 later adds the PLC identity update.
+No endpoint, PLC operation or declaration record is added in M56; M57 adds the durable log, key persistence and the query/emit routes on top, M58 adds the live subscription stream, M59 adds the server-account declaration, M60 the PLC identity update and M61 the game triggers.
 
 Verified: exact canonical byte vectors for a minimal label and one with all optionals (including key order and `neg`), the secp256k1 generator-point public key for secret 1, `did:key` prefix and multicodec round-trip, secret validation, deterministic 64-byte low-S signatures, tamper rejection and cross-key rejection. No network was used.
 
@@ -1280,7 +1284,7 @@ M56 produced signatures but had nowhere to keep or serve them. M57 adds the serv
 
 `POST /v1/labeler/labels` is admin-token protected and accepts only `uri`, `val`, optional `neg`, `cid` and `exp`; `src` is the configured service DID. It signs the canonical CBOR and appends before serving. `GET /xrpc/com.atproto.label.queryLabels` is public; `uriPatterns` is required and accepts repeated or comma-separated values, `sources` filters by label `src`, `limit` defaults to 50 and clamps to 1–250, and `cursor` is the last sequence from the previous page. `*` and trailing-`*` patterns match atpcraft. Errors use the XRPC `{error, message}` envelope; a disabled labeler returns `NotEnabled` 503. The query response contains labels only (no sequence wrapper), with the cursor string when the page is full.
 
-The service is enabled only when `ATMOSPHERIC_SERVER_LABELER_DID` is set; otherwise the routes return the disabled error and no key is generated. No declaration record, PLC operation or game trigger is added in M57; M58 adds the live stream and M59 the server-account declaration, while PLC and triggers remain. No outbound request is added — all reads and writes are local.
+The service is enabled only when `ATMOSPHERIC_SERVER_LABELER_DID` is set; otherwise the routes return the disabled error and no key is generated. No declaration record, PLC operation or game trigger is added in M57; M58 adds the live stream, M59 the server-account declaration, M60 the PLC identity and M61 the game triggers. No outbound request is added — all reads and writes are local.
 
 Verified: 32 server unit tests and 6 API tests, including key reuse and 0600 permissions, exact signed JSON shape and round-trip, log replay and sequence continuation, assertion/negation/expiry state, repeated/comma query parsing, admin auth, query filtering/pagination, persistence and input rejection. No live labeler or PDS was contacted.
 
@@ -1327,8 +1331,9 @@ a narrow base. The default `atproto transition:generic` is unchanged, and no
 `identity:*` grant is added.
 
 No PLC operation updates the DID document's `#atproto_labeler` service or label
-verification method, and no game trigger emits labels, so the declaration exists
-but clients cannot yet discover the labeler through the account identity. The
+verification method, and no game trigger emits labels in M59, so the declaration
+exists but clients cannot yet discover the labeler through the account identity;
+M60 and M61 close both gaps. The
 record lives on the PDS; nothing new is stored locally. Wire shapes come from
 the public lexicon and the vocabulary IDs from atpcraft's configuration; no
 atpcraft source was copied (its repository has no licence).Verified: unit tests pin the 11 IDs, every definition shape, `$type` and an existing `createdAt`; the worker's stub-OAuth login test asserts the declaration `putRecord` alongside the descriptor; OAuth tests pin the grant, its absence on the default broad scope and idempotence; config and capability tests pin the default-off flag and the conditional capability. No live PDS was contacted.
@@ -1372,8 +1377,9 @@ requests `identity:*` while `labeler_enabled` is on, because the PDS's
 default already covers it. M59's note that no `identity:*` grant was added is
 superseded by this milestone.
 
-No new local storage and no label emission. The declaration stays on the PDS;
-the DID document change is public identity data. Wire shapes come from the
+No new local storage and no label emission in M60; M61 adds the game triggers.
+The declaration stays on the PDS; the DID document change is public identity
+data. Wire shapes come from the
 public lexicons and the PLC specification; no atpcraft code is copied.
 
 Verified: unit tests pin the merge (preservation of the PDS service, rotation
@@ -1385,6 +1391,48 @@ the token plus both labeler entries alongside the existing ones, the signed
 operation is submitted, and the status event follows; another worker test pins
 the missing-server-account failure. No live PLC directory or PDS was
 contacted.
+
+### M61: labeler game triggers (labeler part 6)
+
+M60 made the labeler discoverable, but nothing emitted labels when players
+played. atpcraft asserts a rolling `player` badge and a dynamic `online` label
+from its game events; this milestone ports those triggers onto the split
+worker/service architecture.
+
+The runtime adds three commands: `LabelerPlayerJoined { player_uuid }` and
+`LabelerPlayerLeft { player_uuid }` from new `player_logged_in` and
+`player_logged_out` hook helpers, and `LabelerSweep { players }` from the tick
+hook, throttled to one sweep a minute. The worker resolves each UUID through
+`GET <server_api_url>/v1/links/{uuid}`, reads the labeler's active labels with
+`queryLabels`, and writes only the missing ones through the admin
+`POST /v1/labeler/labels` route. A join asserts `player` (with a 30-day `exp`)
+and `online`; a disconnect negates `online`; a sweep refreshes a `player` badge
+whose stored expiry is more than a day behind the fresh one. Unlinked players
+and failed lookups are skipped, and automatic failures stay silent rather than
+interrupting play.
+
+A new `Config.server_admin_token` supplies the admin bearer token; the triggers
+are active only when `labeler_enabled` is on and both `server_api_url` and the
+token are set. The startup path negates every active `online` label left by an
+unclean game stop, through a wildcard `queryLabels` read.
+
+`online` intentionally has no expiry here. atpcraft uses a 30-second expiry
+because its labeler shares the game process; this labeler survives game
+restarts, and the startup recovery clears stale presence, so an expiry would
+only add churn. `admin` and the playtime/achievement milestones need op-level
+and vanilla-stat data the game side does not yet expose; they wait for #111.
+
+No new endpoint or record shape. The only new outbound requests are the
+identity link lookup, the active-label query and the admin emission, all against
+the operator's configured identity service. No atpcraft code is copied.
+
+Verified: `triggers` unit tests pin the RFC 3339 formatting, first-join actions,
+the daily refresh threshold, logout negation and startup subject selection; two
+worker tests against the stub identity service assert the admin token on the
+emission, join presence, logout negation, stale-badge refresh, online
+re-assertion and startup recovery; runtime tests pin the three command wire
+shapes; config tests pin the empty-token default. No live identity service or
+PDS was contacted.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
