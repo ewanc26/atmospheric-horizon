@@ -145,6 +145,17 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   the server and player accounts. Core-NBT aspects and automatic sync remain
   future work. atpcraft was used only as a wire-behaviour reference; no code was
   copied.
+- **M64 — browser skin upload (#113, partial).** Add `/atmospheric skin upload`
+  for already-linked players: the game server requests a one-time
+  `/skin/{token}` URL from `POST /v1/browser/skins`, and the browser signs in
+  with Bluesky, uploads a PNG (at most 1 MiB), and the service publishes the
+  `at.atpcraft.player.skin` record with the worker's Ed25519 endorsement,
+  preserving the cape and other servers' endorsements. Add the optional
+  `ATMOSPHERIC_SERVER_SKIN_KEY` path (the game's `signing-key.json`), a
+  `/skin/callback` OAuth redirect, and the `StartSkinUpload`/`SkinUploadLink`
+  protocol pair. In-game application remains blocked because the pinned
+  Horizon API has no skin/texture setter; atpcraft was used only as a wire
+  reference.
 
 ## [0.3.1] — 2026-11-14
 
