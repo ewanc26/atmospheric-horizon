@@ -21,6 +21,51 @@ pub const PROFILE_COLLECTION: &str = "app.bsky.actor.profile";
 /// The fixed record key of the profile singleton.
 pub const PROFILE_RKEY: &str = "self";
 
+/// A profile field `/atmospheric profile-set` can write, mapped to its record
+/// key (M65). Only the text fields: avatar and banner would need blob uploads.
+pub fn writable_field(field: &str) -> Option<&'static str> {
+    match field {
+        "name" | "displayName" => Some("displayName"),
+        "description" => Some("description"),
+        "pronouns" => Some("pronouns"),
+        _ => None,
+    }
+}
+
+/// Merge one writable field into an existing profile record, preserving every
+/// other field (M65). An empty value removes the field. A missing record starts
+/// with the `$type` and `createdAt` a profile record needs.
+pub fn merge_field(
+    existing: Option<serde_json::Value>,
+    field: &str,
+    value: &str,
+    now: &str,
+) -> Result<serde_json::Value> {
+    let key = writable_field(field).ok_or_else(|| {
+        AtmosphericError::Message(format!(
+            "unsupported profile field '{field}'; use name, description or pronouns"
+        ))
+    })?;
+    let mut record = match existing {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    record.insert(
+        "$type".into(),
+        serde_json::Value::String(PROFILE_COLLECTION.into()),
+    );
+    record
+        .entry("createdAt")
+        .or_insert_with(|| serde_json::Value::String(now.into()));
+    let value = value.trim();
+    if value.is_empty() {
+        record.remove(key);
+    } else {
+        record.insert(key.into(), serde_json::Value::String(value.into()));
+    }
+    Ok(serde_json::Value::Object(record))
+}
+
 /// What the HUD shows for a profile (M24).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProfileDigest {
@@ -416,5 +461,40 @@ mod tests {
             .as_deref(),
             Some("Alice_Smith")
         );
+    }
+
+    #[test]
+    fn profile_merge_preserves_other_fields_and_clears() {
+        let existing = serde_json::json!({
+            "$type": "app.bsky.actor.profile",
+            "displayName": "ewan",
+            "pronouns": "he/him",
+            "avatar": {"$type": "blob"},
+            "createdAt": "2025-01-01T00:00:00.000Z"
+        });
+        let merged = merge_field(
+            Some(existing),
+            "pronouns",
+            " they/them ",
+            "2026-11-15T00:00:00.000Z",
+        )
+        .unwrap();
+        assert_eq!(merged["pronouns"], "they/them");
+        assert_eq!(merged["displayName"], "ewan");
+        assert_eq!(merged["avatar"]["$type"], "blob");
+        assert_eq!(merged["createdAt"], "2025-01-01T00:00:00.000Z");
+
+        let cleared = merge_field(Some(merged), "pronouns", "  ", "later").unwrap();
+        assert!(cleared.get("pronouns").is_none());
+        assert_eq!(cleared["displayName"], "ewan");
+    }
+
+    #[test]
+    fn profile_merge_starts_a_record_and_rejects_unknown_fields() {
+        let record = merge_field(None, "description", " hello ", "now").unwrap();
+        assert_eq!(record["$type"], PROFILE_COLLECTION);
+        assert_eq!(record["createdAt"], "now");
+        assert_eq!(record["description"], "hello");
+        assert!(merge_field(None, "avatar", "x", "now").is_err());
     }
 }

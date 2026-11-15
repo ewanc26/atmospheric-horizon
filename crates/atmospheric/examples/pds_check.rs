@@ -15,6 +15,7 @@
 //! ATMOSPHERIC_POST_CAPE="/path/to/cape.png" \          # optional, M9
 //! ATMOSPHERIC_SKIN_MODEL="slim" \                        # optional, M9
 //! ATMOSPHERIC_POST_SERVER_PROFILE=1 \                    # optional, M10
+//! ATMOSPHERIC_PROFILE_SET="pronouns|they/them" \         # optional, M65
 //! ATMOSPHERIC_FETCH_LIST="at://did:…/app.bsky.graph.list/<rkey>" \  # optional, M11
 //! ATMOSPHERIC_FETCH_LABELS="at://did:…/app.bsky.feed.post/<rkey>" \ # optional, M12
 //! ATMOSPHERIC_LABELER="did:plc:…" \                             # optional, M12
@@ -57,9 +58,9 @@
 //! URL is still printed via the `OAuthAuthorize` event.
 //!
 //! The example spawns the worker exactly as the game side will, sends the
-//! login command, waits for the session event, optionally sends the posts,
-//! prints every event, and shuts the worker down. Exit status is 0 only if
-//! login (and the posts, when the env vars are set) succeeded. The PDS URL
+//! login command, waits for the session event, optionally sends the posts and
+//! a profile-field update, prints every event, and shuts the worker down. Exit
+//! status is 0 only if login (and the selected writes) succeeded. The PDS URL
 //! must be the account's own PDS (resolve the handle's DID to find it), not
 //! always bsky.social.
 
@@ -162,6 +163,7 @@ fn main() {
     let post_cape = env::var("ATMOSPHERIC_POST_CAPE").ok();
     let skin_model = env::var("ATMOSPHERIC_SKIN_MODEL").unwrap_or_else(|_| "default".into());
     let post_server_profile = env::var("ATMOSPHERIC_POST_SERVER_PROFILE").is_ok();
+    let profile_set = env::var("ATMOSPHERIC_PROFILE_SET").ok();
 
     // A throwaway settings folder: the worker reads its config from here.
     let storage_dir: PathBuf = env::temp_dir().join("atmospheric-pds-check");
@@ -304,6 +306,44 @@ fn main() {
                 }
                 Err(error) => {
                     eprintln!("no event from the worker: {error}");
+                    let _ = handle.join();
+                    exit(1);
+                }
+            }
+        }
+    }
+
+    // Optionally update one text field of the logged-in account's profile
+    // (M65), as `<name|description|pronouns>|<text>`; an empty text clears it.
+    if let Some(raw) = profile_set {
+        let (field, value) = raw.split_once('|').unwrap_or((raw.as_str(), ""));
+        command_tx
+            .send(Command::SetProfileField {
+                field: field.trim().into(),
+                value: value.trim().into(),
+            })
+            .expect("send SetProfileField");
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(event) => {
+                    println!("event: {event:?}");
+                    match event {
+                        Event::ProfileUpdated { field, uri } => {
+                            println!("profile field {field} updated: {uri}");
+                            break;
+                        }
+                        Event::Failed { message } => {
+                            eprintln!("profile update failed: {message}");
+                            let _ = command_tx.send(Command::Shutdown);
+                            let _ = handle.join();
+                            exit(1);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(error) => {
+                    eprintln!("no event from the worker: {error}");
+                    let _ = command_tx.send(Command::Shutdown);
                     let _ = handle.join();
                     exit(1);
                 }

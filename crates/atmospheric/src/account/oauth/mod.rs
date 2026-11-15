@@ -34,10 +34,11 @@ pub const DEFAULT_SCOPE: &str = "atproto transition:generic";
 /// (M6), skins (M9) and chat (M5), plus blob uploads (M3/M9). `transition:generic`
 /// already covers these, so they are appended only to a narrow custom base
 /// (M54), matching atpcraft's `effectiveScope`.
-const PLAYER_GRANTS: [&str; 4] = [
+const PLAYER_GRANTS: [&str; 5] = [
     "repo:at.atpcraft.player.snapshot?action=create&action=update&action=delete",
     "repo:at.atpcraft.player.skin?action=create&action=update&action=delete",
     "repo:at.atpcraft.player.chat?action=create&action=update&action=delete",
+    "repo:app.bsky.actor.profile?action=create&action=update",
     "blob:*/*",
 ];
 
