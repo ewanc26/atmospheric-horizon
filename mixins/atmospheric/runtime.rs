@@ -168,14 +168,14 @@ pub enum GameCommand {
     /// reports the linked players whose DID has left the list. The game side
     /// throttles this to the sweep period on `JoinGateState`.
     JoinGateSweep { players: Vec<SweepPlayer> },
-    /// A player joined the server (M61): assert the `player` and `online`
-    /// labels for their linked DID when the labeler triggers are configured.
-    LabelerPlayerJoined { player_uuid: String },
     /// A player disconnected (M61): negate their `online` label.
     LabelerPlayerLeft { player_uuid: String },
-    /// Re-evaluate the online players' labels (M61): refresh a stale `player`
-    /// badge and re-assert a missing `online` label.
-    LabelerSweep { players: Vec<SweepPlayer> },
+    /// Re-evaluate the online players' labels (M61/M62). A join forces the
+    /// next tick to send this, and the periodic sweep sends it once a minute.
+    /// Each player carries the op level and vanilla statistics captured
+    /// locally; the worker asserts the justified status and milestone labels
+    /// and negates the ones it does not own the justification for.
+    LabelerSweep { players: Vec<LabelerPlayer> },
     /// Read a player's `at.atpcraft.player.chat` records (their mirrored
     /// in-game chat history) from their own PDS (M16, read side of the M5
     /// chat mirror). Unsigned records by design — no endorsement to verify.
@@ -449,6 +449,20 @@ pub struct ServerDigest {
 pub struct SweepPlayer {
     pub player_uuid: String,
     pub player_name: String,
+}
+
+/// One online player in an M61/M62 label sweep. Plain data: the worker side
+/// has the same struct in the `atmospheric` crate. The stored fields never go
+/// to the labeler; only the resulting label values do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelerPlayer {
+    pub player_uuid: String,
+    pub player_name: String,
+    pub admin: bool,
+    pub play_time_ticks: u64,
+    pub mob_kills: u64,
+    pub deaths: u64,
+    pub dragon_kills: u64,
 }
 
 /// Events the worker thread reports back to the game side.
@@ -956,8 +970,11 @@ static JOIN_GATE_KICKS: OnceLock<Mutex<Vec<SweepPlayer>>> = OnceLock::new();
 /// The M61 label sweep period (seconds) and the time of the last sweep. The
 /// worker ignores the trigger when the labeler is disabled or unconfigured;
 /// the game side never schedules it itself, so a server tick is the clock.
+/// A join sets the request flag so the next tick captures that player's
+/// statistics and emits their labels without waiting for the minute.
 const LABELER_SWEEP_SECONDS: u64 = 60;
 static LABELER_LAST_SWEEP: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
+static LABELER_SWEEP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// How many status lines the HUD shows at once.
 pub const STATUS_LINES_MAX: usize = 3;
@@ -1718,13 +1735,12 @@ pub fn drain_join_gate_kicks() -> Vec<SweepPlayer> {
         .unwrap_or_default()
 }
 
-/// Tell the worker a player joined so it can assert their M61 player-activity
-/// labels. The worker resolves the UUID through the identity service and stays
-/// silent until the labeler triggers are configured.
-pub fn labeler_player_joined(player_uuid: &str) {
-    send(GameCommand::LabelerPlayerJoined {
-        player_uuid: player_uuid.into(),
-    });
+/// A player joined (M61/M62): force the next tick's label sweep, so their op
+/// level and vanilla statistics are captured immediately instead of waiting
+/// for the minute. The worker resolves the UUID through the identity service
+/// and stays silent until the labeler triggers are configured.
+pub fn labeler_player_joined() {
+    LABELER_SWEEP_REQUESTED.store(true, Ordering::Release);
 }
 
 /// Tell the worker a player disconnected so it can negate their `online`
@@ -1735,17 +1751,23 @@ pub fn labeler_player_left(player_uuid: &str) {
     });
 }
 
-/// Is the M61 label sweep due? The tick hook calls this every tick; the worker
-/// never schedules the sweep itself. A missing worker configuration is not a
-/// reason to skip: the command is cheap and the worker decides.
+/// Is the M61 label sweep due? A join forces it; otherwise the tick hook
+/// throttles to one a minute. The worker never schedules the sweep itself. A
+/// missing worker configuration is not a reason to skip: the command is cheap
+/// and the worker decides.
 pub fn labeler_sweep_due() -> bool {
+    if LABELER_SWEEP_REQUESTED.load(Ordering::Acquire) {
+        return true;
+    }
     let last = labeler_last_sweep_slot().lock().ok().and_then(|slot| *slot);
     sweep_due(true, LABELER_SWEEP_SECONDS, last, std::time::Instant::now())
 }
 
-/// Send the online players to the worker for an M61 label sweep. The time is
-/// recorded even when nobody is online; nothing is sent for an empty list.
-pub fn labeler_sweep(players: Vec<SweepPlayer>) {
+/// Send the online players and their captured state to the worker for an M61
+/// label sweep. The time is recorded even when nobody is online; nothing is
+/// sent for an empty list, and a pending join request is cleared either way.
+pub fn labeler_sweep(players: Vec<LabelerPlayer>) {
+    LABELER_SWEEP_REQUESTED.store(false, Ordering::Release);
     if let Ok(mut slot) = labeler_last_sweep_slot().lock() {
         *slot = Some(std::time::Instant::now());
     }
@@ -2096,6 +2118,27 @@ fn sweep_players_json(players: &[SweepPlayer]) -> Json {
                 jobj(vec![
                     ("player_uuid", jstr(&p.player_uuid)),
                     ("player_name", jstr(&p.player_name)),
+                ])
+            })
+            .collect(),
+    )
+}
+
+/// A JSON array of M61/M62 label-sweep players, matching the serde shape of
+/// `Vec<LabelerPlayer>`.
+fn labeler_players_json(players: &[LabelerPlayer]) -> Json {
+    Json::Arr(
+        players
+            .iter()
+            .map(|p| {
+                jobj(vec![
+                    ("player_uuid", jstr(&p.player_uuid)),
+                    ("player_name", jstr(&p.player_name)),
+                    ("admin", jbool(p.admin)),
+                    ("play_time_ticks", juint(p.play_time_ticks)),
+                    ("mob_kills", juint(p.mob_kills)),
+                    ("deaths", juint(p.deaths)),
+                    ("dragon_kills", juint(p.dragon_kills)),
                 ])
             })
             .collect(),
@@ -2526,17 +2569,13 @@ fn encode_command(command: &GameCommand) -> String {
             "JoinGateSweep",
             jobj(vec![("players", sweep_players_json(players))]),
         )]),
-        GameCommand::LabelerPlayerJoined { player_uuid } => jobj(vec![(
-            "LabelerPlayerJoined",
-            jobj(vec![("player_uuid", jstr(player_uuid))]),
-        )]),
         GameCommand::LabelerPlayerLeft { player_uuid } => jobj(vec![(
             "LabelerPlayerLeft",
             jobj(vec![("player_uuid", jstr(player_uuid))]),
         )]),
         GameCommand::LabelerSweep { players } => jobj(vec![(
             "LabelerSweep",
-            jobj(vec![("players", sweep_players_json(players))]),
+            jobj(vec![("players", labeler_players_json(players))]),
         )]),
         GameCommand::FetchChat { subject } => {
             jobj(vec![("FetchChat", jobj(vec![("subject", jstr(subject))]))])
@@ -3518,13 +3557,7 @@ mod tests {
     }
 
     #[test]
-    fn labeler_triggers_encode_with_their_player_ids() {
-        assert_eq!(
-            encode_command(&GameCommand::LabelerPlayerJoined {
-                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
-            }),
-            r#"{"LabelerPlayerJoined":{"player_uuid":"00000000-0000-4000-8000-000000000001"}}"#
-        );
+    fn labeler_triggers_encode_with_their_player_ids_and_state() {
         assert_eq!(
             encode_command(&GameCommand::LabelerPlayerLeft {
                 player_uuid: "00000000-0000-4000-8000-000000000001".into(),
@@ -3533,12 +3566,17 @@ mod tests {
         );
         assert_eq!(
             encode_command(&GameCommand::LabelerSweep {
-                players: vec![SweepPlayer {
+                players: vec![LabelerPlayer {
                     player_uuid: "00000000-0000-4000-8000-000000000001".into(),
                     player_name: "Alex".into(),
+                    admin: true,
+                    play_time_ticks: 72_000_000,
+                    mob_kills: 1_000,
+                    deaths: 100,
+                    dragon_kills: 1,
                 }],
             }),
-            r#"{"LabelerSweep":{"players":[{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}]}}"#
+            r#"{"LabelerSweep":{"players":[{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex","admin":true,"play_time_ticks":72000000,"mob_kills":1000,"deaths":100,"dragon_kills":1}]}}"#
         );
     }
 

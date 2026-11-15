@@ -31,6 +31,21 @@ pub struct SweepPlayer {
     pub player_name: String,
 }
 
+/// One online player in an M61/M62 label sweep: the UUID and name the identity
+/// service resolves, plus the op level and vanilla statistics captured locally
+/// by the game tick. None of these fields is sent to the labeler; only the
+/// resulting label values are.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabelerPlayer {
+    pub player_uuid: String,
+    pub player_name: String,
+    pub admin: bool,
+    pub play_time_ticks: u64,
+    pub mob_kills: u64,
+    pub deaths: u64,
+    pub dragon_kills: u64,
+}
+
 /// What the game side asks the worker thread to do.
 // Serde: the sidecar worker binary (M17) reads/writes these as newline-
 // delimited JSON over stdio, externally tagged (the serde default):
@@ -172,15 +187,14 @@ pub enum Command {
     /// has left the list. The game side throttles this to
     /// `join_gate_sweep_seconds`.
     JoinGateSweep { players: Vec<SweepPlayer> },
-    /// A linked player joined the server (M61): assert the `player` and
-    /// `online` labels for their DID when the labeler triggers are configured.
-    LabelerPlayerJoined { player_uuid: String },
     /// A player disconnected (M61): negate their `online` label.
     LabelerPlayerLeft { player_uuid: String },
-    /// Re-evaluate the online players' labels (M61). The game side throttles
-    /// this to one sweep a minute; the worker refreshes stale `player` badges
-    /// and re-asserts a missing `online` label.
-    LabelerSweep { players: Vec<SweepPlayer> },
+    /// Re-evaluate the online players' labels (M61/M62). A join or the
+    /// once-a-minute tick sweep sends this with the op level and vanilla
+    /// statistics captured locally. The worker refreshes stale `player` badges,
+    /// asserts the status and milestone labels the state justifies, and negates
+    /// the ones it does not. `vip` and `donor` are never touched.
+    LabelerSweep { players: Vec<LabelerPlayer> },
     /// Read a player's `at.atpcraft.player.chat` records (their mirrored
     /// in-game chat history) from their own PDS (M16, the read side of the
     /// M5 chat mirror). Chat records are unsigned by design, so there is no
@@ -551,13 +565,6 @@ mod tests {
             r#"{"JoinGateSweep":{"players":[{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}]}}"#
         );
         assert_eq!(
-            serde_json::to_string(&Command::LabelerPlayerJoined {
-                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
-            })
-            .unwrap(),
-            r#"{"LabelerPlayerJoined":{"player_uuid":"00000000-0000-4000-8000-000000000001"}}"#
-        );
-        assert_eq!(
             serde_json::to_string(&Command::LabelerPlayerLeft {
                 player_uuid: "00000000-0000-4000-8000-000000000001".into(),
             })
@@ -566,13 +573,18 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_string(&Command::LabelerSweep {
-                players: vec![SweepPlayer {
+                players: vec![LabelerPlayer {
                     player_uuid: "00000000-0000-4000-8000-000000000001".into(),
                     player_name: "Alex".into(),
+                    admin: true,
+                    play_time_ticks: 72_000_000,
+                    mob_kills: 1_000,
+                    deaths: 100,
+                    dragon_kills: 1,
                 }],
             })
             .unwrap(),
-            r#"{"LabelerSweep":{"players":[{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}]}}"#
+            r#"{"LabelerSweep":{"players":[{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex","admin":true,"play_time_ticks":72000000,"mob_kills":1000,"deaths":100,"dragon_kills":1}]}}"#
         );
         // SaveConfig carries the full Config; the game side sends the Settings
         // subset and container-level serde(default) fills the rest.
