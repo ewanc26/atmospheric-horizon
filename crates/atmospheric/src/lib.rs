@@ -301,6 +301,11 @@ pub enum Command {
     /// `description` or `pronouns`; an empty `value` clears it. Every other
     /// field in the record is preserved.
     SetProfileField { field: String, value: String },
+    /// Upload a local PNG or JPEG as the logged-in account's avatar or banner
+    /// (`app.bsky.actor.profile` at rkey `self`, M66). `field` is `avatar` or
+    /// `banner`; the image is capped at the profile lexicon's 1,000,000 bytes.
+    /// Every other field in the record is preserved.
+    SetProfileImage { field: String, path: String },
     /// Read a player's latest `at.atpcraft.player.skin` record from their own
     /// PDS, verify its endorsement, and — only when it verifies — download
     /// the skin/cape blobs into the mod's storage folder (M14, the atpcraft
@@ -460,7 +465,7 @@ pub enum Event {
         via: String,
         profile: Box<profiles::ProfileDigest>,
     },
-    /// One field of the logged-in account's profile was updated (M65).
+    /// One field of the logged-in account's profile was updated (M65/M66).
     ProfileUpdated { field: String, uri: String },
     /// The latest skin record of a player (M14, skin-sync read side): the DID
     /// (`subject`), the PDS it was read from (`via`), and the digest with its

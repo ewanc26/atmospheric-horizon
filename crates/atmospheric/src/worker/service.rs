@@ -660,6 +660,13 @@ impl Worker {
                     Err(error) => self.fail(format!("could not update the profile: {error}")),
                 }
             }
+            Command::SetProfileImage { field, path } => {
+                self.ensure_oauth_fresh().await;
+                match self.set_profile_image(&field, &path).await {
+                    Ok(uri) => self.emit(Event::ProfileUpdated { field, uri }),
+                    Err(error) => self.fail(format!("could not update the profile image: {error}")),
+                }
+            }
             Command::PostText { text } => {
                 self.ensure_oauth_fresh().await;
                 let result = match (&self.agent, &self.did) {
@@ -1177,6 +1184,65 @@ impl Worker {
                 "unsupported profile field '{field}'; use name, description or pronouns"
             )));
         }
+        let existing = self.existing_profile(agent, did).await?;
+        let now = atrium_api::types::string::Datetime::now()
+            .as_str()
+            .to_string();
+        let record = profiles::merge_field(existing, field, value, &now)?;
+        self.write_profile(agent, did, record).await
+    }
+
+    /// Upload a local PNG/JPEG and merge its blob reference into the logged-in
+    /// account's profile (M66). The profile lexicon accepts only PNG and JPEG
+    /// blobs up to 1,000,000 bytes. The existing record is fetched before the
+    /// upload so every other field survives the write.
+    async fn set_profile_image(&self, field: &str, path: &str) -> crate::error::Result<String> {
+        let (Some(agent), Some(did)) = (&self.agent, &self.did) else {
+            return Err(AtmosphericError::NotLoggedIn);
+        };
+        if profiles::image_field(field).is_none() {
+            return Err(AtmosphericError::Message(format!(
+                "unsupported profile image field '{field}'; use avatar or banner"
+            )));
+        }
+        let bytes = std::fs::read(path).map_err(|error| {
+            AtmosphericError::Message(format!("could not read {path}: {error}"))
+        })?;
+        let Some(mime) = actions::image_mime(&bytes) else {
+            return Err(AtmosphericError::Message(format!(
+                "{path} is not a PNG or JPEG image"
+            )));
+        };
+        if !matches!(mime, "image/png" | "image/jpeg") {
+            return Err(AtmosphericError::Message(format!(
+                "{path} is {mime}; profile images must be PNG or JPEG"
+            )));
+        }
+        if bytes.len() > profiles::PROFILE_IMAGE_MAX_BYTES {
+            return Err(AtmosphericError::Message(format!(
+                "{path} is {} bytes; profile images are capped at {} bytes",
+                bytes.len(),
+                profiles::PROFILE_IMAGE_MAX_BYTES
+            )));
+        }
+        let existing = self.existing_profile(agent, did).await?;
+        let blob = actions::upload_blob(agent, bytes).await?;
+        let blob = serde_json::to_value(&blob).map_err(|error| {
+            AtmosphericError::Message(format!("could not encode the uploaded blob: {error}"))
+        })?;
+        let now = atrium_api::types::string::Datetime::now()
+            .as_str()
+            .to_string();
+        let record = profiles::merge_image(existing, field, blob, &now)?;
+        self.write_profile(agent, did, record).await
+    }
+
+    /// Read the logged-in account's profile record as JSON, if it exists.
+    async fn existing_profile(
+        &self,
+        agent: &Agent,
+        did: &str,
+    ) -> crate::error::Result<Option<serde_json::Value>> {
         let existing = actions::get_record(
             agent,
             did,
@@ -1184,16 +1250,21 @@ impl Worker {
             profiles::PROFILE_RKEY,
         )
         .await?;
-        let existing = existing
+        existing
             .map(serde_json::to_value)
             .transpose()
             .map_err(|error| {
                 AtmosphericError::Message(format!("could not read the profile record: {error}"))
-            })?;
-        let now = atrium_api::types::string::Datetime::now()
-            .as_str()
-            .to_string();
-        let record = profiles::merge_field(existing, field, value, &now)?;
+            })
+    }
+
+    /// Upsert the merged profile record with PDS validation on.
+    async fn write_profile(
+        &self,
+        agent: &Agent,
+        did: &str,
+        record: serde_json::Value,
+    ) -> crate::error::Result<String> {
         let record: atrium_api::types::Unknown =
             serde_json::from_value(record).map_err(|error| {
                 AtmosphericError::Message(format!("invalid profile record: {error}"))
@@ -6437,6 +6508,115 @@ mod tests {
         assert!(second["record"].get("pronouns").is_none());
         assert_eq!(second["record"]["displayName"], "ewan");
         assert_eq!(second["record"]["avatar"]["$type"], "blob");
+    }
+
+    #[test]
+    fn profile_image_write_uploads_and_preserves_the_record() {
+        let pds = StubPds::start(false);
+        pds.seed_record(
+            profiles::PROFILE_COLLECTION,
+            profiles::PROFILE_RKEY,
+            serde_json::json!({
+                "$type": profiles::PROFILE_COLLECTION,
+                "displayName": "ewan",
+                "pronouns": "he/him",
+                "avatar": {
+                    "$type": "blob",
+                    "ref": {"$link": "bafyoldavatar"},
+                    "mimeType": "image/png",
+                    "size": 3
+                },
+                "banner": {
+                    "$type": "blob",
+                    "ref": {"$link": "bafyoldbanner"},
+                    "mimeType": "image/png",
+                    "size": 4
+                },
+                "pinnedPost": {"uri": "at://did:plc:stubuser/app.bsky.feed.post/1"},
+                "createdAt": "2025-01-01T00:00:00.000Z"
+            }),
+        );
+        let dir = temp_dir("profile-image");
+        write_config(&dir, &test_config(pds.url.clone()));
+        let avatar_path = dir.join("avatar.png");
+        let avatar = tiny_png();
+        std::fs::write(&avatar_path, &avatar).unwrap();
+        let banner_path = dir.join("banner.png");
+        let mut banner = tiny_png();
+        banner.push(1);
+        std::fs::write(&banner_path, &banner).unwrap();
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+
+        command_tx
+            .send(Command::SetProfileImage {
+                field: "avatar".into(),
+                path: avatar_path.display().to_string(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::ProfileUpdated { .. })) {
+            Event::ProfileUpdated { field, uri } => {
+                assert_eq!(field, "avatar");
+                assert!(uri.ends_with("/app.bsky.actor.profile/self"), "{uri}");
+            }
+            other => panic!("expected ProfileUpdated, got {other:?}"),
+        }
+
+        command_tx
+            .send(Command::SetProfileImage {
+                field: "banner".into(),
+                path: banner_path.display().to_string(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::ProfileUpdated { .. })) {
+            Event::ProfileUpdated { field, .. } => assert_eq!(field, "banner"),
+            other => panic!("expected ProfileUpdated, got {other:?}"),
+        }
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let uploads: Vec<_> = pds
+            .requests()
+            .into_iter()
+            .filter(|request| request.path == "/xrpc/com.atproto.repo.uploadBlob")
+            .collect();
+        assert_eq!(uploads.len(), 2, "one upload for each image");
+        assert_eq!(uploads[0].body_bytes, avatar);
+        assert_eq!(uploads[1].body_bytes, banner);
+
+        let puts: Vec<_> = pds
+            .requests()
+            .into_iter()
+            .filter(|request| request.path == "/xrpc/com.atproto.repo.putRecord")
+            .collect();
+        assert_eq!(puts.len(), 2);
+        let first: serde_json::Value = serde_json::from_str(&puts[0].body).unwrap();
+        assert_eq!(first["validate"], true);
+        assert_eq!(first["record"]["displayName"], "ewan");
+        assert_eq!(first["record"]["pronouns"], "he/him");
+        assert_eq!(first["record"]["avatar"]["$type"], "blob");
+        assert_eq!(first["record"]["avatar"]["mimeType"], "image/png");
+        assert_eq!(first["record"]["avatar"]["size"], avatar.len());
+        assert_eq!(first["record"]["banner"]["ref"]["$link"], "bafyoldbanner");
+        assert_eq!(
+            first["record"]["pinnedPost"]["uri"],
+            "at://did:plc:stubuser/app.bsky.feed.post/1"
+        );
+        assert_eq!(first["record"]["createdAt"], "2025-01-01T00:00:00.000Z");
+        let first_avatar = first["record"]["avatar"]["ref"]["$link"].clone();
+
+        let second: serde_json::Value = serde_json::from_str(&puts[1].body).unwrap();
+        assert_eq!(second["validate"], true);
+        assert_eq!(second["record"]["displayName"], "ewan");
+        assert_eq!(second["record"]["avatar"]["ref"]["$link"], first_avatar);
+        assert_eq!(second["record"]["banner"]["$type"], "blob");
+        assert_eq!(second["record"]["banner"]["mimeType"], "image/png");
+        assert_eq!(second["record"]["banner"]["size"], banner.len());
+        assert_eq!(second["record"]["createdAt"], "2025-01-01T00:00:00.000Z");
     }
 
     #[test]

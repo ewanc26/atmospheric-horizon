@@ -31,7 +31,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const DEFAULT_SCOPE: &str = "atproto transition:generic";
 
 /// The repo grants the implemented player-write features need: snapshots
-/// (M6), skins (M9) and chat (M5), plus blob uploads (M3/M9). `transition:generic`
+/// (M6), skins (M9) and chat (M5), plus blob uploads (M3/M9/M66). `transition:generic`
 /// already covers these, so they are appended only to a narrow custom base
 /// (M54), matching atpcraft's `effectiveScope`.
 const PLAYER_GRANTS: [&str; 5] = [

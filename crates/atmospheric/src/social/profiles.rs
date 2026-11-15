@@ -21,8 +21,11 @@ pub const PROFILE_COLLECTION: &str = "app.bsky.actor.profile";
 /// The fixed record key of the profile singleton.
 pub const PROFILE_RKEY: &str = "self";
 
-/// A profile field `/atmospheric profile-set` can write, mapped to its record
-/// key (M65). Only the text fields: avatar and banner would need blob uploads.
+/// The profile lexicon's cap for avatar and banner blobs (1,000,000 bytes).
+pub const PROFILE_IMAGE_MAX_BYTES: usize = 1_000_000;
+
+/// A text field `/atmospheric profile-set` can write, mapped to its record key
+/// (M65).
 pub fn writable_field(field: &str) -> Option<&'static str> {
     match field {
         "name" | "displayName" => Some("displayName"),
@@ -32,20 +35,22 @@ pub fn writable_field(field: &str) -> Option<&'static str> {
     }
 }
 
-/// Merge one writable field into an existing profile record, preserving every
-/// other field (M65). An empty value removes the field. A missing record starts
-/// with the `$type` and `createdAt` a profile record needs.
-pub fn merge_field(
+/// An image field `/atmospheric profile-set` can upload, mapped to its record
+/// key (M66).
+pub fn image_field(field: &str) -> Option<&'static str> {
+    match field {
+        "avatar" => Some("avatar"),
+        "banner" => Some("banner"),
+        _ => None,
+    }
+}
+
+/// Start from the existing record object and add the fields every profile
+/// record needs. A missing or malformed record starts empty.
+fn record_base(
     existing: Option<serde_json::Value>,
-    field: &str,
-    value: &str,
     now: &str,
-) -> Result<serde_json::Value> {
-    let key = writable_field(field).ok_or_else(|| {
-        AtmosphericError::Message(format!(
-            "unsupported profile field '{field}'; use name, description or pronouns"
-        ))
-    })?;
+) -> serde_json::Map<String, serde_json::Value> {
     let mut record = match existing {
         Some(serde_json::Value::Object(map)) => map,
         _ => serde_json::Map::new(),
@@ -57,12 +62,49 @@ pub fn merge_field(
     record
         .entry("createdAt")
         .or_insert_with(|| serde_json::Value::String(now.into()));
+    record
+}
+
+/// Merge one writable text field into an existing profile record, preserving
+/// every other field (M65). An empty value removes the field. A missing record
+/// starts with the `$type` and `createdAt` a profile record needs.
+pub fn merge_field(
+    existing: Option<serde_json::Value>,
+    field: &str,
+    value: &str,
+    now: &str,
+) -> Result<serde_json::Value> {
+    let key = writable_field(field).ok_or_else(|| {
+        AtmosphericError::Message(format!(
+            "unsupported profile field '{field}'; use name, description or pronouns"
+        ))
+    })?;
+    let mut record = record_base(existing, now);
     let value = value.trim();
     if value.is_empty() {
         record.remove(key);
     } else {
         record.insert(key.into(), serde_json::Value::String(value.into()));
     }
+    Ok(serde_json::Value::Object(record))
+}
+
+/// Merge one uploaded image blob into an existing profile record, preserving
+/// every other field (M66). `blob` is the blob reference returned by
+/// `com.atproto.repo.uploadBlob`.
+pub fn merge_image(
+    existing: Option<serde_json::Value>,
+    field: &str,
+    blob: serde_json::Value,
+    now: &str,
+) -> Result<serde_json::Value> {
+    let key = image_field(field).ok_or_else(|| {
+        AtmosphericError::Message(format!(
+            "unsupported profile image field '{field}'; use avatar or banner"
+        ))
+    })?;
+    let mut record = record_base(existing, now);
+    record.insert(key.into(), blob);
     Ok(serde_json::Value::Object(record))
 }
 
@@ -496,5 +538,39 @@ mod tests {
         assert_eq!(record["createdAt"], "now");
         assert_eq!(record["description"], "hello");
         assert!(merge_field(None, "avatar", "x", "now").is_err());
+    }
+
+    #[test]
+    fn profile_image_merge_replaces_one_blob_and_preserves_the_rest() {
+        let existing = serde_json::json!({
+            "$type": PROFILE_COLLECTION,
+            "displayName": "ewan",
+            "pronouns": "he/him",
+            "avatar": {"$type": "blob", "ref": {"$link": "old-avatar"}},
+            "banner": {"$type": "blob", "ref": {"$link": "old-banner"}},
+            "pinnedPost": {"uri": "at://did:plc:a/app.bsky.feed.post/1"},
+            "createdAt": "2025-01-01T00:00:00.000Z"
+        });
+        let avatar = serde_json::json!({
+            "$type": "blob",
+            "ref": {"$link": "new-avatar"},
+            "mimeType": "image/png",
+            "size": 123
+        });
+        let merged = merge_image(Some(existing), "avatar", avatar.clone(), "later").unwrap();
+        assert_eq!(merged["avatar"], avatar);
+        assert_eq!(merged["banner"]["ref"]["$link"], "old-banner");
+        assert_eq!(merged["displayName"], "ewan");
+        assert_eq!(merged["pronouns"], "he/him");
+        assert_eq!(
+            merged["pinnedPost"]["uri"],
+            "at://did:plc:a/app.bsky.feed.post/1"
+        );
+        assert_eq!(merged["createdAt"], "2025-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn profile_image_merge_rejects_text_fields() {
+        assert!(merge_image(None, "pronouns", serde_json::json!({}), "now").is_err());
     }
 }
