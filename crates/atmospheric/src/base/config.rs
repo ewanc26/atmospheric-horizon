@@ -50,9 +50,11 @@ pub struct Config {
     /// session costs an in-memory check. Floored at one second.
     pub server_account_token_refresh_seconds: u64,
     /// Publish the `app.bsky.labeler.service` declaration as the server
-    /// account when it logs in or resumes (M59). Off by default, matching
-    /// atpcraft's `bluesky-labeler-enabled`; the labeler HTTP service itself
-    /// is enabled separately by `ATMOSPHERIC_SERVER_LABELER_DID`.
+    /// account when it logs in or resumes (M59), and arm the M61 game
+    /// triggers. Off by default, matching atpcraft's
+    /// `bluesky-labeler-enabled`; the labeler HTTP service itself is enabled
+    /// separately by `ATMOSPHERIC_SERVER_LABELER_DID`, and the triggers also
+    /// need `server_admin_token`.
     pub labeler_enabled: bool,
     /// Post the death message automatically when the player dies.
     pub post_death_messages: bool,
@@ -110,6 +112,11 @@ pub struct Config {
     /// a player starts a browser link (M39). Empty disables the browser flow;
     /// it is a server-only secret and should never be published.
     pub server_link_token: String,
+    /// The identity service's admin bearer token (M61). The worker uses it to
+    /// sign player-activity labels through `POST /v1/labeler/labels`; empty
+    /// disables the game triggers. It matches `ATMOSPHERIC_SERVER_TOKEN` and
+    /// is a server-only secret.
+    pub server_admin_token: String,
     /// Lifetime of a one-time browser link in seconds (M55). Default 600,
     /// matching atpcraft's ten-minute pairing token. The identity service
     /// accepts 60 through 3600 seconds.
@@ -181,6 +188,7 @@ impl Default for Config {
             appview_url: crate::lists::DEFAULT_APPVIEW.into(),
             server_api_url: String::new(),
             server_link_token: String::new(),
+            server_admin_token: String::new(),
             browser_link_ttl_seconds: 600,
             join_gate_enabled: false,
             join_gate_list: String::new(),
@@ -257,6 +265,7 @@ mod tests {
             appview_url: crate::lists::DEFAULT_APPVIEW.into(),
             server_api_url: "https://identity.example".into(),
             server_link_token: "server-link-secret".into(),
+            server_admin_token: "server-admin-secret".into(),
             browser_link_ttl_seconds: 900,
             join_gate_enabled: true,
             join_gate_list: "at://did:plc:owner/app.bsky.graph.list/3gate".into(),
@@ -294,6 +303,7 @@ mod tests {
         assert_eq!(back.colibri_appview_url, "https://appview.example");
         assert_eq!(back.server_api_url, "https://identity.example");
         assert_eq!(back.server_link_token, "server-link-secret");
+        assert_eq!(back.server_admin_token, "server-admin-secret");
         assert_eq!(back.browser_link_ttl_seconds, 900);
         assert!(back.join_gate_enabled);
         assert_eq!(
@@ -339,6 +349,7 @@ mod tests {
         assert!(config.oauth_scope.is_empty());
         assert_eq!(config.colibri_appview_url, "https://api.colibri.social");
         assert!(config.server_api_url.is_empty());
+        assert!(config.server_admin_token.is_empty());
         assert_eq!(config.browser_link_ttl_seconds, 600);
         assert!(config.colibri_server_events_fallback_enabled);
     }

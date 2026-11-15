@@ -168,6 +168,14 @@ pub enum GameCommand {
     /// reports the linked players whose DID has left the list. The game side
     /// throttles this to the sweep period on `JoinGateState`.
     JoinGateSweep { players: Vec<SweepPlayer> },
+    /// A player joined the server (M61): assert the `player` and `online`
+    /// labels for their linked DID when the labeler triggers are configured.
+    LabelerPlayerJoined { player_uuid: String },
+    /// A player disconnected (M61): negate their `online` label.
+    LabelerPlayerLeft { player_uuid: String },
+    /// Re-evaluate the online players' labels (M61): refresh a stale `player`
+    /// badge and re-assert a missing `online` label.
+    LabelerSweep { players: Vec<SweepPlayer> },
     /// Read a player's `at.atpcraft.player.chat` records (their mirrored
     /// in-game chat history) from their own PDS (M16, read side of the M5
     /// chat mirror). Unsigned records by design — no endorsement to verify.
@@ -945,6 +953,11 @@ static JOIN_GATE_LAST_SWEEP: OnceLock<Mutex<Option<std::time::Instant>>> = OnceL
 /// Kicks the worker returned for online players who left the list (M42),
 /// drained by the tick hook to run `kick`.
 static JOIN_GATE_KICKS: OnceLock<Mutex<Vec<SweepPlayer>>> = OnceLock::new();
+/// The M61 label sweep period (seconds) and the time of the last sweep. The
+/// worker ignores the trigger when the labeler is disabled or unconfigured;
+/// the game side never schedules it itself, so a server tick is the clock.
+const LABELER_SWEEP_SECONDS: u64 = 60;
+static LABELER_LAST_SWEEP: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
 
 /// How many status lines the HUD shows at once.
 pub const STATUS_LINES_MAX: usize = 3;
@@ -994,6 +1007,10 @@ fn join_gate_last_sweep_slot() -> &'static Mutex<Option<std::time::Instant>> {
 
 fn join_gate_kicks_slot() -> &'static Mutex<Vec<SweepPlayer>> {
     JOIN_GATE_KICKS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn labeler_last_sweep_slot() -> &'static Mutex<Option<std::time::Instant>> {
+    LABELER_LAST_SWEEP.get_or_init(|| Mutex::new(None))
 }
 
 /// Cache worker gate events. They are control messages, not HUD lines.
@@ -1699,6 +1716,43 @@ pub fn drain_join_gate_kicks() -> Vec<SweepPlayer> {
         .lock()
         .map(|mut slot| std::mem::take(&mut *slot))
         .unwrap_or_default()
+}
+
+/// Tell the worker a player joined so it can assert their M61 player-activity
+/// labels. The worker resolves the UUID through the identity service and stays
+/// silent until the labeler triggers are configured.
+pub fn labeler_player_joined(player_uuid: &str) {
+    send(GameCommand::LabelerPlayerJoined {
+        player_uuid: player_uuid.into(),
+    });
+}
+
+/// Tell the worker a player disconnected so it can negate their `online`
+/// label (M61). The rolling `player` badge is not negated.
+pub fn labeler_player_left(player_uuid: &str) {
+    send(GameCommand::LabelerPlayerLeft {
+        player_uuid: player_uuid.into(),
+    });
+}
+
+/// Is the M61 label sweep due? The tick hook calls this every tick; the worker
+/// never schedules the sweep itself. A missing worker configuration is not a
+/// reason to skip: the command is cheap and the worker decides.
+pub fn labeler_sweep_due() -> bool {
+    let last = labeler_last_sweep_slot().lock().ok().and_then(|slot| *slot);
+    sweep_due(true, LABELER_SWEEP_SECONDS, last, std::time::Instant::now())
+}
+
+/// Send the online players to the worker for an M61 label sweep. The time is
+/// recorded even when nobody is online; nothing is sent for an empty list.
+pub fn labeler_sweep(players: Vec<SweepPlayer>) {
+    if let Ok(mut slot) = labeler_last_sweep_slot().lock() {
+        *slot = Some(std::time::Instant::now());
+    }
+    if players.is_empty() {
+        return;
+    }
+    send(GameCommand::LabelerSweep { players });
 }
 
 /// Ask the worker to read a player's chat history (M16). `subject` is a DID
@@ -2470,6 +2524,18 @@ fn encode_command(command: &GameCommand) -> String {
         )]),
         GameCommand::JoinGateSweep { players } => jobj(vec![(
             "JoinGateSweep",
+            jobj(vec![("players", sweep_players_json(players))]),
+        )]),
+        GameCommand::LabelerPlayerJoined { player_uuid } => jobj(vec![(
+            "LabelerPlayerJoined",
+            jobj(vec![("player_uuid", jstr(player_uuid))]),
+        )]),
+        GameCommand::LabelerPlayerLeft { player_uuid } => jobj(vec![(
+            "LabelerPlayerLeft",
+            jobj(vec![("player_uuid", jstr(player_uuid))]),
+        )]),
+        GameCommand::LabelerSweep { players } => jobj(vec![(
+            "LabelerSweep",
             jobj(vec![("players", sweep_players_json(players))]),
         )]),
         GameCommand::FetchChat { subject } => {
@@ -3449,6 +3515,31 @@ mod tests {
         prune_expired(&mut status, now);
         assert_eq!(status.len(), 1);
         assert_eq!(status[0].0, "fresh");
+    }
+
+    #[test]
+    fn labeler_triggers_encode_with_their_player_ids() {
+        assert_eq!(
+            encode_command(&GameCommand::LabelerPlayerJoined {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+            }),
+            r#"{"LabelerPlayerJoined":{"player_uuid":"00000000-0000-4000-8000-000000000001"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::LabelerPlayerLeft {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+            }),
+            r#"{"LabelerPlayerLeft":{"player_uuid":"00000000-0000-4000-8000-000000000001"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::LabelerSweep {
+                players: vec![SweepPlayer {
+                    player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                    player_name: "Alex".into(),
+                }],
+            }),
+            r#"{"LabelerSweep":{"players":[{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex"}]}}"#
+        );
     }
 
     #[test]

@@ -15,3 +15,4 @@ pub mod presence;
 pub mod profiles;
 pub mod servers;
 pub mod skins;
+pub mod triggers;
