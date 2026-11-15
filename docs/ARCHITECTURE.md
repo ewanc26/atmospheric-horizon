@@ -1210,7 +1210,7 @@ Verified: the existing worker test pins the explicit override; a new stub-PDS te
 
 atpcraft builds `ServerProfileWriter.Identity` with `name = atproto-server-name.ifBlank { bluesky-client-name }`, and `ServerCapabilities.of` derives `join-gate`, `player-data-sync`, `skin-sync` and `labeler` from the live feature wiring. This mod previously fell back to the account handle and defaulted `server_capabilities` to `player-data-sync`/`skin-sync` even though server-side player-data capture is not implemented.
 
-`server_profile_name` now uses `server_name` when non-empty and `client_name` otherwise. `server_profile_capabilities` uses an explicit non-empty `server_capabilities` as an override; otherwise it advertises `skin-sync` (M9/M14 are implemented) and `join-gate` when the gate is armed. M59 later adds `labeler` while its declaration flag is on; `player-data-sync` remains absent until #111, so the descriptor does not overstate server-side capture. No new endpoint, credential or record shape.
+`server_profile_name` now uses `server_name` when non-empty and `client_name` otherwise. `server_profile_capabilities` uses an explicit non-empty `server_capabilities` as an override; otherwise it advertises `skin-sync` (M9/M14 are implemented) and `join-gate` when the gate is armed. M59 later adds `labeler` while its declaration flag is on; M63 adds `player-data-sync` when `server_api_url` is configured. No new endpoint, credential or record shape.
 
 Verified: config tests pin the `client_name` default and the empty capability override; worker unit tests pin the name fallback and the join-gate/skin-sync derivation with an explicit override. No live PDS was contacted.
 
@@ -1473,6 +1473,69 @@ the worker test against the stub identity service asserts `admin`, gold,
 `dragon-slayer`, `monster-hunter` and `death-defier` emissions for a fully
 qualified player; runtime tests pin the new sweep payload. No live Minecraft
 server, identity service or PDS was contacted.
+
+### M63: RPG item discovery and player-data aspect capture/restore
+
+This milestone follows atpcraft's **wire semantics only**; its source is
+unlicensed, so no atpcraft file or code is copied. The supported aspects are
+`inventory`, `ender_chest`, `equipment`, `advancements` and `stats`. The first
+three use atpcraft's gzip-NBT wrappers: `{items: ListTag}` for the 36 main
+inventory slots and the 27 ender-chest slots, and `{equipment: ListTag}` for the
+five equipment slots encoded as `100`–`103` (helmet, chest, legs, boots) and
+`-106` (offhand). Advancements and statistics are raw JSON. `core`, `ops`,
+`scoreboard`, `team`, `effects`, `respawn`, `recipes` and `chat` are deliberately
+not captured because Horizon has no complete round-trip setter for them; a
+restore ignores them instead of pretending to be at full parity.
+
+Capture and restore are manual and self-service. They run in the server tick,
+not in a player turn, because Horizon rejects inventory access during a turn.
+`/atmospheric player-data capture [player]` reads the target online player's
+inventory, ender chest, equipment, statistics and advancements, encodes each
+aspect and sends `PostPlayerData` to the worker. The worker calls the public
+M35 link route and requires the player's UUID to map to **the worker's own
+logged-in DID** before uploading each blob and publishing the existing signed
+snapshot. `/atmospheric player-data restore [player]` sends `FetchPlayerData`;
+the worker lists the account's snapshots, verifies the newest endorsement
+against the local key or `trusted_server_keys`, downloads only the five
+supported blobs (`com.atproto.sync.getBlob`, or inline bytes), caps each at
+8 MiB and returns `PlayerDataRestore` for the next tick. The tick decodes the
+aspects and applies them with `native_set_inventory_typed`,
+`native_set_player_stats` and `native_set_player_advancements`; a malformed or
+unverified aspect is never applied. This prevents an operator from writing a
+guest's data into their own repo or restoring a stranger's snapshot onto a
+linked player. Automatic capture on logout and cross-server sync remain future
+work.
+
+RPG discovery follows atpcraft's scan without its `customData` marker: it reads
+the vanilla `minecraft:picked_up`, `minecraft:crafted`, `minecraft:used` and
+`minecraft:broken` item statistics, plus renamed stacks in the inventory,
+ender chest and equipment. Stacks with an `EQUIPPABLE` component are excluded
+in both paths. A plain item key is the sanitized item id; a renamed stack adds
+`~` and eight hex characters of SHA-256 over the **full** custom name, then
+shortens long keys the same way atpcraft does. The game sends only
+`{key, item_id, title, renamed}`. With `rpg_items_enabled`, the worker writes a
+server-account `equipment.rpg.give` attestation at
+`<recipient-did-without-did:>~<key>` and the player's `equipment.rpg.item` at
+the same key, both with `kind: inventory`, the server-name context, atpcraft's
+field caps and `putRecord` upserts. `rpg_items_max_per_scan` (default 10, at
+least 1) caps one scan. The player link check is the same as capture: only the
+logged-in account's own linked player can receive an item.
+
+Protocol changes: `PlayerAspect`, `RpgDiscovery`, `PostPlayerData`,
+`FetchPlayerData`, `PublishRpgItems` and the `PlayerDataRestore` event, plus the
+RPG-aware OAuth scope helpers (`equipment.rpg.item` for the player and the
+`equipment.rpg.give` write for the server account). No new endpoint or
+credential. The worker continues to own disk and network I/O; the runtime stays
+std-only.
+
+Verified: RPG unit tests pin plain/renamed keys, long-key shortening,
+deterministic give rkeys, key validation and record caps; OAuth tests pin the
+RPG grants and their idempotence; a worker test pins `player-data-sync` in the
+derived capabilities. `cargo check`, `clippy` and the workspace tests pass. The
+game-side mixin bundle could not be staged in this environment because the
+pinned `horizon-mixins` staging tool is not present, and no live Minecraft
+server, identity service or PDS was contacted. atpcraft was used only as a
+wire-behaviour reference.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
