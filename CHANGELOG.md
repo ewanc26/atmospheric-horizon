@@ -121,6 +121,13 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   add `#atproto_label` and `#atproto_labeler`, and sign/submit the operation as
   the server account. A narrow server-account scope gains `identity:*` while
   the labeler is enabled. No new local storage or label emission.
+- **M61 — labeler game triggers (#144).** With `labeler_enabled` and the new
+  `server_admin_token`, server join/logout/sweep hooks assert a linked player's
+  rolling `player` badge (30-day expiry, refreshed at most once a day) and
+  `online` label; logout negates `online`; a once-a-minute sweep corrects
+  online players, and startup negates stale `online` labels after an unclean
+  stop. Unlinked players are skipped, and automatic failures stay silent.
+  `admin` and the statistic milestones wait for #111.
 
 ## [0.3.1] — 2026-11-14
 
