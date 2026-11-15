@@ -893,7 +893,9 @@ The service exposes `GET /healthz` and public `GET /v1/links/{uuid}` reads, an
 authenticated `GET /v1/links` listing, authenticated `PUT`/`DELETE` on
 `/v1/links/{uuid}`, authenticated `POST /v1/pairings`, public
 `POST /v1/pairings/claim`, and the M39 browser routes (authenticated
-`POST /v1/browser/pairings`, public client metadata and link pages). Admin routes require
+`POST /v1/browser/pairings`, public client metadata and link pages). M64 adds
+the authenticated `POST /v1/browser/skins` creation route plus the public
+`/skin/{token}` pages and `/skin/callback`. Admin routes require
 `Authorization: Bearer $ATMOSPHERIC_SERVER_TOKEN`; if the variable is unset
 they return 503 instead of allowing an unauthenticated write. Pairing codes are
 random, one-time, default to ten minutes, accept 60-3600 seconds and are stored
@@ -1536,6 +1538,54 @@ game-side mixin bundle could not be staged in this environment because the
 pinned `horizon-mixins` staging tool is not present, and no live Minecraft
 server, identity service or PDS was contacted. atpcraft was used only as a
 wire-behaviour reference.
+
+### M64: browser skin upload and signed publishing
+
+Issue #113 has two halves. The in-game half is blocked: the pinned Horizon
+native API exposes no skin or texture setter, and the project rule forbids
+hand-editing generated hooks or reaching into unexported game internals. M64
+therefore implements the browser half only.
+
+`/atmospheric skin upload` sends `Command::StartSkinUpload` for the acting
+player. The worker requires `server_api_url` and `server_link_token`, then calls
+`POST /v1/browser/skins` with the player UUID, name and configured link
+lifetime. The service refuses the request unless the UUID already has a link;
+it returns a one-time `/skin/{token}` URL that the game shows only to that
+player. Unlike the pairing flow, the browser never chooses or supplies the
+UUID.
+
+The page accepts a PNG up to 1 MiB and checks the PNG signature; the model is
+`default` or `slim`. It then starts a browser OAuth login with the same PAR +
+PKCE + DPoP client, but a distinct `/skin/callback` redirect declared in the
+client metadata. The resulting session is kept only for the publish: the
+callback requires the signed-in DID to equal the linked DID, uploads the PNG
+with `com.atproto.repo.uploadBlob`, reads the existing record with
+`com.atproto.repo.getRecord`, builds the `at.atpcraft.player.skin` record with
+the game worker's Ed25519 key (`ATMOSPHERIC_SERVER_SKIN_KEY`), preserves the
+existing cape and every other server's endorsement, and upserts at rkey = key
+id with `com.atproto.repo.putRecord`. The upload link is consumed only after a
+successful write; tokens, verifiers, DPoP keys and uploaded bytes are in-memory
+and dropped after the callback.
+
+The server signs with the `atmospheric` crate's `SkinRecord` and
+`signable_payload`, so a browser-written record verifies exactly like one from
+`/atmospheric skin`; no atpcraft code is copied. The record builder treats a
+malformed existing record as absent and replaces only this server's
+endorsement. In-game application of the published skin is still not possible;
+issue #113 tracks that upstream blocker.
+
+Protocol and configuration: `Command::StartSkinUpload`,
+`Event::SkinUploadLink`, the `/atmospheric skin upload` command and tick
+delivery, and the optional `ATMOSPHERIC_SERVER_SKIN_KEY` environment variable.
+No worker-side network path changed, and the runtime remains std-only.
+
+Verified: router tests cover link-token auth, linked-player gating, disabled
+signing, the upload page, invalid PNG rejection and the client-metadata
+callback; an end-to-end test against a stub PDS resolves the handle, completes
+PAR/PKCE/DPoP and verifies the uploaded blob, the rkey, the record shape and
+the Ed25519 endorsement. Unit tests cover PNG validation, one-time upload state
+and record construction. `cargo fmt`, `clippy -D warnings` and the workspace
+tests pass. No live Minecraft server, PDS or OAuth provider was contacted.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
