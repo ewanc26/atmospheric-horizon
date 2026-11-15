@@ -1539,6 +1539,32 @@ pinned `horizon-mixins` staging tool is not present, and no live Minecraft
 server, identity service or PDS was contacted. atpcraft was used only as a
 wire-behaviour reference.
 
+### M65: profile-field editing
+
+`/atmospheric profile-set <name|description|pronouns> [text]` writes one text
+field of the logged-in account's `app.bsky.actor.profile` record at rkey
+`self`. The worker reads the current record with an authenticated
+`com.atproto.repo.getRecord`, merges the field into the existing JSON object,
+and writes it back with `com.atproto.repo.putRecord` and PDS validation on.
+Every other field is preserved: the avatar and banner blobs, links, pinned
+post and `createdAt`. A missing record starts with the profile `$type` and a
+fresh `createdAt`; an empty value removes the field. `name` maps to the
+record's `displayName`.
+
+The write uses the player's existing agent, so it works with an app-password
+session and with OAuth. A narrow custom OAuth scope gains
+`repo:app.bsky.actor.profile?action=create&action=update`; the broad default
+`transition:generic` already covers it. No new endpoint, config key or stored
+data is added, and the runtime stays std-only. The result is reported as
+`Event::ProfileUpdated` with the field and record URI.
+
+Verified: profile merge tests cover preservation, clearing, a new record and
+an unknown field; a stub-PDS worker test checks the authenticated get, the two
+putRecord bodies (update and clear), `validate: true`, and that the avatar and
+`createdAt` survive; runtime tests pin the new command and event wire shapes.
+The real-PDS check updated `pronouns` on the test account, verified the stored
+record, and restored the original value.
+
 ### M64: browser skin upload and signed publishing
 
 Issue #113 has two halves. The in-game half is blocked: the pinned Horizon
