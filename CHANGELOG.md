@@ -134,6 +134,17 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   `dragon-slayer`, `monster-hunter` and `death-defier`, and negates labels the
   current state no longer justifies. Manual `vip`/`donor` grants are never
   touched, and only label values leave the game.
+- **M63 — RPG discovery and player-data aspects (#111).** Add server-tick
+  `/atmospheric player-data capture|restore [player]` for gzip-NBT
+  `inventory`, `ender_chest` and `equipment` plus raw `advancements`/`stats`
+  JSON, and `/atmospheric rpg discover [player]` for item statistics and
+  renamed stacks. Capture/restore require the target UUID to be linked to the
+  worker's logged-in DID; restore verifies the latest snapshot before applying
+  anything. RPG discovery excludes wearables and, when `rpg_items_enabled` is
+  on, writes deterministic `equipment.rpg.give`/`equipment.rpg.item` pairs from
+  the server and player accounts. Core-NBT aspects and automatic sync remain
+  future work. atpcraft was used only as a wire-behaviour reference; no code was
+  copied.
 
 ## [0.3.1] — 2026-11-14
 
