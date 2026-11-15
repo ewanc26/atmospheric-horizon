@@ -156,6 +156,13 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   protocol pair. In-game application remains blocked because the pinned
   Horizon API has no skin/texture setter; atpcraft was used only as a wire
   reference.
+- **M65 — profile-field editing (#150).** Add `/atmospheric profile-set
+  <name|description|pronouns> [text]` for the logged-in account. The worker
+  fetches `app.bsky.actor.profile` at rkey `self`, merges the field, and
+  upserts it with PDS validation, preserving the avatar, banner, links,
+  pinned post, `createdAt` and any other field. Empty text clears the field.
+  A narrow OAuth scope gains the `app.bsky.actor.profile` write grant. Live
+  checks against a real PDS update and restore a profile field.
 
 ## [0.3.1] — 2026-11-14
 
