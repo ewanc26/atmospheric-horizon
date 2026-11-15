@@ -43,7 +43,6 @@ Not yet: launcher registry distribution, which waits on third-party native-mod s
 
 ## Requirements
 
-| | |
 | --- | --- |
 | Rust | 1.95+ (pinned by `rust-toolchain.toml`) |
 | Game | Minecraft: Java Edition 26.3 through the official launcher |
