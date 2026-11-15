@@ -100,9 +100,10 @@ Everything else, with zero Horizon imports so it builds and tests with plain
 - `labeler` — M59 server-account `app.bsky.labeler.service` declaration at
   rkey `self`: the curated 11-value vocabulary and its client metadata, with
   `createdAt` preservation across republishes
-- `triggers` — M61 player-activity label evaluation: the `player`/`online`
-  desired state, the 30-day badge with a daily refresh, logout negation,
-  startup recovery and the admin emission/query calls
+- `triggers` — M61/M62 player-activity label evaluation: the `player`,
+  `online`, `admin`, playtime-tier and achievement desired state from captured
+  op level and vanilla statistics, the 30-day badge with a daily refresh,
+  logout negation, startup recovery and the admin emission/query calls
 - `presence` — M13 verified reads of other players' `at.atpcraft.player.snapshot`
   records (`com.atproto.repo.listRecords` on the subject's own PDS, highest
   version, Ed25519 endorsement verification)
@@ -549,15 +550,15 @@ The game side mirrors it as plain data and the HUD shows the display name,
 stored on disk. The direct profile record is read from the PDS; its avatar is
 a blob reference, so only the AppView's avatar URL is carried in the digest.
 
-atpcraft's remaining server-side surfaces (RPG item discovery, full aspect
-capture/restore and the stat-driven labeler labels) are not implemented yet; the
-README port table records each one. M56–M61 cover label signing, durable
-storage, querying, streaming, the server-account declaration, its PLC identity
-publication and the game triggers for `player`/`online`. M25 supplies the
-separate server account, M26/M27 run the operational Colibri bridge, M35
-supplies the shared player-to-DID map, M36 claims links from the game, M37 checks
-linked players on join and M38 enforces the configured list; the remaining stat
-labels and capture remain separate milestones.
+atpcraft's remaining server-side surfaces (RPG item discovery and full aspect
+capture/restore) are not implemented yet; the README port table records each
+one. M56–M62 cover label signing, durable storage, querying, streaming, the
+server-account declaration, its PLC identity publication and the game triggers
+for the full automatic vocabulary, including op-level and vanilla-statistic
+labels. M25 supplies the separate server account, M26/M27 run the operational
+Colibri bridge, M35 supplies the shared player-to-DID map, M36 claims links from
+the game, M37 checks linked players on join and M38 enforces the configured
+list; capture remains a separate milestone.
 
 Verified: `profiles` unit tests (whitespace normalisation, direct-record
 precedence, clearing on a successful record without pronouns, AppView
@@ -591,9 +592,9 @@ and the mod's persisted Ed25519 endorsement key; `createdAt` is preserved.
 The session file contains a DPoP private key and a refresh token, so it is a
 secret exactly like `session.json`; the README's Network use section records
 it. The account is the foundation, not the whole server-side feature: the
-stat-driven labeler labels and aspect sync still need their own milestones;
-M56–M61 add the labeler service, declaration, PLC identity and game triggers,
-and M38 supplies linked-account join enforcement. M26 builds the first Colibri surface on this
+aspect sync still needs its own milestone; M56–M62 add the labeler service,
+declaration, PLC identity, game triggers and op-level/statistic labels, and M38
+supplies linked-account join enforcement. M26 builds the first Colibri surface on this
 account.
 
 Verified: a worker test runs the full stub OAuth flow for the server account,
@@ -910,10 +911,11 @@ per data directory, not for multiple replicas sharing a volume.
 M36 wires the explicit `/atmospheric link <code>` claim, M37 wires the
 public join-time link lookup, M38 consumes the same map for login-gate
 enforcement, and M39 adds browser OAuth link creation and callback routes.
-The service is still the foundation for the stat-driven labeler labels and for
-RPG/player-data work; those consumers remain separate and must not be described
-as delivered. Label emission is wired (M61), but the game supplies only
-join/logout/sweep events, not op level or vanilla statistics.
+The service is still the foundation for RPG/player-data work; those consumers
+remain separate and must not be described as delivered. Label emission is wired
+(M61/M62), and the game now supplies op level and vanilla statistics on every
+sweep, from which the worker derives the status and milestone labels without
+storing the captured values.
 
 Verified: `model` unit tests cover UUID, name, DID, handle, code and TTL
 validation; store tests cover reopen persistence, `linked_at` preservation,
@@ -1399,16 +1401,17 @@ played. atpcraft asserts a rolling `player` badge and a dynamic `online` label
 from its game events; this milestone ports those triggers onto the split
 worker/service architecture.
 
-The runtime adds three commands: `LabelerPlayerJoined { player_uuid }` and
-`LabelerPlayerLeft { player_uuid }` from new `player_logged_in` and
-`player_logged_out` hook helpers, and `LabelerSweep { players }` from the tick
-hook, throttled to one sweep a minute. The worker resolves each UUID through
+The runtime adds two commands: `LabelerPlayerLeft { player_uuid }` from the
+`player_logged_out` hook helper, and `LabelerSweep { players }` from the tick
+hook. A join forces the next tick's sweep instead of sending a separate
+command, so the newly placed player is captured immediately; otherwise the
+sweep is throttled to once a minute. The worker resolves each UUID through
 `GET <server_api_url>/v1/links/{uuid}`, reads the labeler's active labels with
-`queryLabels`, and writes only the missing ones through the admin
-`POST /v1/labeler/labels` route. A join asserts `player` (with a 30-day `exp`)
-and `online`; a disconnect negates `online`; a sweep refreshes a `player` badge
-whose stored expiry is more than a day behind the fresh one. Unlinked players
-and failed lookups are skipped, and automatic failures stay silent rather than
+`queryLabels`, and writes only the needed assertions and negations through the
+admin `POST /v1/labeler/labels` route. A sweep asserts `player` (with a 30-day
+`exp`), `online` and the labels the captured state justifies, and negates the
+labels it no longer does; a disconnect negates `online`. Unlinked players and
+failed lookups are skipped, and automatic failures stay silent rather than
 interrupting play.
 
 A new `Config.server_admin_token` supplies the admin bearer token; the triggers
@@ -1419,8 +1422,7 @@ unclean game stop, through a wildcard `queryLabels` read.
 `online` intentionally has no expiry here. atpcraft uses a 30-second expiry
 because its labeler shares the game process; this labeler survives game
 restarts, and the startup recovery clears stale presence, so an expiry would
-only add churn. `admin` and the playtime/achievement milestones need op-level
-and vanilla-stat data the game side does not yet expose; they wait for #111.
+only add churn.
 
 No new endpoint or record shape. The only new outbound requests are the
 identity link lookup, the active-label query and the admin emission, all against
@@ -1430,9 +1432,47 @@ Verified: `triggers` unit tests pin the RFC 3339 formatting, first-join actions,
 the daily refresh threshold, logout negation and startup subject selection; two
 worker tests against the stub identity service assert the admin token on the
 emission, join presence, logout negation, stale-badge refresh, online
-re-assertion and startup recovery; runtime tests pin the three command wire
-shapes; config tests pin the empty-token default. No live identity service or
-PDS was contacted.
+re-assertion and startup recovery; runtime tests pin the command wire shapes;
+config tests pin the empty-token default. M62 extends these tests with the
+status and milestone vocabulary. No live identity service or PDS was
+contacted.
+
+### M62: op-level and vanilla-stat label capture
+
+M61 could assert only `player` and `online`, because the trigger had no op
+level or statistics. Horizon's native server API exposes
+`native_player_permission(uuid)` and `native_player_stat(uuid, type, key)`, so
+the tick can capture them locally for every online player.
+
+`LabelerPlayer` now carries `admin`, `play_time_ticks`, `mob_kills`, `deaths`
+and `dragon_kills` alongside the UUID and name. `labeler_player_joined` sets a
+request flag rather than sending a command, and `labeler_sweep_due` treats that
+flag as due; the next tick builds a full `LabelerSweep` from
+`native_server_players`, reading `minecraft:custom`/`minecraft:play_time`,
+`minecraft:custom`/`minecraft:mob_kills`, `minecraft:custom`/`minecraft:deaths`
+and `minecraft:killed`/`minecraft:ender_dragon`, plus the permission level. The
+capture stays in the game and worker; only label values leave.
+
+The evaluator adds `admin` when the op level is at least 1, the highest
+playtime tier only (10, 100 and 1000 hours at 72,000 ticks each),
+`dragon-slayer` at one dragon kill, `monster-hunter` at 1,000 mob kills and
+`death-defier` at 100 deaths. It diffs against the active labels, so a lower
+tier is negated when a higher one is asserted and a label whose threshold is no
+longer met is negated. Only the nine owned labels are considered; manual `vip`
+and `donor` grants are never touched. The `player` badge keeps its 30-day
+expiry and daily refresh, `online` keeps its no-expiry presence semantics, and
+logout still negates only `online`.
+
+No new endpoint, credential or stored data. The captured fields travel only
+between the game and its local worker; the labeler still receives just the
+subject DID and label value. No atpcraft code is copied.
+
+Verified: `triggers` unit tests pin the highest-tier rule, exact thresholds,
+admin and milestone assertion/negation, and that `vip`/`donor` survive a sweep;
+the worker test against the stub identity service asserts `admin`, gold,
+`dragon-slayer`, `monster-hunter` and `death-defier` emissions for a fully
+qualified player; runtime tests pin the new sweep payload. No live Minecraft
+server, identity service or PDS was contacted.
 
 ### M14: player skin reads (`at.atpcraft.player.skin` + `getBlob`)
 
