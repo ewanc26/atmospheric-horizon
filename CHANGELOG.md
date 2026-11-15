@@ -127,7 +127,13 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   `online` label; logout negates `online`; a once-a-minute sweep corrects
   online players, and startup negates stale `online` labels after an unclean
   stop. Unlinked players are skipped, and automatic failures stay silent.
-  `admin` and the statistic milestones wait for #111.
+- **M62 — op-level and vanilla-stat labels (#146).** A join forces the next
+  tick's label sweep, which captures each online player's op level and vanilla
+  playtime, mob kills, deaths and Ender Dragon kills. The worker asserts
+  `admin` (op level at least 1), the highest playtime tier (10/100/1000 hours),
+  `dragon-slayer`, `monster-hunter` and `death-defier`, and negates labels the
+  current state no longer justifies. Manual `vip`/`donor` grants are never
+  touched, and only label values leave the game.
 
 ## [0.3.1] — 2026-11-14
 

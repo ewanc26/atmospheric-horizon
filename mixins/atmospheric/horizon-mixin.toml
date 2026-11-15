@@ -139,9 +139,10 @@ kind = "HEAD"
 helper = "colibri/leave.rs"
 bindings = [{ name = "name", ty = "&str", value = "name" }]
 
-# Labeler game triggers (M61): a linked player's `player` and `online` labels
-# are asserted on join and `online` is negated on disconnect. The worker skips
-# both when the labeler triggers are not configured.
+# Labeler game triggers (M61/M62): a join forces the next tick's sweep, which
+# captures op level and vanilla statistics and asserts the player's status and
+# milestone labels; `online` is negated on disconnect. The worker skips both
+# when the labeler triggers are not configured.
 [[injection]]
 id = "labeler-join"
 hook = "player_logged_in"
