@@ -7,7 +7,7 @@
 //! the crate testable without a game.
 
 use crate::{
-    Command, Config, Event, SweepPlayer, actions, chats,
+    Command, Config, Event, LabelerPlayer, SweepPlayer, actions, chats,
     colibri::{self, ChannelRef, StreamEvent},
     error::AtmosphericError,
     graph, identity, interactions, labeler,
@@ -722,9 +722,6 @@ impl Worker {
             }
             Command::JoinGateSweep { players } => {
                 self.join_gate_sweep(players).await;
-            }
-            Command::LabelerPlayerJoined { player_uuid } => {
-                self.labeler_player_joined(&player_uuid).await;
             }
             Command::LabelerPlayerLeft { player_uuid } => {
                 self.labeler_player_left(&player_uuid).await;
@@ -2418,39 +2415,45 @@ impl Worker {
         ))
     }
 
-    /// A linked player joined (M61): assert `player` and `online` for their
-    /// DID. Best-effort, like every automatic trigger: an unreachable service
-    /// or an unlinked player stays silent.
-    async fn labeler_player_joined(&mut self, player_uuid: &str) {
-        self.labeler_online(&[player_uuid.to_string()]).await;
-    }
-
-    /// Ensure the labels for these UUIDs' linked DIDs (M61). The identity
-    /// reads and label query happen before any write, so a failed lookup never
-    /// produces a partial set.
-    async fn labeler_online(&mut self, player_uuids: &[String]) {
+    /// Ensure the labels for these players' linked DIDs (M61/M62). The
+    /// identity reads and label query happen before any write, so a failed
+    /// lookup never produces a partial set. Best-effort, like every automatic
+    /// trigger: an unreachable service or an unlinked player stays silent.
+    async fn labeler_online(&mut self, players: &[LabelerPlayer]) {
         let Some((base, token)) = self.labeler_triggers() else {
             return;
         };
-        let mut dids: Vec<String> = Vec::new();
-        for player_uuid in player_uuids {
-            if let Ok(Some(link)) = identity::fetch_link(&self.http, &base, player_uuid).await
-                && !dids.contains(&link.did)
-            {
-                dids.push(link.did);
+        let mut linked: Vec<(String, triggers::PlayerActivity)> = Vec::new();
+        for player in players {
+            let Ok(Some(link)) = identity::fetch_link(&self.http, &base, &player.player_uuid).await
+            else {
+                continue;
+            };
+            let activity = triggers::PlayerActivity {
+                online: true,
+                admin: player.admin,
+                play_time_ticks: player.play_time_ticks,
+                mob_kills: player.mob_kills,
+                deaths: player.deaths,
+                dragon_kills: player.dragon_kills,
+            };
+            match linked.iter_mut().find(|(did, _)| did == &link.did) {
+                Some((_, existing)) => *existing = activity,
+                None => linked.push((link.did, activity)),
             }
         }
-        if dids.is_empty() {
+        if linked.is_empty() {
             return;
         }
+        let dids: Vec<String> = linked.iter().map(|(did, _)| did.clone()).collect();
         let Ok(labels) = triggers::fetch_active(&self.http, &base, &dids).await else {
             return;
         };
         let now = triggers::now_unix();
-        for did in &dids {
+        for (did, activity) in &linked {
             let active =
                 triggers::active_labels(labels.iter().filter(|label| label.uri == *did).cloned());
-            for action in triggers::online_actions(&active, now) {
+            for action in triggers::online_actions(&active, *activity, now) {
                 let _ = triggers::emit(&self.http, &base, &token, did, &action).await;
             }
         }
@@ -2476,14 +2479,10 @@ impl Worker {
         }
     }
 
-    /// Re-evaluate the online players (M61). The tick hook throttles this to
-    /// [`crate::labeler::LABELER_SWEEP_SECONDS`]-style once a minute.
-    async fn labeler_sweep(&mut self, players: &[SweepPlayer]) {
-        let player_uuids: Vec<String> = players
-            .iter()
-            .map(|player| player.player_uuid.clone())
-            .collect();
-        self.labeler_online(&player_uuids).await;
+    /// Re-evaluate the online players (M61/M62). The tick hook throttles this
+    /// to once a minute and forces one sweep after a join.
+    async fn labeler_sweep(&mut self, players: &[LabelerPlayer]) {
+        self.labeler_online(players).await;
     }
 
     /// Negate `online` labels left by an unclean game stop (M61). This runs
@@ -4687,7 +4686,15 @@ mod tests {
         let mut worker = Worker::new(WorkerOptions::new(dir), events, oauth_tx, colibri_tx);
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
-        runtime.block_on(worker.labeler_player_joined("00000000-0000-4000-8000-0000000000a1"));
+        runtime.block_on(worker.labeler_sweep(&[LabelerPlayer {
+            player_uuid: "00000000-0000-4000-8000-0000000000a1".into(),
+            player_name: "Remote".into(),
+            admin: false,
+            play_time_ticks: 0,
+            mob_kills: 0,
+            deaths: 0,
+            dragon_kills: 0,
+        }]));
         let emitted = emitted_labels(&pds);
         assert_eq!(
             emitted.len(),
@@ -4730,9 +4737,14 @@ mod tests {
         let mut worker = Worker::new(WorkerOptions::new(dir), events, oauth_tx, colibri_tx);
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
-        runtime.block_on(worker.labeler_sweep(&[SweepPlayer {
+        runtime.block_on(worker.labeler_sweep(&[LabelerPlayer {
             player_uuid: "00000000-0000-4000-8000-0000000000a4".into(),
             player_name: "Carol".into(),
+            admin: false,
+            play_time_ticks: 0,
+            mob_kills: 0,
+            deaths: 0,
+            dragon_kills: 0,
         }]));
         let emitted = emitted_labels(&pds);
         assert_eq!(
@@ -4756,6 +4768,53 @@ mod tests {
         assert_eq!(emitted[2]["uri"], "did:plc:alice");
         assert_eq!(emitted[2]["val"], "online");
         assert_eq!(emitted[2]["neg"], true);
+    }
+
+    #[test]
+    fn labeler_sweep_emits_admin_and_milestone_labels() {
+        let pds = StubPds::start(false);
+        let mut config = test_config(pds.url.clone());
+        config.labeler_enabled = true;
+        config.server_api_url = pds.url.clone();
+        config.server_admin_token = "stub-admin".into();
+        let dir = temp_dir("labeler-stats");
+        write_config(&dir, &config);
+        let (events, _event_rx) = std::sync::mpsc::channel();
+        let (oauth_tx, _oauth_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (colibri_tx, _colibri_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut worker = Worker::new(WorkerOptions::new(dir), events, oauth_tx, colibri_tx);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        runtime.block_on(worker.labeler_sweep(&[LabelerPlayer {
+            player_uuid: "00000000-0000-4000-8000-0000000000a1".into(),
+            player_name: "Remote".into(),
+            admin: true,
+            play_time_ticks: 1_000 * 72_000,
+            mob_kills: 1_000,
+            deaths: 100,
+            dragon_kills: 1,
+        }]));
+        let emitted = emitted_labels(&pds);
+        let values: Vec<&str> = emitted
+            .iter()
+            .filter(|label| label["neg"] == false)
+            .map(|label| label["val"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            values,
+            vec![
+                "online",
+                "admin",
+                "playtime-gold",
+                "dragon-slayer",
+                "monster-hunter",
+                "death-defier",
+            ]
+        );
+        assert!(
+            emitted.iter().all(|label| label["uri"] == "did:plc:remote"),
+            "captured state is resolved to the linked DID only"
+        );
     }
 
     /// Every label body the stub's admin route accepted, oldest first.

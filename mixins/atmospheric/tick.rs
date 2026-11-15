@@ -52,18 +52,58 @@ fn atmospheric_tick(game: &mut crate::game::Game<'_>) {
     let join_gate_due = m::join_gate_sweep_due();
     let labeler_due = m::labeler_sweep_due();
     if join_gate_due || labeler_due {
-        let players: Vec<m::SweepPlayer> = game
-            .native_server_players()
-            .into_iter()
-            .map(|player| m::SweepPlayer {
-                player_uuid: m::uuid_text(player.uuid),
-                player_name: player.name,
-            })
-            .collect();
+        let server_players = game.native_server_players();
         if join_gate_due {
-            m::join_gate_sweep(players.clone());
+            let players: Vec<m::SweepPlayer> = server_players
+                .iter()
+                .map(|player| m::SweepPlayer {
+                    player_uuid: m::uuid_text(player.uuid),
+                    player_name: player.name.clone(),
+                })
+                .collect();
+            m::join_gate_sweep(players);
         }
         if labeler_due {
+            // M62: capture the op level and vanilla statistics locally. Only
+            // the resulting label values ever leave the game.
+            let players: Vec<m::LabelerPlayer> = server_players
+                .into_iter()
+                .map(|player| m::LabelerPlayer {
+                    player_uuid: m::uuid_text(player.uuid),
+                    player_name: player.name,
+                    admin: game
+                        .native_player_permission(player.uuid)
+                        .is_some_and(|level| level >= 1),
+                    play_time_ticks: game
+                        .native_player_stat(
+                            player.uuid,
+                            "minecraft:custom",
+                            "minecraft:play_time",
+                        )
+                        .unwrap_or(0)
+                        .max(0) as u64,
+                    mob_kills: game
+                        .native_player_stat(
+                            player.uuid,
+                            "minecraft:custom",
+                            "minecraft:mob_kills",
+                        )
+                        .unwrap_or(0)
+                        .max(0) as u64,
+                    deaths: game
+                        .native_player_stat(player.uuid, "minecraft:custom", "minecraft:deaths")
+                        .unwrap_or(0)
+                        .max(0) as u64,
+                    dragon_kills: game
+                        .native_player_stat(
+                            player.uuid,
+                            "minecraft:killed",
+                            "minecraft:ender_dragon",
+                        )
+                        .unwrap_or(0)
+                        .max(0) as u64,
+                })
+                .collect();
             m::labeler_sweep(players);
         }
     }
