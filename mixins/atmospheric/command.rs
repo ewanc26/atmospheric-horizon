@@ -21,9 +21,9 @@
 // server-account login|status|logout|publish manages the separate server
 // account (M25); /atmospheric
 // profile <did|handle> reads a Bluesky profile with atpcraft's pronoun
-// precedence (M24); /atmospheric profile-set <name|description|pronouns>
-// [text] updates the logged-in account's profile (M65); /atmospheric
-// follows|followers|blocks|mutes <did|handle>
+// precedence (M24); /atmospheric profile-set <field> [value] updates the
+// logged-in account's text fields or uploads its avatar/banner (M65/M66);
+// /atmospheric follows|followers|blocks|mutes <did|handle>
 // reads a public social graph (M20);
 // follow|unfollow|block|unblock|mute|unmute <did|handle> writes one (M23);
 // /atmospheric records <did|handle> <collection> browses any public collection
@@ -39,7 +39,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric player-data capture|restore [player], /atmospheric rpg discover [player], /atmospheric skin [path] [default|slim], /atmospheric skin upload, /atmospheric server, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric colibri start|stop|reconnect|status|send <text>, /atmospheric link [code], /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric profile-set <name|description|pronouns> [text], /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric records <did|handle> <collection>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric labeler-identity [status|request|submit <token>], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric player-data capture|restore [player], /atmospheric rpg discover [player], /atmospheric skin [path] [default|slim], /atmospheric skin upload, /atmospheric server, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric colibri start|stop|reconnect|status|send <text>, /atmospheric link [code], /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric profile-set <name|description|pronouns|avatar|banner> [text|path], /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric records <did|handle> <collection>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric labeler-identity [status|request|submit <token>], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -360,18 +360,29 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
         let (field, value) = payload.split_once(' ').unwrap_or((payload, ""));
         let (field, value) = (field.trim(), value.trim());
         *ran = true;
-        if !matches!(field, "name" | "description" | "pronouns") {
-            game.native_chat(
-                "atmospheric: /atmospheric profile-set <name|description|pronouns> [text]",
-            );
-        } else {
-            m::set_profile_field(field, value);
-            let message = if value.is_empty() {
-                format!("atmospheric: clearing profile {field}…")
-            } else {
-                format!("atmospheric: updating profile {field}…")
-            };
-            game.native_chat(&message);
+        match field {
+            "avatar" | "banner" => {
+                if value.is_empty() {
+                    game.native_chat(
+                        "atmospheric: profile-set avatar|banner needs a PNG or JPEG path",
+                    );
+                } else {
+                    m::set_profile_image(field, value);
+                    game.native_chat(&format!("atmospheric: uploading profile {field}…"));
+                }
+            }
+            "name" | "description" | "pronouns" => {
+                m::set_profile_field(field, value);
+                let message = if value.is_empty() {
+                    format!("atmospheric: clearing profile {field}…")
+                } else {
+                    format!("atmospheric: updating profile {field}…")
+                };
+                game.native_chat(&message);
+            }
+            _ => game.native_chat(
+                "atmospheric: /atmospheric profile-set <name|description|pronouns|avatar|banner> [text|path]",
+            ),
         }
     } else if rest == "profile" || rest.starts_with("profile ") {
         let subject = rest.strip_prefix("profile").unwrap_or("").trim();

@@ -16,6 +16,7 @@
 //! ATMOSPHERIC_SKIN_MODEL="slim" \                        # optional, M9
 //! ATMOSPHERIC_POST_SERVER_PROFILE=1 \                    # optional, M10
 //! ATMOSPHERIC_PROFILE_SET="pronouns|they/them" \         # optional, M65
+//! ATMOSPHERIC_PROFILE_IMAGE="avatar|/path/to/avatar.png" \ # optional, M66
 //! ATMOSPHERIC_FETCH_LIST="at://did:…/app.bsky.graph.list/<rkey>" \  # optional, M11
 //! ATMOSPHERIC_FETCH_LABELS="at://did:…/app.bsky.feed.post/<rkey>" \ # optional, M12
 //! ATMOSPHERIC_LABELER="did:plc:…" \                             # optional, M12
@@ -58,9 +59,10 @@
 //! URL is still printed via the `OAuthAuthorize` event.
 //!
 //! The example spawns the worker exactly as the game side will, sends the
-//! login command, waits for the session event, optionally sends the posts and
-//! a profile-field update, prints every event, and shuts the worker down. Exit
-//! status is 0 only if login (and the selected writes) succeeded. The PDS URL
+//! login command, waits for the session event, optionally sends the posts, a
+//! profile-field update or a profile image, prints every event, and shuts the
+//! worker down. Exit status is 0 only if login (and the selected writes)
+//! succeeded. The PDS URL
 //! must be the account's own PDS (resolve the handle's DID to find it), not
 //! always bsky.social.
 
@@ -164,6 +166,7 @@ fn main() {
     let skin_model = env::var("ATMOSPHERIC_SKIN_MODEL").unwrap_or_else(|_| "default".into());
     let post_server_profile = env::var("ATMOSPHERIC_POST_SERVER_PROFILE").is_ok();
     let profile_set = env::var("ATMOSPHERIC_PROFILE_SET").ok();
+    let profile_image = env::var("ATMOSPHERIC_PROFILE_IMAGE").ok();
 
     // A throwaway settings folder: the worker reads its config from here.
     let storage_dir: PathBuf = env::temp_dir().join("atmospheric-pds-check");
@@ -334,6 +337,44 @@ fn main() {
                         }
                         Event::Failed { message } => {
                             eprintln!("profile update failed: {message}");
+                            let _ = command_tx.send(Command::Shutdown);
+                            let _ = handle.join();
+                            exit(1);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(error) => {
+                    eprintln!("no event from the worker: {error}");
+                    let _ = command_tx.send(Command::Shutdown);
+                    let _ = handle.join();
+                    exit(1);
+                }
+            }
+        }
+    }
+
+    // Optionally upload a local PNG/JPEG as the logged-in account's avatar or
+    // banner (M66), as `<avatar|banner>|<path>`.
+    if let Some(raw) = profile_image {
+        let (field, path) = raw.split_once('|').unwrap_or((raw.as_str(), ""));
+        command_tx
+            .send(Command::SetProfileImage {
+                field: field.trim().into(),
+                path: path.trim().into(),
+            })
+            .expect("send SetProfileImage");
+        loop {
+            match event_rx.recv_timeout(Duration::from_secs(60)) {
+                Ok(event) => {
+                    println!("event: {event:?}");
+                    match event {
+                        Event::ProfileUpdated { field, uri } => {
+                            println!("profile image {field} updated: {uri}");
+                            break;
+                        }
+                        Event::Failed { message } => {
+                            eprintln!("profile image update failed: {message}");
                             let _ = command_tx.send(Command::Shutdown);
                             let _ = handle.join();
                             exit(1);

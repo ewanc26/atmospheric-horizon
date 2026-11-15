@@ -241,6 +241,9 @@ pub enum GameCommand {
     /// Update one text field of the logged-in account's profile (M65): `name`,
     /// `description` or `pronouns`; an empty value clears it.
     SetProfileField { field: String, value: String },
+    /// Upload a local PNG/JPEG as the logged-in account's avatar or banner
+    /// (M66): `field` is `avatar` or `banner`.
+    SetProfileImage { field: String, path: String },
     /// Read a player's latest `at.atpcraft.player.skin` record from their own
     /// PDS, verify its endorsement, and — only when verified — download the
     /// skin/cape blobs into the mod's storage folder (M14, atpcraft skin-sync
@@ -623,7 +626,7 @@ pub enum ModEvent {
         via: String,
         profile: Box<ProfileDigest>,
     },
-    /// One field of the logged-in account's profile was updated (M65).
+    /// One field of the logged-in account's profile was updated (M65/M66).
     ProfileUpdated { field: String, uri: String },
     /// The latest skin record of a player (M14, skin-sync read side): the DID
     /// (`subject`), the PDS it was read from (`via`), and the digest with its
@@ -2135,6 +2138,14 @@ pub fn set_profile_field(field: &str, value: &str) {
     });
 }
 
+/// Upload a local PNG/JPEG as the logged-in account's avatar or banner (M66).
+pub fn set_profile_image(field: &str, path: &str) {
+    send(GameCommand::SetProfileImage {
+        field: field.into(),
+        path: path.into(),
+    });
+}
+
 /// Ask the worker to read a player's latest skin record, verify its
 /// endorsement, and download the blobs when verified (M14). `subject` is a
 /// DID or a handle.
@@ -3015,6 +3026,10 @@ fn encode_command(command: &GameCommand) -> String {
         GameCommand::SetProfileField { field, value } => jobj(vec![(
             "SetProfileField",
             jobj(vec![("field", jstr(field)), ("value", jstr(value))]),
+        )]),
+        GameCommand::SetProfileImage { field, path } => jobj(vec![(
+            "SetProfileImage",
+            jobj(vec![("field", jstr(field)), ("path", jstr(path))]),
         )]),
         GameCommand::FetchPlayerSkin { subject } => jobj(vec![(
             "FetchPlayerSkin",
@@ -4613,6 +4628,13 @@ mod tests {
                 value: "they/them".into(),
             }),
             r#"{"SetProfileField":{"field":"pronouns","value":"they/them"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::SetProfileImage {
+                field: "avatar".into(),
+                path: "/tmp/avatar.png".into(),
+            }),
+            r#"{"SetProfileImage":{"field":"avatar","path":"/tmp/avatar.png"}}"#
         );
         assert_eq!(
             encode_command(&GameCommand::CheckPlayerProfile {
