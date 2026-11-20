@@ -1505,8 +1505,8 @@ aspects and applies them with `native_set_inventory_typed`,
 `native_set_player_stats` and `native_set_player_advancements`; a malformed or
 unverified aspect is never applied. This prevents an operator from writing a
 guest's data into their own repo or restoring a stranger's snapshot onto a
-linked player. Automatic capture on logout and cross-server sync remain future
-work.
+linked player. M68 adds the automatic leave/join hooks and cross-server sync on
+top of this manual path.
 
 RPG discovery follows atpcraft's scan without its `customData` marker: it reads
 the vanilla `minecraft:picked_up`, `minecraft:crafted`, `minecraft:used` and
@@ -1538,6 +1538,57 @@ game-side mixin bundle could not be staged in this environment because the
 pinned `horizon-mixins` staging tool is not present, and no live Minecraft
 server, identity service or PDS was contacted. atpcraft was used only as a
 wire-behaviour reference.
+
+### M68: automatic player-data sync
+
+M68 makes the M63 capture/restore hooks automatic and cross-server. Two new
+game-side injections drive the same worker commands as the manual commands:
+
+- **Leave.** A raw `HEAD` injection at
+  `horizon_client::game::native_hooks::Game<'_>::native_player_logging_out`
+  captures the five M63 aspects while the player is still in their level and
+  still listed in `native_server_players` — the only logout seam with live
+  inventory, statistics and advancement state. `player_logged_out` is too late:
+  the player has already been saved and removed. The aspect encoder moved into
+  a `[[module]]` (`crate::game::atmospheric_playerdata`) so the logout helper and
+  the tick's manual-capture path share exactly one implementation; a helper
+  injected at one hook cannot call a helper injected at another by name.
+- **Join.** A `HEAD` injection at `player_logged_in` sends `FetchPlayerData`;
+  the existing `PlayerDataRestore` tick handler applies the returned aspects
+  after placement, so no new apply path is needed.
+
+Both commands carry `automatic: true` (the manual commands pass `false`),
+mirroring the `PostChat { automatic }` precedent. A new default-off config key,
+`player_data_sync_enabled`, gates only the automatic commands in the worker,
+*before* any OAuth refresh or network call: when it is false, hook-originated
+commands are silently dropped with no event and no PDS request; explicit
+`/atmospheric player-data` commands always run. When the gate is open, automatic
+commands use the same status/failure events as explicit ones. No new event,
+endpoint or credential is added.
+
+Cross-server restore reuses the M63 verification path unchanged. The worker
+lists the logged-in account's snapshot collection, picks the highest version
+whose endorsement verifies against the local signing key **or a
+`trusted_server_keys` peer**, and downloads only the five supported blobs. A
+peer server's signed snapshot is therefore portable between servers that trust
+each other's keys, without a new route or shared credential. Full `core` NBT
+restore is still out of scope — Horizon exposes `native_player_compound` but no
+complete round-trip setter for the whole player compound.
+
+One wire mismatch surfaced while pinning this slice: the std-only runtime
+hand-rolls `SnapshotSummary` with snake-case struct fields, but the worker's
+serde struct is `#[serde(rename_all = "camelCase")]`. `summary_json` now emits
+`xpLevel`/`gameMode`, and both the runtime encoder test and a new worker
+deserialization test pin the exact bytes. `PlayerDigest` event decoding remains
+snake-case and is unchanged.
+
+Verified with the layout scripts, `cargo fmt --check`, `cargo clippy
+--workspace --all-targets -- -D warnings` and the full workspace test suite,
+including worker tests that prove automatic commands are silent with the gate
+off and reach the normal link check with it on. The mixin helpers pass
+`rustfmt --check`. The bundle could not be staged in this environment (no
+`horizon-mixins` CLI in `PATH`), and no live Minecraft server, identity service
+or PDS was contacted; atpcraft served only as a wire-behaviour reference.
 
 ### M66: profile avatar and banner uploads
 

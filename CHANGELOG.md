@@ -12,6 +12,26 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+### Added
+
+- **M68 — automatic player-data sync (#162).** With the new default-off
+  `player_data_sync_enabled` setting, a linked player's inventory, ender chest,
+  equipment, advancements and statistics are captured at
+  `native_player_logging_out` (while the player is still in their level) and the
+  newest verified snapshot is restored at `player_logged_in` — on this server or
+  a `trusted_server_keys` peer. Hook-originated commands carry `automatic: true`
+  and are silently skipped before any network call while the setting is off;
+  the explicit `/atmospheric player-data` commands always run. No new endpoint,
+  event or credential.
+
+### Fixed
+
+- Aligned the runtime's hand-rolled snapshot summary JSON with the worker's
+  serde struct (`xpLevel`/`gameMode`), with runtime encode and worker decode
+  tests pinning the exact wire shape. Full player-NBT restore remains out of
+  scope because Horizon has no complete round-trip setter for the player
+  compound.
+
 ## [0.4.0] — 2026-11-20
 
 Fourth tagged release. Adds the generic record browser, linked-player names and
