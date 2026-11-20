@@ -365,6 +365,7 @@ fn capture_player(game: &mut crate::game::Game<'_>, capture: &crate::game::atmos
         &capture.player_name,
         summary_for(&player, food),
         aspects,
+        false,
     );
     true
 }

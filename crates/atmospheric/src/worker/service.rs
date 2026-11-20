@@ -346,6 +346,9 @@ struct Worker {
     tid: TidGen,
     /// `post_chat_messages` from the settings file, refreshed at login.
     post_chat_messages: bool,
+    /// `player_data_sync_enabled` from the settings file (M68): gates the
+    /// automatic logout-capture and join-restore commands. Refreshed at login.
+    player_data_sync_enabled: bool,
     /// `post_death_messages` from the settings file, refreshed at login.
     post_death_messages: bool,
     /// `persist_session` from the settings file, refreshed at login.
@@ -529,6 +532,7 @@ impl Worker {
                 .max(1),
             tid: TidGen::new(),
             post_chat_messages: false,
+            player_data_sync_enabled: false,
             post_death_messages: false,
             persist_session: true,
             stored_session,
@@ -706,7 +710,13 @@ impl Worker {
                 player_name,
                 mut summary,
                 aspects,
+                automatic,
             } => {
+                // Logout hooks only publish when the settings say so; the
+                // explicit /atmospheric player-data capture command always does.
+                if automatic && !self.player_data_sync_enabled {
+                    return;
+                }
                 self.ensure_oauth_fresh().await;
                 let result = self
                     .post_player_data(&player_uuid, &player_name, &mut summary, aspects)
@@ -721,15 +731,22 @@ impl Worker {
             Command::FetchPlayerData {
                 player_uuid,
                 player_name,
-            } => match self.fetch_player_data(&player_uuid, &player_name).await {
-                Ok((version, aspects)) => self.emit(Event::PlayerDataRestore {
-                    player_uuid,
-                    player_name,
-                    version,
-                    aspects,
-                }),
-                Err(error) => self.fail(error.to_string()),
-            },
+                automatic,
+            } => {
+                // Same gate for the join-hook restore.
+                if automatic && !self.player_data_sync_enabled {
+                    return;
+                }
+                match self.fetch_player_data(&player_uuid, &player_name).await {
+                    Ok((version, aspects)) => self.emit(Event::PlayerDataRestore {
+                        player_uuid,
+                        player_name,
+                        version,
+                        aspects,
+                    }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
             Command::PublishRpgItems {
                 player_uuid,
                 player_name,
@@ -2624,6 +2641,7 @@ impl Worker {
                 self.did = Some(did.clone());
                 self.poll_interval_secs = config.poll_interval_secs.max(5);
                 self.post_chat_messages = config.post_chat_messages;
+                self.player_data_sync_enabled = config.player_data_sync_enabled;
                 self.post_death_messages = config.post_death_messages;
                 self.persist_session = config.persist_session;
                 self.chat_server_id = config.chat_server_id.clone();
@@ -2751,6 +2769,7 @@ impl Worker {
                 if let Ok(config) = self.load_config() {
                     self.poll_interval_secs = config.poll_interval_secs.max(5);
                     self.post_chat_messages = config.post_chat_messages;
+                    self.player_data_sync_enabled = config.player_data_sync_enabled;
                     self.post_death_messages = config.post_death_messages;
                     self.persist_session = config.persist_session;
                     self.chat_server_id = config.chat_server_id.clone();
@@ -3234,6 +3253,7 @@ impl Worker {
                     if let Ok(config) = self.load_config() {
                         self.poll_interval_secs = config.poll_interval_secs.max(5);
                         self.post_chat_messages = config.post_chat_messages;
+                        self.player_data_sync_enabled = config.player_data_sync_enabled;
                         self.post_death_messages = config.post_death_messages;
                         self.persist_session = config.persist_session;
                         self.chat_server_id = config.chat_server_id.clone();
@@ -3267,6 +3287,7 @@ impl Worker {
                 if let Ok(config) = self.load_config() {
                     self.poll_interval_secs = config.poll_interval_secs.max(5);
                     self.post_chat_messages = config.post_chat_messages;
+                    self.player_data_sync_enabled = config.player_data_sync_enabled;
                     self.post_death_messages = config.post_death_messages;
                     self.persist_session = config.persist_session;
                     self.chat_server_id = config.chat_server_id.clone();
@@ -3917,6 +3938,7 @@ mod tests {
             labeler_enabled: false,
             post_death_messages: false,
             post_chat_messages: false,
+            player_data_sync_enabled: false,
             chat_server_id: "test-server".into(),
             persist_session: true,
             oauth_client_id: String::new(),
@@ -5743,6 +5765,7 @@ mod tests {
             labeler_enabled: false,
             post_death_messages: true,
             post_chat_messages: true,
+            player_data_sync_enabled: true,
             chat_server_id: "my-server".into(),
             persist_session: true,
             oauth_client_id: String::new(),
@@ -6186,6 +6209,149 @@ mod tests {
         assert_eq!(create_records.len(), 1, "only the explicit post went out");
         let body: serde_json::Value = serde_json::from_str(&create_records[0].body).unwrap();
         assert_eq!(body["record"]["message"], "explicitly published");
+    }
+
+    fn player_data_test_summary() -> records::SnapshotSummary {
+        records::SnapshotSummary {
+            username: "Steve".into(),
+            dimension: "minecraft:overworld".into(),
+            position: records::Position { x: 1, y: 64, z: -2 },
+            health: "20".into(),
+            food: 20,
+            xp_level: 0,
+            game_mode: "survival".into(),
+            team: None,
+            scores: None,
+        }
+    }
+
+    #[test]
+    fn automatic_player_data_is_a_no_op_until_sync_is_enabled() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("player-data-automatic-off");
+        // The default is off: hook-originated capture/restore must be silent.
+        write_config(&dir, &test_config(pds.url.clone()));
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+
+        command_tx
+            .send(Command::PostPlayerData {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Steve".into(),
+                summary: player_data_test_summary(),
+                aspects: vec![PlayerAspect {
+                    name: "stats".into(),
+                    data: "e30=".into(),
+                }],
+                automatic: true,
+            })
+            .unwrap();
+        command_tx
+            .send(Command::FetchPlayerData {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Steve".into(),
+                automatic: true,
+            })
+            .unwrap();
+        // A deterministic event acts as a barrier: everything the two gated
+        // commands might have emitted must arrive before it.
+        command_tx.send(Command::ServerAccountStatus).unwrap();
+        let mut seen = Vec::new();
+        loop {
+            let event = wait_for(&event_rx, |_| true);
+            let done = matches!(event, Event::ServerAccount { .. });
+            seen.push(event);
+            if done {
+                break;
+            }
+        }
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, Event::Failed { .. })),
+            "automatic commands must not fail loudly: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|event| matches!(
+                event,
+                Event::Status(message) if message.contains("player data")
+            )),
+            "automatic commands must not emit status: {seen:?}"
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, Event::PlayerDataRestore { .. })),
+            "automatic restore must not emit a restore: {seen:?}"
+        );
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let requests = pds.requests();
+        assert!(
+            !requests.iter().any(|r| {
+                r.path == "/xrpc/com.atproto.repo.uploadBlob"
+                    || r.path == "/xrpc/com.atproto.repo.putRecord"
+            }),
+            "no snapshot may be published while automatic sync is off"
+        );
+    }
+
+    #[test]
+    fn automatic_player_data_runs_when_sync_is_enabled() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("player-data-automatic-on");
+        let mut config = test_config(pds.url.clone());
+        config.player_data_sync_enabled = true;
+        write_config(&dir, &config);
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+
+        // With the gate open both commands reach the worker's normal path. The
+        // test config has no link map, so each reports its link error instead
+        // of being silently dropped — proving the flag actually let it through.
+        command_tx
+            .send(Command::PostPlayerData {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Steve".into(),
+                summary: player_data_test_summary(),
+                aspects: vec![PlayerAspect {
+                    name: "stats".into(),
+                    data: "e30=".into(),
+                }],
+                automatic: true,
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("server_api_url"), "{message}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+
+        command_tx
+            .send(Command::FetchPlayerData {
+                player_uuid: "00000000-0000-4000-8000-000000000001".into(),
+                player_name: "Steve".into(),
+                automatic: true,
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("server_api_url"), "{message}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
     }
 
     #[test]

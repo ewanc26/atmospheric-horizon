@@ -142,18 +142,21 @@ pub enum GameCommand {
     PostSnapshot { summary: SnapshotSummary },
     /// Publish a snapshot with opaque aspect blobs (M63). The worker checks
     /// that the player's UUID is linked to the logged-in account; a player
-    /// can only capture their own state.
+    /// can only capture their own state. `automatic` marks the M68 logout hook.
     PostPlayerData {
         player_uuid: String,
         player_name: String,
         summary: SnapshotSummary,
         aspects: Vec<PlayerAspect>,
+        automatic: bool,
     },
     /// Fetch the logged-in account's latest verified snapshot and download
-    /// its supported aspects for an online player (M63).
+    /// its supported aspects for an online player (M63). `automatic` marks the
+    /// M68 join hook.
     FetchPlayerData {
         player_uuid: String,
         player_name: String,
+        automatic: bool,
     },
     /// Publish discovered RPG items (M63): provider attestations from the
     /// server account, player records from the linked player's account.
@@ -1753,27 +1756,32 @@ pub fn drain_player_restores() -> Vec<PlayerRestore> {
         .unwrap_or_default()
 }
 
-/// Publish a captured snapshot with aspects (M63).
+/// Publish a captured snapshot with aspects (M63). `automatic` marks the M68
+/// logout hook, which the worker ignores silently when sync is off.
 pub fn post_player_data(
     player_uuid: &str,
     player_name: &str,
     summary: SnapshotSummary,
     aspects: Vec<PlayerAspect>,
+    automatic: bool,
 ) {
     send(GameCommand::PostPlayerData {
         player_uuid: player_uuid.into(),
         player_name: player_name.into(),
         summary,
         aspects,
+        automatic,
     });
 }
 
 /// Ask the worker to fetch and verify the logged-in account's latest snapshot
-/// and download its aspects for a player (M63).
-pub fn fetch_player_data(player_uuid: &str, player_name: &str) {
+/// and download its aspects for a player (M63). `automatic` marks the M68 join
+/// hook.
+pub fn fetch_player_data(player_uuid: &str, player_name: &str, automatic: bool) {
     send(GameCommand::FetchPlayerData {
         player_uuid: player_uuid.into(),
         player_name: player_name.into(),
+        automatic,
     });
 }
 
@@ -2742,8 +2750,8 @@ fn summary_json(summary: &SnapshotSummary) -> Json {
         ),
         ("health", jstr(&summary.health)),
         ("food", jint(summary.food)),
-        ("xp_level", jint(summary.xp_level)),
-        ("game_mode", jstr(&summary.game_mode)),
+        ("xpLevel", jint(summary.xp_level)),
+        ("gameMode", jstr(&summary.game_mode)),
     ])
 }
 
@@ -2889,6 +2897,7 @@ fn encode_command(command: &GameCommand) -> String {
             player_name,
             summary,
             aspects,
+            automatic,
         } => jobj(vec![(
             "PostPlayerData",
             jobj(vec![
@@ -2896,16 +2905,19 @@ fn encode_command(command: &GameCommand) -> String {
                 ("player_name", jstr(player_name)),
                 ("summary", summary_json(summary)),
                 ("aspects", aspects_json(aspects)),
+                ("automatic", jbool(*automatic)),
             ]),
         )]),
         GameCommand::FetchPlayerData {
             player_uuid,
             player_name,
+            automatic,
         } => jobj(vec![(
             "FetchPlayerData",
             jobj(vec![
                 ("player_uuid", jstr(player_uuid)),
                 ("player_name", jstr(player_name)),
+                ("automatic", jbool(*automatic)),
             ]),
         )]),
         GameCommand::PublishRpgItems {
@@ -4636,6 +4648,28 @@ mod tests {
             }),
             r#"{"SetProfileImage":{"field":"avatar","path":"/tmp/avatar.png"}}"#
         );
+        let summary = snapshot_from_player("Steve", "minecraft:overworld", 1.0, 64.0, -2.0);
+        assert_eq!(
+            encode_command(&GameCommand::PostPlayerData {
+                player_uuid: "uuid".into(),
+                player_name: "Steve".into(),
+                summary,
+                aspects: vec![PlayerAspect {
+                    name: "stats".into(),
+                    data: "e30=".into(),
+                }],
+                automatic: true,
+            }),
+            r#"{"PostPlayerData":{"player_uuid":"uuid","player_name":"Steve","summary":{"username":"Steve","dimension":"minecraft:overworld","position":{"x":1,"y":64,"z":-2},"health":"20","food":20,"xpLevel":0,"gameMode":"survival"},"aspects":[{"name":"stats","data":"e30="}],"automatic":true}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::FetchPlayerData {
+                player_uuid: "uuid".into(),
+                player_name: "Steve".into(),
+                automatic: true,
+            }),
+            r#"{"FetchPlayerData":{"player_uuid":"uuid","player_name":"Steve","automatic":true}}"#
+        );
         assert_eq!(
             encode_command(&GameCommand::CheckPlayerProfile {
                 player_uuid: "00000000-0000-4000-8000-000000000002".into(),
@@ -4728,7 +4762,7 @@ mod tests {
             encode_command(&GameCommand::PostSnapshot {
                 summary: snapshot_from_player("Steve", "minecraft:overworld", -24.5, 67.0, -2.5)
             }),
-            r#"{"PostSnapshot":{"summary":{"username":"Steve","dimension":"minecraft:overworld","position":{"x":-25,"y":67,"z":-3},"health":"20","food":20,"xp_level":0,"game_mode":"survival"}}}"#
+            r#"{"PostSnapshot":{"summary":{"username":"Steve","dimension":"minecraft:overworld","position":{"x":-25,"y":67,"z":-3},"health":"20","food":20,"xpLevel":0,"gameMode":"survival"}}}"#
         );
         assert_eq!(
             encode_command(&GameCommand::PostSkin {

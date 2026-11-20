@@ -181,19 +181,24 @@ pub enum Command {
     /// Publish a player-data snapshot with opaque aspect blobs (M63). The
     /// worker checks that `player_uuid` is linked to the logged-in DID, so a
     /// player can only publish their own state, then uploads each aspect and
-    /// signs the snapshot. `data` is standard base64.
+    /// signs the snapshot. `data` is standard base64. `automatic` marks a
+    /// logout-hook capture (M68): the worker ignores it silently when automatic
+    /// sync is off, while an explicit command always runs.
     PostPlayerData {
         player_uuid: String,
         player_name: String,
         summary: records::SnapshotSummary,
         aspects: Vec<PlayerAspect>,
+        automatic: bool,
     },
     /// Fetch the logged-in account's latest verified snapshot and download its
     /// supported aspect blobs for `player_uuid` (M63). The link must point at
-    /// the worker's own DID; this is the self-service restore half.
+    /// the worker's own DID; this is the self-service restore half. `automatic`
+    /// marks a join-hook restore (M68), gated the same way as `PostPlayerData`.
     FetchPlayerData {
         player_uuid: String,
         player_name: String,
+        automatic: bool,
     },
     /// Publish RPG item discoveries (M63). The worker checks the UUID-to-DID
     /// link, writes each `equipment.rpg.give` attestation from the server
@@ -585,6 +590,40 @@ mod tests {
             .unwrap(),
             r#"{"FetchLabelerLabels":{"labeler":"did:plc:x","subject":null}}"#
         );
+        let summary = records::SnapshotSummary {
+            username: "Steve".into(),
+            dimension: "minecraft:overworld".into(),
+            position: records::Position { x: 1, y: 64, z: -2 },
+            health: "20".into(),
+            food: 20,
+            xp_level: 0,
+            game_mode: "survival".into(),
+            team: None,
+            scores: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&Command::PostPlayerData {
+                player_uuid: "uuid".into(),
+                player_name: "Steve".into(),
+                summary: summary.clone(),
+                aspects: vec![PlayerAspect {
+                    name: "stats".into(),
+                    data: "e30=".into(),
+                }],
+                automatic: true,
+            })
+            .unwrap(),
+            r#"{"PostPlayerData":{"player_uuid":"uuid","player_name":"Steve","summary":{"username":"Steve","dimension":"minecraft:overworld","position":{"x":1,"y":64,"z":-2},"health":"20","food":20,"xpLevel":0,"gameMode":"survival"},"aspects":[{"name":"stats","data":"e30="}],"automatic":true}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::FetchPlayerData {
+                player_uuid: "uuid".into(),
+                player_name: "Steve".into(),
+                automatic: true,
+            })
+            .unwrap(),
+            r#"{"FetchPlayerData":{"player_uuid":"uuid","player_name":"Steve","automatic":true}}"#
+        );
         assert_eq!(
             serde_json::to_string(&Command::ColibriReconnect).unwrap(),
             r#""ColibriReconnect""#
@@ -822,6 +861,50 @@ mod tests {
             let back: Command = serde_json::from_str(&line).unwrap();
             assert_eq!(format!("{back:?}"), format!("{command:?}"));
         }
+    }
+
+    /// The game-side runtime hand-rolls this JSON with no serde. Pin the exact
+    /// bytes it emits so a rename on either side cannot silently break M63/M68
+    /// capture (`xpLevel`/`gameMode` are camelCase in `SnapshotSummary`, even
+    /// though the runtime's plain struct uses snake_case fields).
+    #[test]
+    fn player_data_command_accepts_the_runtime_wire_shape() {
+        let line = r#"{"PostPlayerData":{"player_uuid":"uuid","player_name":"Steve","summary":{"username":"Steve","dimension":"minecraft:overworld","position":{"x":1,"y":64,"z":-2},"health":"20","food":20,"xpLevel":0,"gameMode":"survival"},"aspects":[{"name":"stats","data":"e30="}],"automatic":true}}"#;
+        let command: Command = serde_json::from_str(line).unwrap();
+        let Command::PostPlayerData {
+            player_uuid,
+            player_name,
+            summary,
+            aspects,
+            automatic,
+        } = command
+        else {
+            panic!("expected PostPlayerData");
+        };
+        assert_eq!(player_uuid, "uuid");
+        assert_eq!(player_name, "Steve");
+        assert_eq!(summary.xp_level, 0);
+        assert_eq!(summary.game_mode, "survival");
+        assert_eq!(summary.position.x, 1);
+        assert_eq!(
+            aspects,
+            vec![PlayerAspect {
+                name: "stats".into(),
+                data: "e30=".into(),
+            }]
+        );
+        assert!(automatic);
+
+        let line =
+            r#"{"FetchPlayerData":{"player_uuid":"uuid","player_name":"Steve","automatic":true}}"#;
+        let command: Command = serde_json::from_str(line).unwrap();
+        assert!(matches!(
+            command,
+            Command::FetchPlayerData {
+                automatic: true,
+                ..
+            }
+        ));
     }
 
     #[test]

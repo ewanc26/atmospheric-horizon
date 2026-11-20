@@ -191,7 +191,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
                 );
             }
             ("restore", Some(player)) => {
-                m::fetch_player_data(&m::uuid_text(player.uuid), &player.name);
+                m::fetch_player_data(&m::uuid_text(player.uuid), &player.name, false);
                 game.native_tell(
                     player.uuid,
                     horizon_client::text::Text::literal(
