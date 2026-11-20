@@ -1,30 +1,27 @@
-# Contributing
+# Contributing to atmospheric-horizon
 
-Thanks for considering a contribution.
+AT Protocol (Bluesky) integration for [Horizon](https://playhorizon.dev), the Rust rewrite of Minecraft: Java Edition — post text and screenshots, reply and react, read notifications, and manage atpcraft-compatible server chat without leaving the game. Thanks for wanting to help!
 
-## Project context
+> Independent project; not affiliated with Mojang, Microsoft, Bluesky PBC, or the Horizon project. NOT AN OFFICIAL MINECRAFT PRODUCT.
 
-- Primary language: Rust (edition 2024)
-- Default branch: main
-- Issue and pull-request templates live in `.github/`
+## Getting started
 
-## Before submitting changes
+Build per the [README](README.md) (`cargo build`, plus the `atmospheric-worker` sidecar the current release uses). Check the [Roadmap](#roadmap) section before starting: some things intentionally wait on upstream.
 
-- Read `README.md` and `docs/ARCHITECTURE.md` first; `AGENTS.md` has the working rules (they apply to humans too).
-- Use feature branches and pull requests against `main`. Keep the branch linear: rebase onto `main` instead of merging it in, and expect PRs to be merged with `--rebase` (atomic, scoped commits only — see AGENTS.md's hard rules).
-- Keep the layer boundary: the injected `runtime.rs` stays std-only; everything else goes in `crates/atmospheric` with tests.
-- Rust modules follow `<scope>/[<subscope>/]<atom>.rs`: directories are scopes, files are single-word atoms, and `mod.rs` only declares a scope. `crates/atmospheric`, `crates/atmospheric-server` and the mixin helper scopes are migrated; keep new code in scopes rather than adding flat files or multi-word atoms.
-- Any change that adds an endpoint, a field sent over the wire, or a new kind of stored data must update the README's "Network use" section in the same pull request.
-- Run before opening a PR:
+## Notes for this project
 
-```bash
-bash scripts/check-layout.sh
-bash scripts/test-layout.sh
-cargo fmt
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --locked
-```
+- **Architecture rule: the injected runtime is std-only, and every network or disk operation happens in the `atmospheric-worker` sidecar.** Keep that boundary — no I/O sneaking into the injected mod half.
+- The atpcraft compatibility surface is **data-isolated by design**: upstream lexicons are reimplemented as data with no code copied, precisely because upstream carries no licence. Keep it that way.
+- Launcher-based native-mod distribution waits on third-party native-mod support upstream; don't ship around that in a PR.
+- Public reads work signed out; posting and record writes need an account. Test writes against a scratch Bluesky account, never your main.
+- Every network proto question belongs to specs and lexicons: link the one you're implementing in the PR.
+
+## Before opening a PR
+
+- `cargo` builds clean and the CI badge stays green; you exercised the feature in-game against a scratch account.
+- Conventional commits; focused PRs; describe what you tested in-game and what you couldn't.
+- AI-assisted PRs welcome; stand behind every line and run the checks yourself.
 
 ## Licence
 
-By contributing, you agree your contributions are licensed under AGPL-3.0-only, the repository's licence.
+AGPL-3.0 (see [LICENSE](LICENSE)). Contributions accepted under the same terms.
