@@ -141,6 +141,13 @@ pub struct Config {
     /// reading a player's `at.atpcraft.player.snapshot` record, endorsements
     /// from these key ids are accepted alongside the mod's own signing key.
     pub trusted_server_keys: Vec<TrustedServerKey>,
+    /// Capture a linked player's data automatically when they leave and restore
+    /// the newest verified snapshot when they join (M68). Off by default:
+    /// explicit `/atmospheric player-data` commands always work either way.
+    /// Requires `server_api_url` for the UUID-to-DID link check, and peer
+    /// servers' signing keys belong in `trusted_server_keys` to restore their
+    /// snapshots.
+    pub player_data_sync_enabled: bool,
     /// Arm the Colibri chat bridge automatically once the server account is
     /// available (M26). The command can start it explicitly too.
     pub colibri_bridge_enabled: bool,
@@ -203,6 +210,7 @@ impl Default for Config {
             join_gate_sweep_seconds: 60,
             list_cache_seconds: 300,
             trusted_server_keys: Vec::new(),
+            player_data_sync_enabled: false,
             colibri_bridge_enabled: false,
             colibri_channel_uri: String::new(),
             colibri_appview_url: "https://api.colibri.social".into(),
@@ -285,6 +293,7 @@ mod tests {
                 key_id: String::new(),
                 public_key: "MCowBQYDK2VwAyEA...".into(),
             }],
+            player_data_sync_enabled: true,
             colibri_bridge_enabled: true,
             colibri_channel_uri: "https://colibri.social/app/c/did:plc:abc/text/3jtest".into(),
             colibri_appview_url: "https://appview.example".into(),
@@ -306,6 +315,7 @@ mod tests {
         );
         assert!(back.post_death_messages);
         assert!(back.post_chat_messages);
+        assert!(back.player_data_sync_enabled);
         assert_eq!(back.chat_server_id, "my-server");
         assert_eq!(back.client_name, "atmospheric-horizon");
         assert!(back.persist_session);
