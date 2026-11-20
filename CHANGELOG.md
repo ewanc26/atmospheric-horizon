@@ -12,6 +12,17 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-20
+
+Fourth tagged release. Adds the generic record browser, linked-player names and
+hosted lexicons, chat and server-profile parity, proactive token refresh and
+automatic server-profile publish, a list-member cache, configurable OAuth scope,
+grants and browser-link lifetime, a complete labeler (signed labels, a durable
+log, public query/stream endpoints, a service declaration and PLC identity
+publication, game triggers and op-level/statistic labels), player-data aspect
+capture and RPG item discovery, browser skin upload, and profile editing with
+avatar and banner uploads (M44–M66).
+
 ### Added
 
 - **M44 — generic record browser (#107).** `/atmospheric records <did|handle>
