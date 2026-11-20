@@ -12,6 +12,15 @@ file = "crates/horizon-client/src/game.rs"
 name = "atmospheric"
 source = "runtime.rs"
 
+# M68: the aspect encoder shared by the manual tick capture and the automatic
+# logout hook. A helper injected at one hook cannot call a helper injected at
+# another by name, so this lives in its own module.
+[[module]]
+id = "playerdata"
+file = "crates/horizon-client/src/game.rs"
+name = "atmospheric_playerdata"
+source = "playerdata/capture.rs"
+
 # The hooks below are Horizon's named native hook points
 # (native-hooks.json at the pinned revision), not raw targets.
 
@@ -160,6 +169,33 @@ hook = "player_logged_out"
 hook_version = 1
 kind = "HEAD"
 helper = "labeler/leave.rs"
+bindings = [
+  { name = "player", ty = "u128", value = "player" },
+  { name = "name", ty = "&str", value = "name" },
+]
+
+# Automatic player-data sync (M68). `player_logging_out` is a raw target: it is
+# in the pinned game source and its hook fragment, but not in native-hooks.json.
+# It fires while the player is still in their level and in native_server_players,
+# before they are saved and removed — the only logout seam with live state.
+[[injection]]
+id = "playerdata-capture"
+target = "horizon_client::game::native_hooks::Game<'_>::native_player_logging_out"
+kind = "HEAD"
+helper = "playerdata/leave.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "u128", value = "player" },
+  { name = "name", ty = "&str", value = "name" },
+]
+
+# A join is after placement, so the tick can apply the restored aspects.
+[[injection]]
+id = "playerdata-restore"
+hook = "player_logged_in"
+hook_version = 1
+kind = "HEAD"
+helper = "playerdata/join.rs"
 bindings = [
   { name = "player", ty = "u128", value = "player" },
   { name = "name", ty = "&str", value = "name" },
