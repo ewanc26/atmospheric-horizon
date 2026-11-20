@@ -40,7 +40,7 @@ serde_json = "1"
 # (BSD-3-Clause; sha2/base64 are MIT OR Apache-2.0 — all AGPL-compatible).
 # Pure Rust, so players' machines need no system crypto libraries.
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-sha2 = "0.10"
+sha2 = "0.11"
 base64 = "0.22"
 # For the signing key's random seed (MIT OR Apache-2.0).
 rand_core = { version = "0.6", features = ["getrandom"] }
