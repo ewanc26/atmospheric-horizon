@@ -229,6 +229,15 @@ pub enum Command {
     /// Publish/refresh the server profile from the separate server account
     /// (M25), the atpcraft ownership model, instead of the player account.
     PostServerProfileAsServer,
+    /// Publish/refresh the server card (#191, M69): the typed, liveness-
+    /// checked manifest from the new card scope, written by the server account
+    /// at a fixed record key so the commit recency doubles as the liveness.
+    /// Identity fields come from the settings file; the population counts are
+    /// reported by the game side; the record is validated before it is sent.
+    PublishServerCard {
+        players_online: u32,
+        players_max: Option<u32>,
+    },
     /// Fetch the member DIDs of a public Bluesky list — the read side of
     /// atpcraft's join gate (M11). The reference is an
     /// `at://…/app.bsky.graph.list/<rkey>` URI or a bsky.app list URL.
@@ -723,6 +732,14 @@ mod tests {
             .unwrap(),
             r#"{"LabelerSweep":{"players":[{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex","admin":true,"play_time_ticks":72000000,"mob_kills":1000,"deaths":100,"dragon_kills":1}]}}"#
         );
+        assert_eq!(
+            serde_json::to_string(&Command::PublishServerCard {
+                players_online: 3,
+                players_max: Some(20),
+            })
+            .unwrap(),
+            r#"{"PublishServerCard":{"players_online":3,"players_max":20}}"#
+        );
         // SaveConfig carries the full Config; the game side sends the Settings
         // subset and container-level serde(default) fills the rest.
         let json = serde_json::to_string(&Command::SaveConfig {
@@ -798,6 +815,10 @@ mod tests {
                 model: "slim".into(),
             },
             Command::PostServerProfile,
+            Command::PublishServerCard {
+                players_online: 3,
+                players_max: Some(20),
+            },
             Command::FetchList {
                 reference: "at://x/app.bsky.graph.list/y".into(),
             },
