@@ -26,6 +26,10 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      # Surface rustc/clippy diagnostics as check-run annotations.
+      - name: Register the Rust problem matcher
+        run: echo "::add-matcher::.github/problem-matcher-rust.json"
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
