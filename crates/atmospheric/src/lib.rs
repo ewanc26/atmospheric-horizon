@@ -16,7 +16,7 @@ pub mod worker;
 
 pub use account::{identity, oauth, plc, session};
 pub use base::{config, error, records, signing, tid};
-pub use card::record;
+pub use card::{digest, record};
 pub use social::{
     actions, chats, graph, interactions, labeler, labels, lists, notifications, presence, profiles,
     servers, skins, triggers,
@@ -333,7 +333,11 @@ pub enum Command {
     /// read side of M10). The subject is a DID or a handle; the read is
     /// unauthenticated — works logged out.
     FetchServerProfile { subject: String },
-    /// Read one of an account's public social graphs (M20): `kind` is
+    /// Read a server's published card (#191, M69 read side) from its own
+    /// PDS and assess its liveness from the record's recency. The subject
+    /// is a DID or a handle; the read is unauthenticated — works logged out.
+    FetchServerCard { subject: String },
+    /// Read one of an account's public social graphs (M20): ~B~kind~B~ is
     /// "follows", "followers", "blocks" or "mutes", and `subject` is a DID
     /// or a handle. Unauthenticated AppView read — works logged out.
     FetchGraph { kind: String, subject: String },
@@ -503,7 +507,17 @@ pub enum Event {
         // Boxed: ServerDigest is one of the event enum's largest variants.
         profile: Box<Option<servers::ServerDigest>>,
     },
-    /// One of an account's social graphs (M20): the relation (`kind`), the
+    /// A server's published card (#191, M69 read side): the resolved DID
+    /// (~B~subject~B~), the PDS it was read from (~B~via~B~), and the digest with
+    /// its liveness verdict (~B~None~B~ when the repo has no valid card).
+    ServerCard {
+        subject: String,
+        via: String,
+        // Boxed: CardDigest carries the typed record, one of the event
+        // enum's larger variants.
+        card: Box<Option<digest::CardDigest>>,
+    },
+    /// One of an account's social graphs (M20): the relation (~B~kind~B~), the
     /// subject's resolved DID, the AppView it was read from (`via`), and the
     /// accounts in page order.
     SocialGraph {
@@ -740,6 +754,13 @@ mod tests {
             .unwrap(),
             r#"{"PublishServerCard":{"players_online":3,"players_max":20}}"#
         );
+        assert_eq!(
+            serde_json::to_string(&Command::FetchServerCard {
+                subject: "did:plc:z".into()
+            })
+            .unwrap(),
+            r#"{"FetchServerCard":{"subject":"did:plc:z"}}"#
+        );
         // SaveConfig carries the full Config; the game side sends the Settings
         // subset and container-level serde(default) fills the rest.
         let json = serde_json::to_string(&Command::SaveConfig {
@@ -818,6 +839,9 @@ mod tests {
             Command::PublishServerCard {
                 players_online: 3,
                 players_max: Some(20),
+            },
+            Command::FetchServerCard {
+                subject: "did:plc:z".into(),
             },
             Command::FetchList {
                 reference: "at://x/app.bsky.graph.list/y".into(),
@@ -988,6 +1012,15 @@ mod tests {
             r#"{"PlayerSnapshot":{"subject":"did:plc:x","via":"https://pds.example","snapshot":null}}"#
         );
         assert_eq!(
+            serde_json::to_string(&Event::ServerCard {
+                subject: "did:plc:x".into(),
+                via: "https://pds.example".into(),
+                card: Box::new(None),
+            })
+            .unwrap(),
+            r#"{"ServerCard":{"subject":"did:plc:x","via":"https://pds.example","card":null}}"#
+        );
+        assert_eq!(
             serde_json::to_string(&Event::JoinGateState {
                 enabled: true,
                 list: "at://l".into(),
@@ -1086,6 +1119,11 @@ mod tests {
                 subject: "s".into(),
                 via: "v".into(),
                 profile: Box::new(None),
+            },
+            Event::ServerCard {
+                subject: "s".into(),
+                via: "v".into(),
+                card: Box::new(None),
             },
             Event::SocialGraph {
                 kind: "follows".into(),
