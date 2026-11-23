@@ -415,6 +415,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and the checks required 
 
 AGPL-3.0-only. See [LICENSE](LICENSE).
 
+Copyright (C) 2026 Ewan Croft (ewanc26).
+
 ## Support
 
 If you find this project useful, consider supporting its development:
