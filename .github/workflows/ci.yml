@@ -53,7 +53,7 @@ jobs:
             grep -vE '^[[:space:]]*$' clippy.log | head -n 160
             echo '```'
           } > /tmp/clippy-comment.md
-          gh pr comment \"$PR_NUMBER\" --body-file /tmp/clippy-comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/clippy-comment.md
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
