@@ -1698,7 +1698,7 @@ impl Worker {
     /// (#191, M69). Identity fields come from the settings file and the
     /// population counts from the game side; the record is validated before
     /// it is sent. The card lives at a fixed record key and every publish
-    /// stamps a fresh ~B~createdAt~B~, so a fresh write is the card's liveness.
+    /// stamps a fresh `createdAt`, so a fresh write is the card's liveness.
     async fn publish_server_card(
         &mut self,
         players_online: u32,
@@ -2322,7 +2322,7 @@ impl Worker {
     }
     /// Read a server's published card (#191, M69 read side): a public read
     /// against the subject's own PDS, so it works logged out. The liveness
-    /// verdict compares the record's ~B~createdAt~B~ with the worker's clock.
+    /// verdict compares the record's `createdAt` with the worker's clock.
     async fn fetch_server_card(
         &self,
         subject: &str,
