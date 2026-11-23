@@ -50,7 +50,7 @@ jobs:
             echo '### Clippy failed'
             echo
             echo '```text'
-            grep -vE '^[[:space:]]*$' clippy.log | head -n 160
+            grep -aE '^error|^warning|-->|note:|help:|test result|FAILED|panicked' clippy.log | head -n 160
             echo '```'
           } > /tmp/clippy-comment.md
           gh pr comment "$PR_NUMBER" --body-file /tmp/clippy-comment.md
