@@ -8,6 +8,7 @@
 
 mod account;
 mod base;
+mod card;
 pub mod colibri;
 mod rpg;
 mod social;
@@ -15,6 +16,7 @@ pub mod worker;
 
 pub use account::{identity, oauth, plc, session};
 pub use base::{config, error, records, signing, tid};
+pub use card::record;
 pub use social::{
     actions, chats, graph, interactions, labeler, labels, lists, notifications, presence, profiles,
     servers, skins, triggers,
