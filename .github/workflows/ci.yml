@@ -31,7 +31,10 @@ jobs:
         run: echo "::add-matcher::.github/problem-matcher-rust.json"
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # Problem matchers see raw bytes, so the ANSI colours the global
+        # CARGO_TERM_COLOR=always paints on would hide every diagnostic from
+        # them before an annotation could exist.
+        run: CARGO_TERM_COLOR=never cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --workspace --locked
