@@ -1539,6 +1539,47 @@ pinned `horizon-mixins` staging tool is not present, and no live Minecraft
 server, identity service or PDS was contacted. atpcraft was used only as a
 wire-behaviour reference.
 
+### M69: server card (#191)
+
+The server card is a liveness-checked server manifest the **server
+account** (M25) republishes under one fixed record key
+(`club.atmospheric.server.card` at rkey `self`), so a freshly stamped record
+is evidence the server is still publishing and every field stays plainly
+attributable to its author: the card carries no signature block (repo
+authentication only), and the liveness verdict says when the author last
+republished, never that anyone vouched for the fields.
+
+The milestone has two halves, both in the `card` scope at
+`crates/atmospheric/src/card/`:
+
+- **The typed record (`card::record`).** `CardRecord~/~CardPack` with caps:
+  64-byte names, a 128-byte plain `host[:port]` address, population counts
+  capped at 100 000, at most 32 packs each with an https `source` and a
+  lower-hex sha-256, and `conduct` restricted to https or at://. `validate()`
+  runs before any publish and its failure message is reported as-is. The
+  collection's authority domain (`club.atmospheric` presumes a domain the
+  author does not hold yet) is an open choice tracked in the issue;
+  changing one constant changes it.
+- **The read side (`card::digest`).** `latest()` picks the structurally
+  valid record (rkey `self` preferred, otherwise the newest `createdAt`),
+  mirroring the M19 pick; `epoch_seconds()` is a dependency-free RFC 3339
+  UTC parser (whole seconds, non-UTC offsets refused rather than
+  shifted); and `liveness()` grades recency against the worker's clock —
+  `Fresh` within an hour (`CARD_FRESH_SECONDS`), `Stale` after,
+  `Unknown` when the timestamp does not parse. `fetch_card()` resolves the
+  account and pages the collection unauthenticated.
+
+Protocol changes: `PublishServerCard { players_online, players_max }` (the
+worker fills the identity fields from the settings file, validates, and
+stamps a fresh `createdAt` per publish — packs and the pinned engine
+revision have no game-side source yet, so they publish empty until the
+runtime command grows), `FetchServerCard { subject }`, and the
+`ServerCard { subject, via, card }` event; wire-shape pins and round-trip
+entries cover all three. No new endpoint or credential: the publish rides
+the server account's PDS session and the read is unauthenticated. The
+runtime stays std-only; the game-side command wiring, the publish timer
+and #196's pre-join display are follow-ups tracked on the issue.
+
 ### M68: automatic player-data sync
 
 M68 makes the M63 capture/restore hooks automatic and cross-server. Two new
