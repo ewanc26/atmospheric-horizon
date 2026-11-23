@@ -794,12 +794,10 @@ impl Worker {
             Command::PublishServerCard {
                 players_online,
                 players_max,
-            } => {
-                match self.publish_server_card(players_online, players_max).await {
-                    Ok(uri) => self.emit(Event::Posted { uri }),
-                    Err(error) => self.fail(error.to_string()),
-                }
-            }
+            } => match self.publish_server_card(players_online, players_max).await {
+                Ok(uri) => self.emit(Event::Posted { uri }),
+                Err(error) => self.fail(error.to_string()),
+            },
             Command::FetchList { reference } => {
                 // Public AppView read: works logged out, no token refresh.
                 match self.fetch_list(&reference).await {

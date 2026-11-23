@@ -9,9 +9,7 @@
 //! Timestamp handling is deliberately dependency-free: AT Protocol records
 //! are stamped in UTC RFC 3339, and the parser pins exactly that.
 
-use crate::card::record::{
-    CardPack, CardRecord, CARD_COLLECTION, CARD_RKEY, CARD_SHA256_LEN,
-};
+use crate::card::record::{CARD_COLLECTION, CARD_RKEY, CardRecord};
 use crate::error::{AtmosphericError, Result};
 use reqwest::Client;
 
@@ -158,7 +156,9 @@ pub fn digest(
     now_epoch: i64,
 ) -> Result<CardDigest> {
     let parsed = serde_json::from_value::<CardRecord>(record.clone()).map_err(|error| {
-        AtmosphericError::Message(format!("the server card does not match its schema: {error}"))
+        AtmosphericError::Message(format!(
+            "the server card does not match its schema: {error}"
+        ))
     })?;
     let published_at = record
         .get("createdAt")
@@ -190,8 +190,7 @@ pub async fn fetch_card(
     now_epoch: i64,
 ) -> Result<(String, String, Option<CardDigest>)> {
     let (did, pds) = crate::social::servers::resolve_server(http, resolver, raw).await?;
-    let records =
-        crate::social::servers::list_records(http, &pds, &did, CARD_COLLECTION).await?;
+    let records = crate::social::servers::list_records(http, &pds, &did, CARD_COLLECTION).await?;
     let Some((rkey, value)) = latest(&records) else {
         return Ok((did, pds, None));
     };
@@ -202,6 +201,7 @@ pub async fn fetch_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::card::record::{CARD_SHA256_LEN, CardPack};
 
     fn card_value() -> serde_json::Value {
         let record = CardRecord {
@@ -280,9 +280,15 @@ mod tests {
         let mut broken = card_value();
         broken["packs"][0]["source"] = serde_json::json!("http://insecure.test/pack.hpack");
         let records = vec![
-            ("old".to_string(), with_created_at(&card, "2026-11-01T00:00:00Z")),
+            (
+                "old".to_string(),
+                with_created_at(&card, "2026-11-01T00:00:00Z"),
+            ),
             ("broken".to_string(), broken),
-            ("self".to_string(), with_created_at(&card, "2026-11-22T00:00:00Z")),
+            (
+                "self".to_string(),
+                with_created_at(&card, "2026-11-22T00:00:00Z"),
+            ),
         ];
         let (rkey, _) = latest(&records).unwrap();
         assert_eq!(rkey, "self");
@@ -292,8 +298,14 @@ mod tests {
     fn latest_picks_newest_created_at_without_self() {
         let card = card_value();
         let records = vec![
-            ("a".to_string(), with_created_at(&card, "2026-11-10T00:00:00.000Z")),
-            ("b".to_string(), with_created_at(&card, "2026-11-11T00:00:00.000Z")),
+            (
+                "a".to_string(),
+                with_created_at(&card, "2026-11-10T00:00:00.000Z"),
+            ),
+            (
+                "b".to_string(),
+                with_created_at(&card, "2026-11-11T00:00:00.000Z"),
+            ),
         ];
         let (rkey, _) = latest(&records).unwrap();
         assert_eq!(rkey, "b");
@@ -327,8 +339,7 @@ mod tests {
         .unwrap();
         assert_eq!(stale.liveness, CardLiveness::Stale);
 
-        let unknown =
-            digest("did:plc:alice", CARD_RKEY, &card_value(), 1_795_426_200).unwrap();
+        let unknown = digest("did:plc:alice", CARD_RKEY, &card_value(), 1_795_426_200).unwrap();
         assert_eq!(unknown.published_at, "");
         assert_eq!(unknown.age_seconds, None);
         assert_eq!(unknown.liveness, CardLiveness::Unknown);
