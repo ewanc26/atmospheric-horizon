@@ -1,0 +1,40 @@
+{
+  "problemMatcher": [
+    {
+      "owner": "rust",
+      "severity": "error",
+      "pattern": [
+        {
+          "regexp": "^(error|warning)\\[(.+)\\]: (.*)$",
+          "severity": 1,
+          "code": 2,
+          "message": 3
+        },
+        {
+          "regexp": "^\\s*--> (.+):(\\d+):(\\d+)$",
+          "kind": "location",
+          "file": 1,
+          "line": 2,
+          "column": 3
+        }
+      ]
+    },
+    {
+      "owner": "rust-plain",
+      "severity": "error",
+      "pattern": [
+        {
+          "regexp": "^(error|warning): (.*)$",
+          "message": 2
+        },
+        {
+          "regexp": "^\\s*--> (.+):(\\d+):(\\d+)$",
+          "kind": "location",
+          "file": 1,
+          "line": 2,
+          "column": 3
+        }
+      ]
+    }
+  ]
+}
