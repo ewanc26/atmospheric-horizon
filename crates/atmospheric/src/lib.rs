@@ -337,7 +337,7 @@ pub enum Command {
     /// PDS and assess its liveness from the record's recency. The subject
     /// is a DID or a handle; the read is unauthenticated — works logged out.
     FetchServerCard { subject: String },
-    /// Read one of an account's public social graphs (M20): ~B~kind~B~ is
+    /// Read one of an account's public social graphs (M20): `kind` is
     /// "follows", "followers", "blocks" or "mutes", and `subject` is a DID
     /// or a handle. Unauthenticated AppView read — works logged out.
     FetchGraph { kind: String, subject: String },
@@ -508,8 +508,8 @@ pub enum Event {
         profile: Box<Option<servers::ServerDigest>>,
     },
     /// A server's published card (#191, M69 read side): the resolved DID
-    /// (~B~subject~B~), the PDS it was read from (~B~via~B~), and the digest with
-    /// its liveness verdict (~B~None~B~ when the repo has no valid card).
+    /// (`subject`), the PDS it was read from (`via`), and the digest with
+    /// its liveness verdict (`None` when the repo has no valid card).
     ServerCard {
         subject: String,
         via: String,
@@ -517,7 +517,7 @@ pub enum Event {
         // enum's larger variants.
         card: Box<Option<digest::CardDigest>>,
     },
-    /// One of an account's social graphs (M20): the relation (~B~kind~B~), the
+    /// One of an account's social graphs (M20): the relation (`kind`), the
     /// subject's resolved DID, the AppView it was read from (`via`), and the
     /// accounts in page order.
     SocialGraph {
