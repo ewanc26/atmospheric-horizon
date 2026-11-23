@@ -109,10 +109,10 @@ impl CardRecord {
         if self.engine.trim().is_empty() || self.engine.len() > CARD_MAX_NAME {
             return Err("engine is empty or too long".into());
         }
-        if let Some(revision) = &self.engine_revision {
-            if revision.len() != CARD_REVISION_LEN || !is_lower_hex(revision) {
-                return Err("engine_revision must be a 40-character lower-hex commit hash".into());
-            }
+        if let Some(revision) = &self.engine_revision
+            && (revision.len() != CARD_REVISION_LEN || !is_lower_hex(revision))
+        {
+            return Err("engine_revision must be a 40-character lower-hex commit hash".into());
         }
         if self.packs.len() > CARD_MAX_PACKS {
             return Err("packs may declare at most CARD_MAX_PACKS entries".into());
@@ -131,12 +131,11 @@ impl CardRecord {
                 ));
             }
         }
-        if let Some(conduct) = &self.conduct {
-            if !(conduct.starts_with("https://") || conduct.starts_with("at://"))
-                || conduct.len() > CARD_MAX_URL
-            {
-                return Err("conduct must be an https URL or an at:// URI".into());
-            }
+        if let Some(conduct) = &self.conduct
+            && (!(conduct.starts_with("https://") || conduct.starts_with("at://"))
+                || conduct.len() > CARD_MAX_URL)
+        {
+            return Err("conduct must be an https URL or an at:// URI".into());
         }
         if self.software.trim().is_empty() || self.software.len() > CARD_MAX_URL {
             return Err("software is empty or too long".into());
