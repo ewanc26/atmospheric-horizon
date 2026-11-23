@@ -74,7 +74,10 @@ pub struct CardRecord {
 
 /// True when every byte is 0-9 or a-f: lower-case hex.
 fn is_lower_hex(value: &str) -> bool {
-    !value.is_empty() && value.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 impl CardRecord {
