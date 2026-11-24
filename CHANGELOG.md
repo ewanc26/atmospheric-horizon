@@ -24,6 +24,11 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   the explicit `/atmospheric player-data` commands always run. No new endpoint,
   event or credential.
 
+### Changed
+
+- **Package metadata.** The crate manifests now list their authors, and the
+  README states the copyright holder.
+
 ### Fixed
 
 - Aligned the runtime's hand-rolled snapshot summary JSON with the worker's
