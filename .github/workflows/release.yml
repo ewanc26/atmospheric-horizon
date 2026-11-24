@@ -112,7 +112,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Publish the GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: atmospheric-horizon ${{ github.ref_name }}
           generate_release_notes: true
