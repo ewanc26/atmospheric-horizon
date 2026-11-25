@@ -353,6 +353,9 @@ struct Worker {
     post_death_messages: bool,
     /// `post_achievement_messages` from the settings file, refreshed at login.
     post_achievement_messages: bool,
+    /// `post_screenshots` from the settings file (#182): gates automatic F2
+    /// screenshot posts. Refreshed at login.
+    post_screenshots: bool,
     /// `persist_session` from the settings file, refreshed at login.
     persist_session: bool,
     /// The persisted session, if any, for resuming across restarts.
@@ -556,6 +559,7 @@ impl Worker {
             player_data_sync_enabled: false,
             post_death_messages: false,
             post_achievement_messages: false,
+            post_screenshots: false,
             persist_session: true,
             stored_session,
             server_agent: None,
@@ -708,7 +712,13 @@ impl Worker {
                 path,
                 alt_text,
                 text,
+                automatic,
             } => {
+                // Hook-originated screenshots only publish when the setting
+                // says so; the manual keybind always does (#182).
+                if automatic && !self.post_screenshots {
+                    return;
+                }
                 self.ensure_oauth_fresh().await;
                 match self.post_image(&path, &alt_text, text.as_deref()).await {
                     Ok(uri) => self.emit(Event::Posted { uri }),
@@ -2774,6 +2784,7 @@ impl Worker {
                 self.player_data_sync_enabled = config.player_data_sync_enabled;
                 self.post_death_messages = config.post_death_messages;
                 self.post_achievement_messages = config.post_achievement_messages;
+                self.post_screenshots = config.post_screenshots;
                 self.persist_session = config.persist_session;
                 self.chat_server_id = config.chat_server_id.clone();
                 self.identifier = config.identifier.clone();
@@ -2903,6 +2914,7 @@ impl Worker {
                     self.player_data_sync_enabled = config.player_data_sync_enabled;
                     self.post_death_messages = config.post_death_messages;
                     self.post_achievement_messages = config.post_achievement_messages;
+                    self.post_screenshots = config.post_screenshots;
                     self.persist_session = config.persist_session;
                     self.chat_server_id = config.chat_server_id.clone();
                 }
@@ -3388,6 +3400,7 @@ impl Worker {
                         self.player_data_sync_enabled = config.player_data_sync_enabled;
                         self.post_death_messages = config.post_death_messages;
                         self.post_achievement_messages = config.post_achievement_messages;
+                        self.post_screenshots = config.post_screenshots;
                         self.persist_session = config.persist_session;
                         self.chat_server_id = config.chat_server_id.clone();
                     }
@@ -3423,6 +3436,7 @@ impl Worker {
                     self.player_data_sync_enabled = config.player_data_sync_enabled;
                     self.post_death_messages = config.post_death_messages;
                     self.post_achievement_messages = config.post_achievement_messages;
+                    self.post_screenshots = config.post_screenshots;
                     self.persist_session = config.persist_session;
                     self.chat_server_id = config.chat_server_id.clone();
                     self.identifier = config.identifier.clone();
@@ -4072,6 +4086,7 @@ mod tests {
             labeler_enabled: false,
             post_death_messages: false,
             post_achievement_messages: false,
+            post_screenshots: false,
             post_chat_messages: false,
             player_data_sync_enabled: false,
             chat_server_id: "test-server".into(),
@@ -5900,6 +5915,7 @@ mod tests {
             labeler_enabled: false,
             post_death_messages: true,
             post_achievement_messages: true,
+            post_screenshots: true,
             post_chat_messages: true,
             player_data_sync_enabled: true,
             chat_server_id: "my-server".into(),
@@ -5951,6 +5967,7 @@ mod tests {
         assert_eq!(back.poll_interval_secs, 30);
         assert!(back.post_death_messages);
         assert!(back.post_achievement_messages);
+        assert!(back.post_screenshots);
         assert!(back.post_chat_messages);
         assert_eq!(back.chat_server_id, "my-server");
         assert!(back.persist_session);
@@ -6086,6 +6103,7 @@ mod tests {
                 path: shot.display().to_string(),
                 alt_text: "test screenshot".into(),
                 text: Some("with a caption".into()),
+                automatic: false,
             })
             .unwrap();
         match wait_for(&event_rx, |e| matches!(e, Event::Posted { .. })) {
@@ -6148,6 +6166,7 @@ mod tests {
                 path: dir.join("missing.png").display().to_string(),
                 alt_text: "x".into(),
                 text: None,
+                automatic: false,
             })
             .unwrap();
         match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
@@ -6159,6 +6178,7 @@ mod tests {
                 path: not_image.display().to_string(),
                 alt_text: "x".into(),
                 text: None,
+                automatic: false,
             })
             .unwrap();
         match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
@@ -8769,6 +8789,86 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&create_record.body).unwrap();
         assert_eq!(body["collection"], "app.bsky.feed.post");
         assert_eq!(body["record"]["text"], "🏆 Player earned The End");
+    }
+
+    #[test]
+    fn automatic_screenshot_posts_only_when_enabled() {
+        let png = tiny_png();
+
+        // Flag off: the hook's command is dropped before any file or network I/O.
+        let pds = StubPds::start(false);
+        let dir = temp_dir("shot-off");
+        let mut config = test_config(pds.url.clone());
+        config.post_screenshots = false;
+        write_config(&dir, &config);
+        let shot = dir.join("shot.png");
+        std::fs::write(&shot, &png).unwrap();
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        command_tx
+            .send(Command::PostImage {
+                path: shot.display().to_string(),
+                alt_text: "Screenshot from Horizon".into(),
+                text: None,
+                automatic: true,
+            })
+            .unwrap();
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+        assert!(
+            !pds.requests()
+                .iter()
+                .any(|r| r.path == "/xrpc/com.atproto.repo.createRecord"),
+            "flag off: nothing was posted"
+        );
+
+        // Flag on: the same hook command uploads the blob and posts the embed.
+        let pds = StubPds::start(false);
+        let dir = temp_dir("shot-on");
+        let mut config = test_config(pds.url.clone());
+        config.post_screenshots = true;
+        write_config(&dir, &config);
+        let shot = dir.join("shot.png");
+        std::fs::write(&shot, &png).unwrap();
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        command_tx
+            .send(Command::PostImage {
+                path: shot.display().to_string(),
+                alt_text: "Screenshot from Horizon".into(),
+                text: None,
+                automatic: true,
+            })
+            .unwrap();
+        let _ = wait_for(&event_rx, |e| matches!(e, Event::Posted { .. }));
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let requests = pds.requests();
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.path == "/xrpc/com.atproto.repo.uploadBlob"),
+            "the screenshot blob was uploaded"
+        );
+        let create_record = requests
+            .iter()
+            .find(|r| r.path == "/xrpc/com.atproto.repo.createRecord")
+            .expect("the screenshot was posted");
+        let body: serde_json::Value = serde_json::from_str(&create_record.body).unwrap();
+        assert_eq!(body["collection"], "app.bsky.feed.post");
+        assert_eq!(
+            body["record"]["embed"]["images"][0]["alt"],
+            "Screenshot from Horizon"
+        );
     }
 
     #[test]

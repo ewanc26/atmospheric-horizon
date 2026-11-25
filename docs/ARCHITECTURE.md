@@ -1557,6 +1557,25 @@ opts in posts from its own account. Wire-shape pins cover the command on both
 sides of the boundary; a worker PDS test checks the off/on behavior and the
 exact post text. No new endpoint, record kind or credential.
 
+### Automatic screenshot posting (#182)
+
+Every successful F2 screenshot can now be posted as an image embed under a new
+default-off `post_screenshots` setting. The existing `screenshot` HEAD injection
+in `mixins/atmospheric/horizon-mixin.toml` (helper `shot.rs`) already observes the
+finished save; it now also calls `post_screenshot_automatic(path, alt_text)` for
+each F2 shot. It does not consult the in-memory "latest shot" slot, which belongs
+to the manual `V` keybind, and it ignores world-icon saves (their path is not in
+`ui.screenshot_messages`). The game-side command gains an `automatic` flag: the
+manual keybind sends `false`, the F2 hook `true`. The worker drops automatic
+`PostImage` commands before any file read or network call unless
+`post_screenshots` is on, so calling the hook for every screenshot is cheap while
+the setting is off. The manual `V` keybind is unaffected by the flag and always
+posts. The flag is refreshed with the other cached settings at login. Wire-shape
+pins cover `PostImage` on both sides of the boundary and the automatic command on
+the channel; a worker PDS test checks the off/on behavior and the rendered embed.
+No new endpoint, record kind, credential or stored data — the image file is still
+read only at post time from the path the game saved.
+
 ### M69: server card (#191)
 
 The server card is a liveness-checked server manifest the **server

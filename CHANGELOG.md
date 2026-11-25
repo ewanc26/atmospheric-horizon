@@ -14,6 +14,13 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ### Added
 
+- **Automatic screenshot posting (#182).** With the new default-off
+  `post_screenshots` setting, each successful F2 screenshot is uploaded and
+  posted with an image embed. The screenshot hook sends an `automatic` flag that
+  the worker gates before any file or network I/O, so leaving the setting off
+  costs nothing; the manual `V` keybind always posts the latest shot regardless.
+  Wire-shape pins, a worker PDS test and a game-side command-flow test cover the
+  new path. No new endpoint or credential.
 - **Achievement announcements (#181).** With the new default-off
   `post_achievement_messages` setting, a player's advancement announcements
   (`chat.type.advancement.*`) are posted to Bluesky with a 🏆 prefix. The

@@ -113,11 +113,14 @@ pub enum Command {
     SaveConfig { config: Box<Config> },
     /// Post plain text to Bluesky.
     PostText { text: String },
-    /// Upload an image file and post it as an embedded image.
+    /// Upload an image file and post it as an embedded image. `automatic`
+    /// marks screenshot-hook posts, which the worker only publishes when
+    /// `post_screenshots` is enabled; the manual keybind sends false (#182).
     PostImage {
         path: String,
         alt_text: String,
         text: Option<String>,
+        automatic: bool,
     },
     /// Poll notifications now (the worker also does this on a timer).
     RefreshNotifications,
@@ -598,9 +601,10 @@ mod tests {
                 path: "/tmp/a.png".into(),
                 alt_text: "alt".into(),
                 text: None,
+                automatic: false,
             })
             .unwrap(),
-            r#"{"PostImage":{"path":"/tmp/a.png","alt_text":"alt","text":null}}"#
+            r#"{"PostImage":{"path":"/tmp/a.png","alt_text":"alt","text":null,"automatic":false}}"#
         );
         assert_eq!(
             serde_json::to_string(&Command::PostChat {
@@ -803,6 +807,7 @@ mod tests {
                 path: "p".into(),
                 alt_text: "a".into(),
                 text: Some("t".into()),
+                automatic: true,
             },
             Command::RefreshNotifications,
             Command::PostChat {
