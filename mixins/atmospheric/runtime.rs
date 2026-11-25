@@ -179,6 +179,17 @@ pub enum GameCommand {
     /// Publish/refresh the server profile from the separate server account
     /// (M25), as atpcraft's server account owns it.
     PostServerProfileAsServer,
+    /// Publish/refresh the server card (M69) from the separate server account.
+    /// The population counts come from the game; identity fields come from the
+    /// worker's settings file. A fresh `createdAt` on the fixed rkey is the
+    /// card's liveness.
+    PublishServerCard {
+        players_online: u32,
+        players_max: Option<u32>,
+    },
+    /// Read another server's published card (M69 read side) and assess its
+    /// liveness from the record's recency. Works logged out.
+    FetchServerCard { subject: String },
     /// Fetch a public Bluesky list's member DIDs (M11, join-gate read side):
     /// an `at://…app.bsky.graph.list/<rkey>` URI or a bsky.app list URL.
     FetchList { reference: String },
@@ -481,6 +492,58 @@ pub struct ServerDigest {
     pub verdict: ServerVerdict,
 }
 
+/// The liveness verdict on a server card's `createdAt` recency (M69). Plain
+/// data: the worker side has the same enum in the `atmospheric` crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CardLiveness {
+    /// Published within the freshness window.
+    Fresh,
+    /// Published before the freshness window.
+    Stale,
+    /// No parseable `createdAt`; recency is unknowable.
+    Unknown,
+}
+
+/// One mod pack a server card declares (M69). Plain data: the worker side has
+/// the same struct in the `atmospheric` crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardPack {
+    pub name: String,
+    pub source: String,
+    pub sha256: String,
+}
+
+/// The typed server card published by a server account (M69). Plain data: the
+/// worker side has the same struct, with the same camelCase wire names, in the
+/// `atmospheric` crate. The card carries no signature of its own — repository
+/// authentication is the only authorship claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardRecord {
+    pub server_name: String,
+    pub address: String,
+    pub players_online: u32,
+    pub players_max: Option<u32>,
+    pub game_version: String,
+    pub engine: String,
+    pub engine_revision: Option<String>,
+    pub packs: Vec<CardPack>,
+    pub conduct: Option<String>,
+    pub software: String,
+}
+
+/// What the HUD shows for a server card (M69): the typed record, where it was
+/// read and the liveness verdict from its `createdAt` recency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardDigest {
+    pub did: String,
+    pub rkey: String,
+    pub at_uri: String,
+    pub record: CardRecord,
+    pub published_at: String,
+    pub age_seconds: Option<i64>,
+    pub liveness: CardLiveness,
+}
+
 /// One online player in an M42 whitelist sweep. Plain data: the worker side
 /// has the same struct in the `atmospheric` crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -650,6 +713,15 @@ pub enum ModEvent {
         via: String,
         // Boxed: ServerDigest is one of the event enum's largest variants.
         profile: Box<Option<ServerDigest>>,
+    },
+    /// A server's published card (M69 read side): the resolved DID (`subject`),
+    /// the PDS it was read from (`via`), and the digest with its liveness verdict
+    /// (`None` when the repo has no valid card).
+    ServerCard {
+        subject: String,
+        via: String,
+        // Boxed: CardDigest carries the typed record.
+        card: Box<Option<CardDigest>>,
     },
     /// One of an account's social graphs (M20): the relation (`kind`), the
     /// subject's resolved DID, the AppView it was read from (`via`), and the
@@ -922,6 +994,26 @@ pub fn status_text(event: &ModEvent) -> String {
                 )
             }
         },
+        ModEvent::ServerCard { subject, card, .. } => match &**card {
+            None => format!("atmospheric: no server card for {subject}"),
+            Some(d) => {
+                let verdict = match d.liveness {
+                    CardLiveness::Fresh => "fresh",
+                    CardLiveness::Stale => "STALE",
+                    CardLiveness::Unknown => "recency unknown",
+                };
+                let players = match d.record.players_max {
+                    Some(max) => format!("{}/{}", d.record.players_online, max),
+                    None => d.record.players_online.to_string(),
+                };
+                format!(
+                    "atmospheric: {} — MC {}, {players} players, {} pack(s) — {verdict}",
+                    d.record.server_name,
+                    d.record.game_version,
+                    d.record.packs.len()
+                )
+            }
+        },
         ModEvent::GraphChanged { action, subject } => {
             let past = match action.as_str() {
                 "follow" => "followed",
@@ -1062,6 +1154,11 @@ static JOIN_GATE_KICKS: OnceLock<Mutex<Vec<SweepPlayer>>> = OnceLock::new();
 const LABELER_SWEEP_SECONDS: u64 = 60;
 static LABELER_LAST_SWEEP: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
 static LABELER_SWEEP_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// How often the server account republishes its card (M69). The card's
+/// liveness window is one hour, so five minutes keeps it comfortably fresh
+/// while rewriting only one record at a fixed rkey.
+const CARD_PUBLISH_SECONDS: u64 = 300;
+static CARD_LAST_PUBLISH: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
 /// M63 work the server tick performs outside a player's turn: capture/restore
 /// requests and scans. The command hook only enqueues; the tick reads live
 /// inventories (Horizon refuses that inside a player's turn).
@@ -1122,6 +1219,10 @@ fn join_gate_kicks_slot() -> &'static Mutex<Vec<SweepPlayer>> {
 
 fn labeler_last_sweep_slot() -> &'static Mutex<Option<std::time::Instant>> {
     LABELER_LAST_SWEEP.get_or_init(|| Mutex::new(None))
+}
+
+fn card_last_publish_slot() -> &'static Mutex<Option<std::time::Instant>> {
+    CARD_LAST_PUBLISH.get_or_init(|| Mutex::new(None))
 }
 
 fn player_captures_slot() -> &'static Mutex<Vec<SweepPlayer>> {
@@ -1893,6 +1994,21 @@ pub fn post_server_profile_as_server() {
     send(GameCommand::PostServerProfileAsServer);
 }
 
+/// Ask the worker to publish the server card (M69) from the server account.
+/// The population counts are read from the live server by the tick/command
+/// hook; identity fields come from the worker's settings file. The attempt
+/// time is recorded even if the worker later reports a failure, so a missing
+/// server account cannot re-arm the timer every tick.
+pub fn publish_server_card(players_online: u32, players_max: Option<u32>) {
+    if let Ok(mut slot) = card_last_publish_slot().lock() {
+        *slot = Some(std::time::Instant::now());
+    }
+    send(GameCommand::PublishServerCard {
+        players_online,
+        players_max,
+    });
+}
+
 /// Ask the worker to report the labeler identity published in the server
 /// account's DID document (M60).
 pub fn labeler_identity_status() {
@@ -2089,6 +2205,15 @@ pub fn labeler_sweep(players: Vec<LabelerPlayer>) {
     send(GameCommand::LabelerSweep { players });
 }
 
+/// Is the M69 card republish due? The tick hook throttles to one every five
+/// minutes; the worker never schedules the write itself, so a server tick is
+/// the only clock. An explicit publish command records the time too, so a
+/// manual publish does not cause an immediate automatic one.
+pub fn card_publish_due() -> bool {
+    let last = card_last_publish_slot().lock().ok().and_then(|slot| *slot);
+    sweep_due(true, CARD_PUBLISH_SECONDS, last, std::time::Instant::now())
+}
+
 /// Ask the worker to read a player's chat history (M16). `subject` is a DID
 /// or a handle.
 pub fn fetch_chat(subject: &str) {
@@ -2168,6 +2293,14 @@ pub fn fetch_player_skin(subject: &str) {
 /// handle.
 pub fn fetch_server_profile(subject: &str) {
     send(GameCommand::FetchServerProfile {
+        subject: subject.into(),
+    });
+}
+
+/// Ask the worker to read another server's published card (M69 read side) and
+/// assess its liveness from the record's recency. `subject` is a DID or handle.
+pub fn fetch_server_card(subject: &str) {
+    send(GameCommand::FetchServerCard {
         subject: subject.into(),
     });
 }
@@ -2430,6 +2563,12 @@ fn jbool(b: bool) -> Json {
 fn jopt_str(value: &Option<String>) -> Json {
     match value {
         Some(s) => Json::Str(s.clone()),
+        None => Json::Null,
+    }
+}
+fn jopt_uint(value: &Option<u32>) -> Json {
+    match value {
+        Some(n) => Json::Int(i128::from(*n)),
         None => Json::Null,
     }
 }
@@ -2729,6 +2868,12 @@ fn as_opt_str(value: &Json) -> Option<Option<String>> {
         _ => None,
     }
 }
+fn as_opt_int(value: &Json) -> Option<Option<i128>> {
+    match value {
+        Json::Null => Some(None),
+        other => as_int(other).map(Some),
+    }
+}
 fn req_str(obj: &[(String, Json)], key: &str) -> Option<String> {
     as_str(jget(obj, key)?).map(str::to_string)
 }
@@ -2961,6 +3106,20 @@ fn encode_command(command: &GameCommand) -> String {
         )]),
         GameCommand::PostServerProfile => jstr("PostServerProfile"),
         GameCommand::PostServerProfileAsServer => jstr("PostServerProfileAsServer"),
+        GameCommand::PublishServerCard {
+            players_online,
+            players_max,
+        } => jobj(vec![(
+            "PublishServerCard",
+            jobj(vec![
+                ("players_online", juint(u64::from(*players_online))),
+                ("players_max", jopt_uint(players_max)),
+            ]),
+        )]),
+        GameCommand::FetchServerCard { subject } => jobj(vec![(
+            "FetchServerCard",
+            jobj(vec![("subject", jstr(subject))]),
+        )]),
         GameCommand::FetchList { reference } => jobj(vec![(
             "FetchList",
             jobj(vec![("reference", jstr(reference))]),
@@ -3285,6 +3444,63 @@ fn decode_server_digest(value: &Json) -> Option<ServerDigest> {
     })
 }
 
+/// Decode the liveness verdict on a server card (M69).
+fn decode_card_liveness(value: &Json) -> Option<CardLiveness> {
+    match as_str(value)? {
+        "Fresh" => Some(CardLiveness::Fresh),
+        "Stale" => Some(CardLiveness::Stale),
+        "Unknown" => Some(CardLiveness::Unknown),
+        _ => None,
+    }
+}
+
+fn decode_card_pack(value: &Json) -> Option<CardPack> {
+    let obj = as_obj(value)?;
+    Some(CardPack {
+        name: req_str(obj, "name")?,
+        source: req_str(obj, "source")?,
+        sha256: req_str(obj, "sha256")?,
+    })
+}
+
+fn decode_card_record(value: &Json) -> Option<CardRecord> {
+    let obj = as_obj(value)?;
+    let packs = as_arr(jget(obj, "packs")?)?
+        .iter()
+        .map(decode_card_pack)
+        .collect::<Option<Vec<_>>>()?;
+    let players_max = jget(obj, "playersMax")
+        .and_then(as_opt_int)?
+        .and_then(|n| u32::try_from(n).ok());
+    Some(CardRecord {
+        server_name: req_str(obj, "serverName")?,
+        address: req_str(obj, "address")?,
+        players_online: u32::try_from(req_int(obj, "playersOnline")?).ok()?,
+        players_max,
+        game_version: req_str(obj, "gameVersion")?,
+        engine: req_str(obj, "engine")?,
+        engine_revision: jget(obj, "engineRevision").and_then(as_opt_str).flatten(),
+        packs,
+        conduct: jget(obj, "conduct").and_then(as_opt_str).flatten(),
+        software: req_str(obj, "software")?,
+    })
+}
+
+fn decode_card_digest(value: &Json) -> Option<CardDigest> {
+    let obj = as_obj(value)?;
+    Some(CardDigest {
+        did: req_str(obj, "did")?,
+        rkey: req_str(obj, "rkey")?,
+        at_uri: req_str(obj, "at_uri")?,
+        record: decode_card_record(jget(obj, "record")?)?,
+        published_at: req_str(obj, "published_at")?,
+        age_seconds: jget(obj, "age_seconds")
+            .and_then(as_opt_int)?
+            .and_then(|n| i64::try_from(n).ok()),
+        liveness: decode_card_liveness(jget(obj, "liveness")?)?,
+    })
+}
+
 /// Decode one JSON line from the sidecar worker into a game-side event.
 /// Returns `None` on any shape mismatch (the caller reports a Failed event).
 fn decode_event(line: &str) -> Option<ModEvent> {
@@ -3474,6 +3690,18 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 subject: req_str(obj, "subject")?,
                 via: req_str(obj, "via")?,
                 profile: Box::new(profile),
+            })
+        }
+        "ServerCard" => {
+            let obj = payload_obj()?;
+            let card = match jget(obj, "card")? {
+                Json::Null => None,
+                other => Some(decode_card_digest(other)?),
+            };
+            Some(ModEvent::ServerCard {
+                subject: req_str(obj, "subject")?,
+                via: req_str(obj, "via")?,
+                card: Box::new(card),
             })
         }
         "SocialGraph" => {
@@ -5424,5 +5652,70 @@ mod tests {
         tx.send(GameCommand::Shutdown).unwrap();
         assert!(rx.recv_timeout(timeout).is_err());
         drop(tx);
+    }
+
+    #[test]
+    fn server_card_wires_encode_decode_and_status() {
+        assert_eq!(
+            encode_command(&GameCommand::PublishServerCard {
+                players_online: 3,
+                players_max: Some(20),
+            }),
+            r#"{"PublishServerCard":{"players_online":3,"players_max":20}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::PublishServerCard {
+                players_online: 0,
+                players_max: None,
+            }),
+            r#"{"PublishServerCard":{"players_online":0,"players_max":null}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::FetchServerCard {
+                subject: "did:plc:z".into()
+            }),
+            r#"{"FetchServerCard":{"subject":"did:plc:z"}}"#
+        );
+
+        assert_eq!(
+            decode_event(r#"{"ServerCard":{"subject":"s","via":"v","card":null}}"#),
+            Some(ModEvent::ServerCard {
+                subject: "s".into(),
+                via: "v".into(),
+                card: Box::new(None),
+            })
+        );
+        let full = decode_event(
+            r#"{"ServerCard":{"subject":"did:plc:srv","via":"https://pds.example","card":{"did":"did:plc:srv","rkey":"self","at_uri":"at://did:plc:srv/click.croft.atmospheric.server.card/self","record":{"serverName":"A shoebox","address":"example.test:25565","playersOnline":3,"playersMax":20,"gameVersion":"26.3","engine":"horizon","engineRevision":"9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0","packs":[{"name":"pack","source":"https://example.test/pack.hpack","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"conduct":null,"software":"atmospheric-horizon/0.4.0"},"published_at":"2026-11-25T09:30:00Z","age_seconds":600,"liveness":"Fresh"}}}"#,
+        )
+        .expect("a full card digest decodes");
+        let ModEvent::ServerCard { card, .. } = &full else {
+            panic!("expected ServerCard")
+        };
+        let card = card.as_ref().as_ref().expect("a card is present");
+        assert_eq!(card.record.server_name, "A shoebox");
+        assert_eq!(card.record.players_online, 3);
+        assert_eq!(card.record.players_max, Some(20));
+        assert_eq!(card.record.packs.len(), 1);
+        assert_eq!(card.liveness, CardLiveness::Fresh);
+        assert_eq!(
+            status_text(&full),
+            "atmospheric: A shoebox — MC 26.3, 3/20 players, 1 pack(s) — fresh"
+        );
+        assert_eq!(
+            status_text(&ModEvent::ServerCard {
+                subject: "did:plc:srv".into(),
+                via: "v".into(),
+                card: Box::new(None),
+            }),
+            "atmospheric: no server card for did:plc:srv"
+        );
+        // A malformed liveness string must not become a silent default.
+        assert_eq!(
+            decode_event(
+                r#"{"ServerCard":{"subject":"s","via":"v","card":{"did":"d","rkey":"self","at_uri":"u","record":{"serverName":"n","address":"a","playersOnline":0,"playersMax":null,"gameVersion":"26.3","engine":"horizon","engineRevision":null,"packs":[],"conduct":null,"software":"s"},"published_at":"","age_seconds":null,"liveness":"Maybe"}}}"#
+            ),
+            None
+        );
     }
 }

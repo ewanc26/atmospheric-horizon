@@ -20,6 +20,9 @@
 // server profile record and verifies its signing key (M19); /atmospheric
 // server-account login|status|logout|publish manages the separate server
 // account (M25); /atmospheric
+// server-card publish publishes the typed server card and /atmospheric
+// card-of <did|handle> reads another server's card with its liveness (M69);
+// /atmospheric
 // profile <did|handle> reads a Bluesky profile with atpcraft's pronoun
 // precedence (M24); /atmospheric profile-set <field> [value] updates the
 // logged-in account's text fields or uploads its avatar/banner (M65/M66);
@@ -39,7 +42,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric player-data capture|restore [player], /atmospheric rpg discover [player], /atmospheric skin [path] [default|slim], /atmospheric skin upload, /atmospheric server, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric colibri start|stop|reconnect|status|send <text>, /atmospheric link [code], /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric profile-set <name|description|pronouns|avatar|banner> [text|path], /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric records <did|handle> <collection>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric labeler-identity [status|request|submit <token>], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric player-data capture|restore [player], /atmospheric rpg discover [player], /atmospheric skin [path] [default|slim], /atmospheric skin upload, /atmospheric server, /atmospheric server-card publish, /atmospheric card-of <did|handle>, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric colibri start|stop|reconnect|status|send <text>, /atmospheric link [code], /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric profile-set <name|description|pronouns|avatar|banner> [text|path], /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric records <did|handle> <collection>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric labeler-identity [status|request|submit <token>], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -273,6 +276,31 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
         *ran = true;
         m::post_server_profile();
         game.native_chat("atmospheric: publishing the server profile record…");
+    } else if rest == "server-card" || rest.starts_with("server-card ") {
+        let args: Vec<&str> = rest
+            .strip_prefix("server-card")
+            .unwrap_or("")
+            .split_whitespace()
+            .collect();
+        *ran = true;
+        match args.as_slice() {
+            ["publish"] => {
+                let players = game.native_server_players();
+                let online = u32::try_from(players.len()).unwrap_or(u32::MAX);
+                m::publish_server_card(online, game.native_max_players());
+                game.native_chat("atmospheric: publishing the server card from the server account…");
+            }
+            _ => game.native_chat("atmospheric: /atmospheric server-card publish"),
+        }
+    } else if rest == "card-of" || rest.starts_with("card-of ") {
+        let subject = rest.strip_prefix("card-of").unwrap_or("").trim();
+        *ran = true;
+        if subject.is_empty() {
+            game.native_chat("atmospheric: /atmospheric card-of <did | handle>");
+        } else {
+            m::fetch_server_card(subject);
+            game.native_chat("atmospheric: reading the server's card…");
+        }
     } else if rest == "list" || rest.starts_with("list ") {
         let reference = rest.strip_prefix("list").unwrap_or("").trim();
         *ran = true;
