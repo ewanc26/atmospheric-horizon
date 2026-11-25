@@ -12,6 +12,12 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-11-25
+
+Eighth tagged release. Adds Counting Stones polls: a signed tally root, private
+voter receipts and a one-DID-one-vote worker lifecycle, with no new endpoint or
+credential.
+
 ### Added
 
 - **Counting Stones: verifiable in-game polls (#193).** The worker can open a
@@ -563,7 +569,8 @@ unless it writes to your own repo.
   can issue the same link (M40). The online whitelist sweep remains to be
   implemented.
 
-[Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.8.0
 [0.7.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.7.0
 [0.6.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.6.0
 [0.5.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.5.0
