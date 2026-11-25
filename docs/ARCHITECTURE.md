@@ -77,6 +77,43 @@ player and the paired client HUD line — needs game/native capabilities and is
 explicitly deferred. No Horizon hook, `players`/`storage`/`network` API or
 client HUD wire field is introduced here.
 
+## Ledger of Decisions (#199): signed moderation records in the sidecar
+
+The Ledger of Decisions foundation is an additive, default-off layer in the
+optional `atmospheric-server` process. With
+`ATMOSPHERIC_SERVER_LEDGER_ENABLED` unset there is no signing key, no pepper,
+no JSONL file and no network activity; the four `/v1/decisions` routes return
+503. Enabling it also requires `ATMOSPHERIC_SERVER_LEDGER_ISSUER_DID`, the
+server account DID named in every record, so a misconfigured ledger cannot
+sign under an identity the operator did not choose.
+
+The protocol core lives in `crates/atmospheric/src/decision/`: `record.rs`
+defines `club.atmospheric.mod.decision`, the signed payload and the resolution
+of active/expired/reversed state, and `subject.rs` derives a 64-character
+lower-hex subject identifier from a DID and a server-held pepper. The pepper
+is length-prefixed and domain-separated like the poll hashes, so a published
+identifier cannot be rebound to a poll nullifier or dictionary-attacked from
+a small DID set. Every record signs the collection NSID along with its fields,
+which prevents replay under another lexicon.
+
+The sidecar side lives in `crates/atmospheric-server/src/decision/`. It loads
+or creates an owner-only Ed25519 key and pepper, re-verifies every append-only
+JSONL record on startup, and mirrors signed records in memory for reads. A
+plaintext DID enters only through authenticated `POST /v1/decisions`, is hashed
+immediately, and is never stored or returned. Reversals and expiries name the
+rkey they end and inherit that subject identifier, so walking the collection
+reconstructs each decision's current state. Reads are public because the
+records carry no plaintext identity; the verification key is published so a
+third party can verify them without trusting this server's word.
+
+Submitting accepts the game server's link token, the static admin token, or a
+DID grant with the new `ledger_write` scope, keeping the #189 grant model
+additive. The lexicon is hosted as a compile-time asset beside the five
+`at.atpcraft.*` documents. No Horizon hook, native API, game/worker wire field
+or PDS publish is introduced: writing records under the server DID's repository
+and the in-game `/history` receipts need native `players`/`storage`/`network`
+support and remain deferred.
+
 ## The two client layers
 
 ```text
@@ -96,9 +133,9 @@ The optional `atmospheric-server` binary is not in this diagram: it is a separat
 
 All Rust source follows `<scope>/[<subscope>/]<atom>.rs`: the directory names the domain scope, the final file is a single-word atom, and `mod.rs` only declares the scope. The injected module and Cargo entry points keep their required paths, and crate-root re-exports preserve the public protocol module paths. `scripts/check-layout.sh` is the dependency-free CI guard: it rejects non-atom Rust filenames everywhere, requires scope placement and `mod.rs` in both Rust crates, and keeps explicit exceptions for Cargo target paths such as `atmospheric-worker.rs`.
 
-`crates/atmospheric-server` uses the same rule: `api/` holds the router, state and handler atoms (including M46's `lexicon` handler); `browser/` the one-time link state; `error/` the HTTP error mapping; `labeler/` the M56–M58 signing, key, log, state, query and stream atoms; `model/` the wire types and validation; `oauth/` the client, DPoP, resolver and encoding atoms; `page/` the browser HTML; and `store/` the in-memory store plus atomic file persistence. The compile-time lexicon documents live in `crates/atmospheric-server/lexicons/`. The public `app`, `ServerConfig`, `model`, `oauth` and `store` paths are unchanged.
+`crates/atmospheric-server` uses the same rule: `api/` holds the router, state and handler atoms (including M46's `lexicon` handler); `browser/` the one-time link state; `continuity/` the #190 DID snapshots and events; `decision/` the #199 ledger; `error/` the HTTP error mapping; `labeler/` the M56–M58 signing, key, log, state, query and stream atoms; `model/` the wire types and validation; `oauth/` the client, DPoP, resolver and encoding atoms; `page/` the browser HTML; and `store/` the in-memory store plus atomic file persistence. The compile-time lexicon documents live in `crates/atmospheric-server/lexicons/`. The public `app`, `ServerConfig`, `model`, `oauth` and `store` paths are unchanged.
 
-`crates/atmospheric` now follows the same rule: `account/` holds `identity`, `oauth`, `plc` and `session`; `base/` holds `config`, `error`, `records`, `signing` and `tid`; `social/` holds the Bluesky read/write and digest atoms; `colibri/bridge.rs` holds the bridge; and `worker/service.rs` owns the worker. Public paths such as `atmospheric::oauth`, `atmospheric::records` and `atmospheric::worker` are unchanged.
+`crates/atmospheric` now follows the same rule: `account/` holds `identity`, `oauth`, `plc` and `session`; `base/` holds `config`, `error`, `records`, `signing` and `tid`; `decision/` holds the #199 `record` and `subject` atoms; `social/` holds the Bluesky read/write and digest atoms; `colibri/bridge.rs` holds the bridge; and `worker/service.rs` owns the worker. Public paths such as `atmospheric::oauth`, `atmospheric::records` and `atmospheric::worker` are unchanged.
 
 The mixin helpers now follow the same rule: `colibri/` holds `join`, `leave` and `notice`; `gate/` holds `login`; the remaining helpers are single-word atoms at the mixin scope root.
 

@@ -12,6 +12,25 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+### Added
+
+- **Ledger of Decisions (#199, experimental sidecar foundation).** The optional
+  `atmospheric-server` can now sign, persist and publicly serve
+  `club.atmospheric.mod.decision` records for moderation actions. `POST /v1/decisions`
+  accepts the game server's link token, the static admin token or a DID grant
+  with the new `ledger_write` scope; the plaintext subject DID is hashed with an
+  owner-only pepper into a 64-character salted identifier before any record is
+  stored or returned. Signed decision, reversal and expiry records carry a
+  reason category, scope, optional expiry and appeal, and resolve to
+  active/expired/reversed state. Public `GET /v1/decisions`,
+  `GET /v1/decisions/{rkey}`, `GET /v1/decisions/key` and
+  `GET /v1/decisions/status` expose only salted subjects and the verification
+  key. Records are re-verified on startup and the lexicon is hosted at
+  `/lexicons`. New variables: `ATMOSPHERIC_SERVER_LEDGER_ENABLED` and
+  `ATMOSPHERIC_SERVER_LEDGER_ISSUER_DID`. Publishing records under the server
+  DID's PDS repository and in-game `/history` receipts are deferred to native
+  game work.
+
 ## [0.12.0] — 2026-11-25
 
 Twelfth tagged release. Adds Continuity Watchman: an experimental, default-off DID continuity observer in the optional `atmospheric-server` sidecar, with no change to Horizon's API or native/client halves.
