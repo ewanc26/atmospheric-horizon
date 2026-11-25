@@ -7,6 +7,39 @@ How atmospheric-horizon is put together, for reviewers, contributors, and coding
 - **ADR-001 — native server half ([#208](https://github.com/ewanc26/atmospheric-horizon/issues/208), superseded).** Chose a native, unsandboxed server half for all server-side AT Protocol egress and server-DID custody, but assumed Horizon had no native server path. The decision to own server-side egress in-process stands; the premise about upstream support does not.
 - **ADR-002 — adopt the existing native server export ([#209](https://github.com/ewanc26/atmospheric-horizon/issues/209)).** Verified against the fork's `db7d9029` sync that `horizon-launcher native-build FOLDER --server-output DIR --version TAG --trust-native-code` already exports a standalone dedicated-server engine with the pinned prebuilt SDK, an explicit native-code trust gate, `native-mods.json` provenance, `engine.path` deployment and rollback, server-only hooks and `Dist::DedicatedServer`, plus `native-mod` registry entries identified by source repo with SHA-256-pinned downloads and revocation. No upstream work is needed, and the parked server-publishing issues are schedulable. The target remains Route 3; the shipped code still uses the M17 sidecar until the native server half lands. Route 2 client-edge verification remains the degraded path when no trusted export is present, and the client native half is unchanged.
 
+## Operator's Warrant (#189): DID grants stay inside the sidecar
+
+The experimental DID-authenticated admin grants are an additive layer in the
+optional `atmospheric-server` HTTP process. They use this repository's `/v1`
+surface — `POST /v1/operator/challenge`, `POST /v1/operator/grant`,
+`GET /v1/operator/audit-key` and `GET /v1/operator/receipts` — and are **not**
+new Horizon `/api/v1` routes. The static `ATMOSPHERIC_SERVER_TOKEN` keeps
+working, unchanged, on every admin route: grants are a second, short-lived,
+scoped bearer credential, and static-token operations write no receipts.
+
+The layer is deliberately not in the sandboxed `.hmod`. The injected
+`mixins/atmospheric/runtime.rs` stays std-only and has no DID, HTTP-listener or
+audit code, and the WASI/sandbox side has no sockets to accept these
+connections. Under ADR-002 the future native server half and the client-native
+Route 2 verification path are untouched: no Horizon stable API change, no new
+hook and no change to the native export. The M17 sidecar remains the only
+process that hosts this surface today.
+
+The loopback/local-socket, token-gated control-plane assumption is preserved:
+all DID authentication happens inside the sidecar process boundary, while the
+game/worker channel is still plain JSON over a local pipe. The proof reuses
+#185's PLC-anchored commit chain — the operator writes the throwaway nonce
+record through their own PDS session and the sidecar makes unauthenticated
+verification reads plus the existing handle/DID resolution. That proves PDS
+repository custody, not human identity. Challenges and grants are in memory
+only and do not survive a restart; no player-facing gate or gameplay feature
+reads any of this state. Grant-exercised admin operations append signed receipts
+to `<data>/operator/receipts.jsonl` under the owner-only key
+`<data>/operator/audit-key.json`, including a `scope_denied` receipt for a valid
+grant with the wrong scope. Keep that key private, and keep grant lifetimes
+short: a leaked grant is a bearer token until it expires, and compromise of an
+allowlisted DID's PDS key is effectively admin takeover.
+
 ## The two client layers
 
 ```text
@@ -905,7 +938,9 @@ the authenticated `POST /v1/browser/skins` creation route plus the public
 they return 503 instead of allowing an unauthenticated write. Pairing codes are
 random, one-time, default to ten minutes, accept 60-3600 seconds and are stored
 canonicalised without their display hyphen. Creating a new code for a UUID
-invalidates that UUID's previous code.
+invalidates that UUID's previous code. The experimental #189 operator routes
+are additive to this same process; see "Operator's Warrant (#189)" above for
+the process-boundary rules.
 
 The store is a single JSON document (`links.json`) protected by an async write
 lock. Every mutation clones the state, writes a temporary file with owner-only
