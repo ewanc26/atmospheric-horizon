@@ -12,6 +12,11 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-11-25
+
+Seventh tagged release. Adds configurable Bluesky, Spark and Grain image-post
+targets through a new setting, with no new endpoint, AppView call or credential.
+
 ### Added
 
 - **Configurable image-post targets (#183).** Set `image_post_target` to
@@ -541,7 +546,8 @@ unless it writes to your own repo.
   can issue the same link (M40). The online whitelist sweep remains to be
   implemented.
 
-[Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.7.0
 [0.6.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.6.0
 [0.5.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.5.0
 [0.4.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.4.0
