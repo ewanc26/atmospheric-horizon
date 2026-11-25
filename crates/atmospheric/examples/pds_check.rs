@@ -101,6 +101,7 @@ fn main() {
         list_cache_seconds: 300,
         post_death_messages: false,
         post_achievement_messages: false,
+        post_screenshots: false,
         post_chat_messages: false,
         player_data_sync_enabled: false,
         chat_server_id: "pds-check".into(),
@@ -255,6 +256,7 @@ fn main() {
             path,
             alt_text: "pds_check image post".into(),
             text: Some("atmospheric-horizon image check (test post, feel free to delete)".into()),
+            automatic: false,
         }),
         post_chat.map(|message| Command::PostChat {
             message,

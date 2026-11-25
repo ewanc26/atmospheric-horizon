@@ -50,6 +50,7 @@ pub struct Settings {
     pub poll_interval_secs: u64,
     pub post_death_messages: bool,
     pub post_achievement_messages: bool,
+    pub post_screenshots: bool,
     pub post_chat_messages: bool,
     pub chat_server_id: String,
 }
@@ -86,11 +87,14 @@ pub enum GameCommand {
     SaveConfig { settings: Settings },
     /// Post plain text to Bluesky.
     PostText { text: String },
-    /// Upload an image file and post it as an embedded image (M3).
+    /// Upload an image file and post it as an embedded image (M3). `automatic`
+    /// marks screenshot-hook posts, which the worker only publishes when
+    /// `post_screenshots` is enabled (#182); the manual keybind sends false.
     PostImage {
         path: String,
         alt_text: String,
         text: Option<String>,
+        automatic: bool,
     },
     /// Poll notifications now (the worker also does this on a timer, M4).
     RefreshNotifications,
@@ -1641,7 +1645,8 @@ pub fn latest_screenshot() -> Option<String> {
 }
 
 /// Ask the worker to post the latest screenshot. Returns false when the game
-/// has not saved one yet, so the caller can say so.
+/// has not saved one yet, so the caller can say so. Manual posts are never
+/// gated by `post_screenshots` (#182).
 pub fn post_screenshot(alt_text: &str) -> bool {
     match latest_screenshot() {
         Some(path) => {
@@ -1649,11 +1654,25 @@ pub fn post_screenshot(alt_text: &str) -> bool {
                 path,
                 alt_text: alt_text.into(),
                 text: None,
+                automatic: false,
             });
             true
         }
         None => false,
     }
+}
+
+/// Post the screenshot the game just saved (F2) automatically (#182). The
+/// worker drops it unless `post_screenshots` is enabled, so this is safe to
+/// call for every screenshot. The path is passed directly rather than read
+/// from the in-memory slot, which the manual keybind owns.
+pub fn post_screenshot_automatic(path: &str, alt_text: &str) {
+    send(GameCommand::PostImage {
+        path: path.into(),
+        alt_text: alt_text.into(),
+        text: None,
+        automatic: true,
+    });
 }
 
 /// Ask the worker to poll notifications now (it also polls on a timer).
@@ -2966,6 +2985,7 @@ fn encode_command(command: &GameCommand) -> String {
                         "post_achievement_messages",
                         jbool(settings.post_achievement_messages),
                     ),
+                    ("post_screenshots", jbool(settings.post_screenshots)),
                     ("post_chat_messages", jbool(settings.post_chat_messages)),
                     ("chat_server_id", jstr(&settings.chat_server_id)),
                 ]),
@@ -2978,12 +2998,14 @@ fn encode_command(command: &GameCommand) -> String {
             path,
             alt_text,
             text,
+            automatic,
         } => jobj(vec![(
             "PostImage",
             jobj(vec![
                 ("path", jstr(path)),
                 ("alt_text", jstr(alt_text)),
                 ("text", jopt_str(text)),
+                ("automatic", jbool(*automatic)),
             ]),
         )]),
         GameCommand::RefreshNotifications => jstr("RefreshNotifications"),
@@ -3878,6 +3900,12 @@ mod tests {
             Some("/tmp/shots/2026-11-12_07.00.00.png")
         );
         assert!(post_screenshot("Screenshot from Horizon"));
+        // The F2 hook posts the saved path directly and marks it automatic;
+        // unlike the manual keybind it does not consult the in-memory slot.
+        post_screenshot_automatic(
+            "/tmp/shots/2026-11-13_08.00.00.png",
+            "Screenshot from Horizon",
+        );
         save_config(Settings {
             pds_url: "https://pds.example".into(),
             identifier: "someone.example".into(),
@@ -3885,6 +3913,7 @@ mod tests {
             poll_interval_secs: 30,
             post_death_messages: false,
             post_achievement_messages: false,
+            post_screenshots: false,
             post_chat_messages: false,
             chat_server_id: "horizon-client".into(),
         });
@@ -4092,12 +4121,28 @@ mod tests {
                 path,
                 alt_text,
                 text,
+                automatic,
             }) => {
                 assert_eq!(path, "/tmp/shots/2026-11-12_07.00.00.png");
                 assert_eq!(alt_text, "Screenshot from Horizon");
                 assert_eq!(text, None);
+                assert!(!automatic);
             }
             other => panic!("expected PostImage, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::PostImage {
+                path,
+                alt_text,
+                text,
+                automatic,
+            }) => {
+                assert_eq!(path, "/tmp/shots/2026-11-13_08.00.00.png");
+                assert_eq!(alt_text, "Screenshot from Horizon");
+                assert_eq!(text, None);
+                assert!(automatic);
+            }
+            other => panic!("expected automatic PostImage, got {:?}", other),
         }
         assert!(matches!(
             command_rx.recv_timeout(std::time::Duration::from_secs(5)),
@@ -4721,6 +4766,7 @@ mod tests {
             poll_interval_secs: 30,
             post_death_messages: false,
             post_achievement_messages: false,
+            post_screenshots: false,
             post_chat_messages: true,
             chat_server_id: "horizon-client".into(),
         }
@@ -4859,7 +4905,7 @@ mod tests {
             encode_command(&GameCommand::SaveConfig {
                 settings: sample_settings()
             }),
-            r#"{"SaveConfig":{"config":{"pds_url":"https://pds.example","identifier":"someone.example","app_password":"abcd-1234-efgh-5678","poll_interval_secs":30,"post_death_messages":false,"post_achievement_messages":false,"post_chat_messages":true,"chat_server_id":"horizon-client"}}}"#
+            r#"{"SaveConfig":{"config":{"pds_url":"https://pds.example","identifier":"someone.example","app_password":"abcd-1234-efgh-5678","poll_interval_secs":30,"post_death_messages":false,"post_achievement_messages":false,"post_screenshots":false,"post_chat_messages":true,"chat_server_id":"horizon-client"}}}"#
         );
         // String escaping matches serde_json: quote, backslash, newline.
         assert_eq!(
@@ -4873,8 +4919,9 @@ mod tests {
                 path: "/tmp/s.png".into(),
                 alt_text: "a shot".into(),
                 text: None,
+                automatic: false,
             }),
-            r#"{"PostImage":{"path":"/tmp/s.png","alt_text":"a shot","text":null}}"#
+            r#"{"PostImage":{"path":"/tmp/s.png","alt_text":"a shot","text":null,"automatic":false}}"#
         );
         assert_eq!(
             encode_command(&GameCommand::RefreshNotifications),

@@ -23,7 +23,7 @@ Not yet: launcher registry distribution, which waits on third-party native-mod s
 
 ## Features
 
-- **Post from the game.** Publish text with `/atmospheric post`, or the latest F2 screenshot or your current position from a keybind, plus optional death messages and advancement announcements (#181).
+- **Post from the game.** Publish text with `/atmospheric post`, or the latest F2 screenshot or your current position from a keybind, plus optional death messages, advancement announcements (#181) and automatic screenshot posting (#182).
 - **Join the conversation.** Reply to, like or repost any Bluesky post, from its AT-URI or its bsky.app URL.
 - **Notifications in the HUD.** A digest line, a poll timer and a cursor that survives restarts.
 - **atpcraft-compatible records.** Chat messages, Ed25519-endorsed snapshots and skins with blob uploads, and a server descriptor at rkey `self`.
@@ -84,7 +84,7 @@ Copy `target/release/atmospheric-worker` next to the game executable. The option
 | Key | Action |
 | --- | --- |
 | `B` | Post your current position |
-| `V` | Post the latest screenshot from `screenshots/` |
+| `V` | Post the latest screenshot from `screenshots/` (always manual; see `post_screenshots` to auto-post every F2 shot) |
 | `C` | Publish a player-state snapshot |
 
 ### Commands
@@ -151,6 +151,7 @@ All commands are under `/atmospheric`:
 | `persist_session` | `true` | Keep the refresh token in `session.json` across restarts |
 | `post_death_messages` | `false` | Post a text post when you die |
 | `post_achievement_messages` | `false` | Post a text post with 🏆 when you earn an advancement (#181) |
+| `post_screenshots` | `false` | Automatically post each successful F2 screenshot with an image embed (#182). The `V` keybind always works and is unaffected |
 | `post_chat_messages` | `false` | Mirror every chat line to your repo |
 | `player_data_sync_enabled` | `false` | Capture a linked player's aspects on leave and restore the newest verified snapshot on join (M68). Explicit `/atmospheric player-data` commands always work |
 | `chat_server_id` | empty | Optional override for the chat record's `server` field; empty uses the signing key id, matching atpcraft |
@@ -355,7 +356,7 @@ All of these are unauthenticated, and the query carries only the subject's DID o
 ### Writes to your PDS
 
 - Notification polling uses `app.bsky.notification.listNotifications` with a `seenAt` timestamp, on a timer and on `/atmospheric notifications`.
-- Text and screenshot posts use `com.atproto.repo.uploadBlob` for the image, then `com.atproto.repo.createRecord` with an `app.bsky.embed.images` embed (or a plain text post). The post-location keybind, death messages and achievement announcements publish `app.bsky.feed.post` records the same way; death messages only when `post_death_messages` is enabled, achievements only when `post_achievement_messages` is enabled.
+- Text and screenshot posts use `com.atproto.repo.uploadBlob` for the image, then `com.atproto.repo.createRecord` with an `app.bsky.embed.images` embed (or a plain text post). The post-location keybind, death messages and achievement announcements publish `app.bsky.feed.post` records the same way; death messages only when `post_death_messages` is enabled, achievements only when `post_achievement_messages` is enabled. Each F2 screenshot is offered as an automatic image post too, but only uploaded and published when `post_screenshots` is enabled (#182); the manual `V` keybind posts the latest shot regardless of that flag.
 - Chat lines use `com.atproto.repo.createRecord` in the `at.atpcraft.player.chat` collection, TID-keyed — only when `post_chat_messages` is enabled, or one at a time via `/atmospheric chat <text>`. While the Colibri bridge is active, the same chat line is also written to `social.colibri.message` in the player's repo, keyed by a fresh TID; `/atmospheric colibri send <text>` writes one without posting the game chat record. Player-authored Colibri writes are capped at 20 per rolling 60 seconds; the 21st is dropped, server notices are exempt, and the explicit command reports the limit.
 - Colibri membership (M27/M32) lists `social.colibri.membership` in the server account's and local player's own repos and creates one `{community, createdAt}` record when the bridged community is absent. A new player membership in an approval-gated community produces atpcraft's pending line; existing memberships and failed writes stay quiet. It uses `createRecord`, not `putRecord`, because the Colibri OAuth grant contains create/delete but not update.
 - Snapshots use `com.atproto.repo.createRecord` in `at.atpcraft.player.snapshot`, carrying your position/dimension and an Ed25519 endorsement signature.
@@ -381,7 +382,7 @@ Everything lives in the worker's own data folder — never in a world save. In s
 - `cursor.json` (the notification seen-cursor, so restarts do not re-show old notifications) and `snapshot-state.json` (the snapshot version counter, so records never roll back) are not secret. The Colibri bridge stores no additional credential: its service token lives in memory and is minted again on start.
 - `skins/` holds skin/cape PNGs downloaded by `/atmospheric skin-of`, content-addressed by blob CID. They are written only for records whose endorsement verified.
 
-The files that hold secrets are written with owner-only permissions (0600 on unix; the OS file ACLs apply on Windows and macOS). The image you post is read from the game's `screenshots/` folder only when you press the post-screenshot keybind; otherwise the latest path stays in memory. Skin/cape PNGs are read from the path you pass (or `skin_path`/`cape_path`) only at that moment; nothing else is read. The login session is held in memory for the running game; the refresh token is persisted so restarts resume automatically unless `persist_session` is off.
+The files that hold secrets are written with owner-only permissions (0600 on unix; the OS file ACLs apply on Windows and macOS). The image you post is read from the game's `screenshots/` folder only when you press the post-screenshot keybind, or when an F2 screenshot is posted automatically with `post_screenshots` enabled; otherwise the latest path stays in memory. Skin/cape PNGs are read from the path you pass (or `skin_path`/`cape_path`) only at that moment; nothing else is read. The login session is held in memory for the running game; the refresh token is persisted so restarts resume automatically unless `persist_session` is off.
 
 ### Server-side identity service (M35–M40)
 
