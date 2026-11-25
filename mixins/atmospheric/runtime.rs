@@ -198,6 +198,32 @@ pub enum GameCommand {
     /// Read another server's published card (M69 read side) and assess its
     /// liveness from the record's recency. Works logged out.
     FetchServerCard { subject: String },
+    /// Read and verify a published Counting Stones tally (#193) from the
+    /// subject's own PDS. Works logged out.
+    FetchPoll { subject: String },
+    /// Open a Counting Stones ballot box (#193) with a caller-chosen local id.
+    OpenPoll {
+        poll_id: String,
+        question: String,
+        options: Vec<String>,
+        closes_at: String,
+    },
+    /// Cast a linked player's vote (#193). The worker resolves the DID from
+    /// the identity service; the choice never crosses to a public record.
+    VotePoll {
+        poll_id: String,
+        player_uuid: String,
+        player_name: String,
+        choice: u16,
+    },
+    /// Close a poll and publish its signed tally (#193).
+    ClosePoll { poll_id: String },
+    /// Retrieve one voter's private receipt (#193) after publication.
+    PollReceipt {
+        poll_id: String,
+        player_uuid: String,
+        player_name: String,
+    },
     /// Fetch a public Bluesky list's member DIDs (M11, join-gate read side):
     /// an `at://…app.bsky.graph.list/<rkey>` URI or a bsky.app list URL.
     FetchList { reference: String },
@@ -554,6 +580,49 @@ pub struct CardDigest {
     pub liveness: CardLiveness,
 }
 
+/// What the HUD shows for a published Counting Stones tally (#193). Plain
+/// data: the worker side has the richer typed record in the `atmospheric`
+/// crate; the game only needs the question, choices, aggregate tally and the
+/// signature verdict. The full record stays verifiable from the PDS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PollDigest {
+    pub did: String,
+    pub rkey: String,
+    pub at_uri: String,
+    pub question: String,
+    pub options: Vec<String>,
+    pub tally: Vec<u64>,
+    pub participants: usize,
+    pub verified: bool,
+}
+
+/// The signed tally record a server publishes when a poll closes (#193).
+/// Plain data mirroring the worker's `PollRecord` in camelCase wire form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PollRecord {
+    pub question: String,
+    pub options: Vec<String>,
+    pub closes_at: String,
+    pub created_at: String,
+    pub root: String,
+    pub participants: Vec<String>,
+    pub tally: Vec<u64>,
+    pub signing_key: String,
+    pub signature: String,
+}
+
+/// A voter's private receipt (#193), mirrored from the worker's `Receipt`.
+/// The game shows it only to the player who cast that ballot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PollReceiptData {
+    pub did: String,
+    pub choice: u16,
+    pub salt: String,
+    pub nullifier: String,
+    pub index: usize,
+    pub siblings: Vec<String>,
+}
+
 /// One online player in an M42 whitelist sweep. Plain data: the worker side
 /// has the same struct in the `atmospheric` crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -732,6 +801,36 @@ pub enum ModEvent {
         via: String,
         // Boxed: CardDigest carries the typed record.
         card: Box<Option<CardDigest>>,
+    },
+    /// A published Counting Stones tally (#193): the resolved DID, the PDS
+    /// it was read from, and the digest with its signature verdict (`None`
+    /// when the repo has no valid record).
+    PollResult {
+        subject: String,
+        via: String,
+        poll: Box<Option<PollDigest>>,
+    },
+    /// A Counting Stones ballot box was opened (#193).
+    PollOpened {
+        poll_id: String,
+        question: String,
+        options: Vec<String>,
+        closes_at: String,
+    },
+    /// A linked voter's ballot was accepted (#193). The choice is absent so a
+    /// shared event stream never pairs an identity with a vote.
+    PollVote { poll_id: String, did: String },
+    /// A poll's signed tally was published (#193).
+    PollPublished {
+        poll_id: String,
+        uri: String,
+        record: Box<PollRecord>,
+    },
+    /// One voter's private receipt (#193), shown only to that voter.
+    PollReceipt {
+        poll_id: String,
+        did: String,
+        receipt: Box<PollReceiptData>,
     },
     /// One of an account's social graphs (M20): the relation (`kind`), the
     /// subject's resolved DID, the AppView it was read from (`via`), and the
@@ -1024,6 +1123,41 @@ pub fn status_text(event: &ModEvent) -> String {
                 )
             }
         },
+        ModEvent::PollResult { subject, poll, .. } => match &**poll {
+            None => format!("atmospheric: no poll result for {subject}"),
+            Some(d) => {
+                let verdict = if d.verified {
+                    "verified"
+                } else {
+                    "BAD SIGNATURE"
+                };
+                let choices = d
+                    .options
+                    .iter()
+                    .zip(d.tally.iter())
+                    .map(|(option, count)| format!("{option}={count}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "atmospheric: poll \"{}\" — {} vote(s): {} — {verdict}",
+                    d.question, d.participants, choices
+                )
+            }
+        },
+        ModEvent::PollOpened {
+            poll_id, question, ..
+        } => format!("atmospheric: poll {poll_id} is open — {question}"),
+        ModEvent::PollVote { poll_id, did } => {
+            format!("atmospheric: vote recorded for {poll_id} from {did}")
+        }
+        ModEvent::PollPublished { poll_id, uri, .. } => {
+            format!("atmospheric: poll {poll_id} published — {uri}")
+        }
+        ModEvent::PollReceipt { poll_id, did, .. } => {
+            format!(
+                "atmospheric: private receipt for {did} in {poll_id} — keep it off public posts"
+            )
+        }
         ModEvent::GraphChanged { action, subject } => {
             let past = match action.as_str() {
                 "follow" => "followed",
@@ -2330,6 +2464,52 @@ pub fn fetch_server_card(subject: &str) {
     });
 }
 
+/// Ask the worker to read and verify a published Counting Stones tally (#193)
+/// from the subject's PDS. `subject` is a DID or handle. Works logged out.
+pub fn fetch_poll(subject: &str) {
+    send(GameCommand::FetchPoll {
+        subject: subject.into(),
+    });
+}
+
+/// Open a Counting Stones ballot box (#193). `poll_id` is a local record-key
+/// token; `closes_at` is an RFC 3339 UTC timestamp in the future.
+pub fn open_poll(poll_id: &str, question: &str, options: Vec<String>, closes_at: &str) {
+    send(GameCommand::OpenPoll {
+        poll_id: poll_id.into(),
+        question: question.into(),
+        options,
+        closes_at: closes_at.into(),
+    });
+}
+
+/// Cast a linked player's vote (#193) in an open poll. The worker resolves the
+/// DID from the identity service; the chat message never carries a DID.
+pub fn vote_poll(poll_id: &str, player_uuid: &str, player_name: &str, choice: u16) {
+    send(GameCommand::VotePoll {
+        poll_id: poll_id.into(),
+        player_uuid: player_uuid.into(),
+        player_name: player_name.into(),
+        choice,
+    });
+}
+
+/// Close a poll and publish its signed tally (#193).
+pub fn close_poll(poll_id: &str) {
+    send(GameCommand::ClosePoll {
+        poll_id: poll_id.into(),
+    });
+}
+
+/// Retrieve the calling player's private receipt (#193) for a published poll.
+pub fn poll_receipt(poll_id: &str, player_uuid: &str, player_name: &str) {
+    send(GameCommand::PollReceipt {
+        poll_id: poll_id.into(),
+        player_uuid: player_uuid.into(),
+        player_name: player_name.into(),
+    });
+}
+
 /// Ask the worker to read one of an account's public social graphs (M20):
 /// `kind` is "follows", "followers", "blocks" or "mutes"; `subject` is a DID
 /// or a handle.
@@ -3159,6 +3339,55 @@ fn encode_command(command: &GameCommand) -> String {
             "FetchServerCard",
             jobj(vec![("subject", jstr(subject))]),
         )]),
+        GameCommand::FetchPoll { subject } => {
+            jobj(vec![("FetchPoll", jobj(vec![("subject", jstr(subject))]))])
+        }
+        GameCommand::OpenPoll {
+            poll_id,
+            question,
+            options,
+            closes_at,
+        } => jobj(vec![(
+            "OpenPoll",
+            jobj(vec![
+                ("poll_id", jstr(poll_id)),
+                ("question", jstr(question)),
+                (
+                    "options",
+                    Json::Arr(options.iter().map(|value| jstr(value)).collect()),
+                ),
+                ("closes_at", jstr(closes_at)),
+            ]),
+        )]),
+        GameCommand::VotePoll {
+            poll_id,
+            player_uuid,
+            player_name,
+            choice,
+        } => jobj(vec![(
+            "VotePoll",
+            jobj(vec![
+                ("poll_id", jstr(poll_id)),
+                ("player_uuid", jstr(player_uuid)),
+                ("player_name", jstr(player_name)),
+                ("choice", juint(u64::from(*choice))),
+            ]),
+        )]),
+        GameCommand::ClosePoll { poll_id } => {
+            jobj(vec![("ClosePoll", jobj(vec![("poll_id", jstr(poll_id))]))])
+        }
+        GameCommand::PollReceipt {
+            poll_id,
+            player_uuid,
+            player_name,
+        } => jobj(vec![(
+            "PollReceipt",
+            jobj(vec![
+                ("poll_id", jstr(poll_id)),
+                ("player_uuid", jstr(player_uuid)),
+                ("player_name", jstr(player_name)),
+            ]),
+        )]),
         GameCommand::FetchList { reference } => jobj(vec![(
             "FetchList",
             jobj(vec![("reference", jstr(reference))]),
@@ -3543,6 +3772,77 @@ fn decode_card_digest(value: &Json) -> Option<CardDigest> {
     })
 }
 
+/// Decode the signed tally record (#193) from its camelCase wire shape.
+fn decode_poll_record(value: &Json) -> Option<PollRecord> {
+    let obj = as_obj(value)?;
+    let options = as_arr(jget(obj, "options")?)?
+        .iter()
+        .map(|item| as_str(item).map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    let tally = as_arr(jget(obj, "tally")?)?
+        .iter()
+        .map(|item| as_int(item).and_then(|n| u64::try_from(n).ok()))
+        .collect::<Option<Vec<_>>>()?;
+    let participants = as_arr(jget(obj, "participants")?)?
+        .iter()
+        .map(|item| as_str(item).map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    Some(PollRecord {
+        question: req_str(obj, "question")?,
+        options,
+        closes_at: req_str(obj, "closesAt")?,
+        created_at: req_str(obj, "createdAt")?,
+        root: req_str(obj, "root")?,
+        participants,
+        tally,
+        signing_key: req_str(obj, "signingKey")?,
+        signature: req_str(obj, "signature")?,
+    })
+}
+
+/// Decode a private poll receipt (#193) from its wire shape.
+fn decode_poll_receipt(value: &Json) -> Option<PollReceiptData> {
+    let obj = as_obj(value)?;
+    let siblings = as_arr(jget(obj, "siblings")?)?
+        .iter()
+        .map(|item| as_str(item).map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    Some(PollReceiptData {
+        did: req_str(obj, "did")?,
+        choice: u16::try_from(as_int(jget(obj, "choice")?)?).ok()?,
+        salt: req_str(obj, "salt")?,
+        nullifier: req_str(obj, "nullifier")?,
+        index: usize::try_from(as_int(jget(obj, "index")?)?).ok()?,
+        siblings,
+    })
+}
+
+/// Decode a published poll digest (#193). The worker sends the full typed
+/// record in camelCase; the game keeps only the fields it displays.
+fn decode_poll_digest(value: &Json) -> Option<PollDigest> {
+    let obj = as_obj(value)?;
+    let record = as_obj(jget(obj, "record")?)?;
+    let options = as_arr(jget(record, "options")?)?
+        .iter()
+        .map(|item| as_str(item).map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    let tally = as_arr(jget(record, "tally")?)?
+        .iter()
+        .map(|item| as_int(item).and_then(|n| u64::try_from(n).ok()))
+        .collect::<Option<Vec<_>>>()?;
+    let participants = as_arr(jget(record, "participants")?)?.len();
+    Some(PollDigest {
+        did: req_str(obj, "did")?,
+        rkey: req_str(obj, "rkey")?,
+        at_uri: req_str(obj, "at_uri")?,
+        question: req_str(record, "question")?,
+        options,
+        tally,
+        participants,
+        verified: jget(obj, "verified").and_then(as_bool)?,
+    })
+}
+
 /// Decode one JSON line from the sidecar worker into a game-side event.
 /// Returns `None` on any shape mismatch (the caller reports a Failed event).
 fn decode_event(line: &str) -> Option<ModEvent> {
@@ -3744,6 +4044,53 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 subject: req_str(obj, "subject")?,
                 via: req_str(obj, "via")?,
                 card: Box::new(card),
+            })
+        }
+        "PollResult" => {
+            let obj = payload_obj()?;
+            let poll = match jget(obj, "poll")? {
+                Json::Null => None,
+                other => Some(decode_poll_digest(other)?),
+            };
+            Some(ModEvent::PollResult {
+                subject: req_str(obj, "subject")?,
+                via: req_str(obj, "via")?,
+                poll: Box::new(poll),
+            })
+        }
+        "PollOpened" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::PollOpened {
+                poll_id: req_str(obj, "poll_id")?,
+                question: req_str(obj, "question")?,
+                options: as_arr(jget(obj, "options")?)?
+                    .iter()
+                    .map(|item| as_str(item).map(str::to_string))
+                    .collect::<Option<Vec<_>>>()?,
+                closes_at: req_str(obj, "closes_at")?,
+            })
+        }
+        "PollVote" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::PollVote {
+                poll_id: req_str(obj, "poll_id")?,
+                did: req_str(obj, "did")?,
+            })
+        }
+        "PollPublished" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::PollPublished {
+                poll_id: req_str(obj, "poll_id")?,
+                uri: req_str(obj, "uri")?,
+                record: Box::new(decode_poll_record(jget(obj, "record")?)?),
+            })
+        }
+        "PollReceipt" => {
+            let obj = payload_obj()?;
+            Some(ModEvent::PollReceipt {
+                poll_id: req_str(obj, "poll_id")?,
+                did: req_str(obj, "did")?,
+                receipt: Box::new(decode_poll_receipt(jget(obj, "receipt")?)?),
             })
         }
         "SocialGraph" => {
@@ -4708,6 +5055,55 @@ mod tests {
             }),
             "atmospheric: did:plc:y skin model default — skin bafkreibme22… 7 B, not saved, cape none — BAD SIGNATURE"
         );
+        assert_eq!(
+            status_text(&ModEvent::PollOpened {
+                poll_id: "weekly".into(),
+                question: "Where next?".into(),
+                options: vec!["Nether".into(), "End".into()],
+                closes_at: "2099-01-01T00:00:00Z".into(),
+            }),
+            "atmospheric: poll weekly is open — Where next?"
+        );
+        assert_eq!(
+            status_text(&ModEvent::PollVote {
+                poll_id: "weekly".into(),
+                did: "did:plc:v".into(),
+            }),
+            "atmospheric: vote recorded for weekly from did:plc:v"
+        );
+        assert_eq!(
+            status_text(&ModEvent::PollPublished {
+                poll_id: "weekly".into(),
+                uri: "at://did:plc:s/x/weekly".into(),
+                record: Box::new(PollRecord {
+                    question: "Where next?".into(),
+                    options: vec!["Nether".into(), "End".into()],
+                    closes_at: "2099-01-01T00:00:00Z".into(),
+                    created_at: "2098-01-01T00:00:00Z".into(),
+                    root: "a".repeat(64),
+                    participants: vec!["did:plc:v".into()],
+                    tally: vec![1, 0],
+                    signing_key: "k".into(),
+                    signature: "s".into(),
+                }),
+            }),
+            "atmospheric: poll weekly published — at://did:plc:s/x/weekly"
+        );
+        assert_eq!(
+            status_text(&ModEvent::PollReceipt {
+                poll_id: "weekly".into(),
+                did: "did:plc:v".into(),
+                receipt: Box::new(PollReceiptData {
+                    did: "did:plc:v".into(),
+                    choice: 0,
+                    salt: "aa".into(),
+                    nullifier: "bb".into(),
+                    index: 0,
+                    siblings: Vec::new(),
+                }),
+            }),
+            "atmospheric: private receipt for did:plc:v in weekly — keep it off public posts"
+        );
     }
 
     #[test]
@@ -5213,6 +5609,38 @@ mod tests {
             encode_command(&GameCommand::PostAchievement { text: "t".into() }),
             r#"{"PostAchievement":{"text":"t"}}"#
         );
+        assert_eq!(
+            encode_command(&GameCommand::OpenPoll {
+                poll_id: "weekly".into(),
+                question: "Where next?".into(),
+                options: vec!["Nether".into(), "End".into()],
+                closes_at: "2099-01-01T00:00:00Z".into(),
+            }),
+            r#"{"OpenPoll":{"poll_id":"weekly","question":"Where next?","options":["Nether","End"],"closes_at":"2099-01-01T00:00:00Z"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::VotePoll {
+                poll_id: "weekly".into(),
+                player_uuid: "u".into(),
+                player_name: "Alex".into(),
+                choice: 1,
+            }),
+            r#"{"VotePoll":{"poll_id":"weekly","player_uuid":"u","player_name":"Alex","choice":1}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::ClosePoll {
+                poll_id: "weekly".into()
+            }),
+            r#"{"ClosePoll":{"poll_id":"weekly"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::PollReceipt {
+                poll_id: "weekly".into(),
+                player_uuid: "u".into(),
+                player_name: "Alex".into(),
+            }),
+            r#"{"PollReceipt":{"poll_id":"weekly","player_uuid":"u","player_name":"Alex"}}"#
+        );
         assert_eq!(encode_command(&GameCommand::Logout), r#""Logout""#);
         assert_eq!(encode_command(&GameCommand::Shutdown), r#""Shutdown""#);
     }
@@ -5622,6 +6050,45 @@ mod tests {
             })
         );
         // Malformed lines decode to None (the caller reports a Failed event).
+        assert_eq!(
+            decode_event(
+                r#"{"PollOpened":{"poll_id":"weekly","question":"Where next?","options":["Nether","End"],"closes_at":"2099-01-01T00:00:00Z"}}"#
+            ),
+            Some(ModEvent::PollOpened {
+                poll_id: "weekly".into(),
+                question: "Where next?".into(),
+                options: vec!["Nether".into(), "End".into()],
+                closes_at: "2099-01-01T00:00:00Z".into(),
+            })
+        );
+        assert_eq!(
+            decode_event(r#"{"PollVote":{"poll_id":"weekly","did":"did:plc:v"}}"#),
+            Some(ModEvent::PollVote {
+                poll_id: "weekly".into(),
+                did: "did:plc:v".into(),
+            })
+        );
+        let published = decode_event(
+            r#"{"PollPublished":{"poll_id":"weekly","uri":"at://did:plc:s/click.croft.atmospheric.poll.result/weekly","record":{"question":"Where next?","options":["Nether","End"],"closesAt":"2099-01-01T00:00:00Z","createdAt":"2098-01-01T00:00:00Z","root":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","participants":["did:plc:v"],"tally":[1,0],"signingKey":"k","signature":"s"}}}"#,
+        )
+        .expect("a published poll decodes");
+        let ModEvent::PollPublished { record, .. } = &published else {
+            panic!("expected PollPublished")
+        };
+        assert_eq!(record.root, "a".repeat(64));
+        assert_eq!(record.tally, vec![1, 0]);
+        assert_eq!(record.signing_key, "k");
+        let receipt = decode_event(
+            r#"{"PollReceipt":{"poll_id":"weekly","did":"did:plc:v","receipt":{"did":"did:plc:v","choice":0,"salt":"aa","nullifier":"bb","index":0,"siblings":[]}}}"#,
+        )
+        .expect("a receipt decodes");
+        let ModEvent::PollReceipt { receipt: data, .. } = &receipt else {
+            panic!("expected PollReceipt")
+        };
+        assert_eq!(data.choice, 0);
+        assert_eq!(data.salt, "aa");
+        assert_eq!(data.index, 0);
+
         for bad in [
             "",
             "not json",
@@ -5757,6 +6224,46 @@ mod tests {
                 subject: "did:plc:z".into()
             }),
             r#"{"FetchServerCard":{"subject":"did:plc:z"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::FetchPoll {
+                subject: "did:plc:z".into()
+            }),
+            r#"{"FetchPoll":{"subject":"did:plc:z"}}"#
+        );
+
+        assert_eq!(
+            decode_event(r#"{"PollResult":{"subject":"s","via":"v","poll":null}}"#),
+            Some(ModEvent::PollResult {
+                subject: "s".into(),
+                via: "v".into(),
+                poll: Box::new(None),
+            })
+        );
+        let poll_event = decode_event(
+            r#"{"PollResult":{"subject":"did:plc:srv","via":"https://pds.example","poll":{"did":"did:plc:srv","rkey":"3uk","at_uri":"at://did:plc:srv/click.croft.atmospheric.poll.result/3uk","verified":true,"record":{"question":"Where next?","options":["Nether","End"],"closesAt":"2099-01-01T00:00:00Z","createdAt":"2098-01-01T00:00:00Z","root":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","participants":["did:plc:a","did:plc:b","did:plc:c"],"tally":[2,1],"signingKey":"k","signature":"s"}}}}"#,
+        )
+        .expect("a full poll digest decodes");
+        let ModEvent::PollResult { poll, .. } = &poll_event else {
+            panic!("expected PollResult")
+        };
+        let poll = poll.as_ref().as_ref().expect("a poll is present");
+        assert_eq!(poll.question, "Where next?");
+        assert_eq!(poll.options, vec!["Nether", "End"]);
+        assert_eq!(poll.tally, vec![2, 1]);
+        assert_eq!(poll.participants, 3);
+        assert!(poll.verified);
+        assert_eq!(
+            status_text(&poll_event),
+            "atmospheric: poll \"Where next?\" — 3 vote(s): Nether=2, End=1 — verified"
+        );
+        assert_eq!(
+            status_text(&ModEvent::PollResult {
+                subject: "did:plc:srv".into(),
+                via: "v".into(),
+                poll: Box::new(None),
+            }),
+            "atmospheric: no poll result for did:plc:srv"
         );
 
         assert_eq!(

@@ -42,7 +42,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric player-data capture|restore [player], /atmospheric rpg discover [player], /atmospheric skin [path] [default|slim], /atmospheric skin upload, /atmospheric server, /atmospheric server-card publish, /atmospheric card-of <did|handle>, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric colibri start|stop|reconnect|status|send <text>, /atmospheric link [code], /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric profile-set <name|description|pronouns|avatar|banner> [text|path], /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric records <did|handle> <collection>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric labeler-identity [status|request|submit <token>], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric player-data capture|restore [player], /atmospheric rpg discover [player], /atmospheric skin [path] [default|slim], /atmospheric skin upload, /atmospheric server, /atmospheric server-card publish, /atmospheric card-of <did|handle>, /atmospheric poll open|vote|close|receipt|result, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric colibri start|stop|reconnect|status|send <text>, /atmospheric link [code], /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric profile-set <name|description|pronouns|avatar|banner> [text|path], /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric records <did|handle> <collection>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric labeler-identity [status|request|submit <token>], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -300,6 +300,99 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
         } else {
             m::fetch_server_card(subject);
             game.native_chat("atmospheric: reading the server's card…");
+        }
+    } else if rest == "poll" || rest.starts_with("poll ") {
+        let args: Vec<&str> = rest
+            .strip_prefix("poll")
+            .unwrap_or("")
+            .split_whitespace()
+            .collect();
+        *ran = true;
+        match args.first().copied().unwrap_or_default() {
+            "open" => {
+                let mut parts = rest
+                    .strip_prefix("poll")
+                    .unwrap_or("")
+                    .trim_start()
+                    .splitn(4, ' ');
+                let poll_id = parts.nth(1).unwrap_or_default();
+                let closes_at = parts.next().unwrap_or_default();
+                let spec = parts.next().unwrap_or_default();
+                let fields: Vec<&str> = spec
+                    .split('|')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .collect();
+                if poll_id.is_empty() || closes_at.is_empty() || fields.len() < 3 {
+                    game.native_chat(
+                        "atmospheric: /atmospheric poll open <id> <2026-11-27T00:00:00Z> <question>|<choice>|<choice>",
+                    );
+                } else {
+                    let question = fields[0].to_string();
+                    let options = fields[1..].iter().map(|value| value.to_string()).collect();
+                    m::open_poll(poll_id, &question, options, closes_at);
+                    game.native_chat(&format!("atmospheric: opening poll {poll_id}…"));
+                }
+            }
+            "vote" => match (args.get(1), args.get(2)) {
+                (Some(poll_id), Some(choice)) => match choice.parse::<u16>() {
+                    Ok(choice) => match game.native_acting_player() {
+                        Some(player) => {
+                            m::vote_poll(
+                                poll_id,
+                                &m::uuid_text(player.uuid),
+                                &player.name,
+                                choice,
+                            );
+                            game.native_chat(&format!("atmospheric: voting in {poll_id}…"));
+                        }
+                        None => game.native_chat("atmospheric: run /atmospheric poll vote as a player"),
+                    },
+                    Err(_) => game.native_chat("atmospheric: choice must be a zero-based number"),
+                },
+                _ => game.native_chat("atmospheric: /atmospheric poll vote <id> <choice>"),
+            },
+            "close" => match args.get(1) {
+                Some(poll_id) => {
+                    m::close_poll(poll_id);
+                    game.native_chat(&format!("atmospheric: closing poll {poll_id}…"));
+                }
+                None => game.native_chat("atmospheric: /atmospheric poll close <id>"),
+            },
+            "receipt" => match args.get(1) {
+                Some(poll_id) => match game.native_acting_player() {
+                    Some(player) => {
+                        m::poll_receipt(
+                            poll_id,
+                            &m::uuid_text(player.uuid),
+                            &player.name,
+                        );
+                        game.native_chat(&format!(
+                            "atmospheric: fetching your private receipt for {poll_id}…"
+                        ));
+                    }
+                    None => {
+                        game.native_chat("atmospheric: run /atmospheric poll receipt as a player")
+                    }
+                },
+                None => game.native_chat("atmospheric: /atmospheric poll receipt <id>"),
+            },
+            "result" => {
+                let subject = rest
+                    .strip_prefix("poll")
+                    .and_then(|value| value.strip_prefix("result"))
+                    .unwrap_or("")
+                    .trim();
+                if subject.is_empty() {
+                    game.native_chat("atmospheric: /atmospheric poll result <did|handle>");
+                } else {
+                    m::fetch_poll(subject);
+                    game.native_chat("atmospheric: reading the published tally…");
+                }
+            }
+            _ => game.native_chat(
+                "atmospheric: /atmospheric poll open <id> <closes-at> <question>|<choice>|… | vote <id> <choice> | close <id> | receipt <id> | result <did|handle>",
+            ),
         }
     } else if rest == "list" || rest.starts_with("list ") {
         let reference = rest.strip_prefix("list").unwrap_or("").trim();

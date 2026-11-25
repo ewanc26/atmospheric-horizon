@@ -10,6 +10,7 @@ mod account;
 mod base;
 mod card;
 pub mod colibri;
+pub mod poll;
 mod rpg;
 mod social;
 pub mod worker;
@@ -340,6 +341,40 @@ pub enum Command {
     /// PDS and assess its liveness from the record's recency. The subject
     /// is a DID or a handle; the read is unauthenticated — works logged out.
     FetchServerCard { subject: String },
+    /// Read a published Counting Stones tally (#193) from the subject's own
+    /// PDS and verify its signature and structure. The subject is a DID or a
+    /// handle; the read is unauthenticated — works logged out.
+    FetchPoll { subject: String },
+    /// Open a Counting Stones poll (#193). `poll_id` is a caller-chosen local
+    /// key (any short non-empty token); the worker keeps the ballot box in
+    /// memory. One DID gets one vote, resolved from the player's identity link.
+    OpenPoll {
+        poll_id: String,
+        question: String,
+        options: Vec<String>,
+        closes_at: String,
+    },
+    /// Cast a vote in an open poll (#193). The worker resolves the player's
+    /// linked DID; the choice is an index into the poll's options and is never
+    /// published next to the DID.
+    VotePoll {
+        poll_id: String,
+        player_uuid: String,
+        player_name: String,
+        choice: u16,
+    },
+    /// Close a poll and publish its signed tally (#193). The worker writes one
+    /// record to the logged-in account's PDS and keeps the private receipts in
+    /// memory for retrieval by each voter.
+    ClosePoll { poll_id: String },
+    /// Retrieve the caller's private receipt for a published poll (#193). The
+    /// worker resolves the linked DID and returns only that voter's receipt;
+    /// the choice is never published next to a DID on the PDS.
+    PollReceipt {
+        poll_id: String,
+        player_uuid: String,
+        player_name: String,
+    },
     /// Read one of an account's public social graphs (M20): `kind` is
     /// "follows", "followers", "blocks" or "mutes", and `subject` is a DID
     /// or a handle. Unauthenticated AppView read — works logged out.
@@ -523,6 +558,43 @@ pub enum Event {
         // enum's larger variants.
         card: Box<Option<digest::CardDigest>>,
     },
+    /// A published Counting Stones tally (#193): the resolved DID
+    /// (`subject`), the PDS it was read from (`via`), and the digest. The
+    /// digest carries the question, choices, aggregate tally and a verdict
+    /// on the server's signature; `None` when the repo has no valid record.
+    PollResult {
+        subject: String,
+        via: String,
+        // Boxed: PollDigest carries the full typed record.
+        poll: Box<Option<poll::digest::PollDigest>>,
+    },
+    /// A Counting Stones poll was opened (#193): the local id, question,
+    /// choices and close time.
+    PollOpened {
+        poll_id: String,
+        question: String,
+        options: Vec<String>,
+        closes_at: String,
+    },
+    /// A vote was accepted (#193): the poll id and the voter's linked DID.
+    /// The choice is deliberately absent, so a shared event stream never
+    /// pairs an identity with a ballot.
+    PollVote { poll_id: String, did: String },
+    /// A poll was closed and its tally published (#193): the local id, the
+    /// written AT-URI and the signed record.
+    PollPublished {
+        poll_id: String,
+        uri: String,
+        record: Box<poll::record::PollRecord>,
+    },
+    /// A voter's private receipt (#193), returned only to the caller who
+    /// requested it. It carries the salted choice and Merkle proof — never
+    /// publish it next to the DID on a public service.
+    PollReceipt {
+        poll_id: String,
+        did: String,
+        receipt: Box<poll::ballot::Receipt>,
+    },
     /// One of an account's social graphs (M20): the relation (`kind`), the
     /// subject's resolved DID, the AppView it was read from (`via`), and the
     /// accounts in page order.
@@ -625,6 +697,13 @@ mod tests {
             })
             .unwrap(),
             r#"{"FetchLabelerLabels":{"labeler":"did:plc:x","subject":null}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::FetchPoll {
+                subject: "did:plc:x".into()
+            })
+            .unwrap(),
+            r#"{"FetchPoll":{"subject":"did:plc:x"}}"#
         );
         let summary = records::SnapshotSummary {
             username: "Steve".into(),
@@ -1036,6 +1115,15 @@ mod tests {
             })
             .unwrap(),
             r#"{"ServerCard":{"subject":"did:plc:x","via":"https://pds.example","card":null}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Event::PollResult {
+                subject: "did:plc:x".into(),
+                via: "https://pds.example".into(),
+                poll: Box::new(None),
+            })
+            .unwrap(),
+            r#"{"PollResult":{"subject":"did:plc:x","via":"https://pds.example","poll":null}}"#
         );
         assert_eq!(
             serde_json::to_string(&Event::JoinGateState {
