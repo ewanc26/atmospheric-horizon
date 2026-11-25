@@ -52,5 +52,17 @@ getrandom = "0.4"
 # Randomness comes from p256's own re-exported rand_core 0.9 `OsRng`.
 p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
 
+# K-256 (secp256k1) verification for AT Protocol commit signatures (#185).
+# AT Protocol repository commits are ECDSA-signed with the DID's PLC-anchored
+# k256 key. RustCrypto crates are MIT OR Apache-2.0 — AGPL-compatible, pure Rust.
+k256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
+
+# DAG-CBOR / CID decoding for signed commit hashing and CAR block walking (#185).
+# `multibase` decodes `z…` multikey public keys; `cid` reads CIDs from CAR
+# frames. `serde_ipld_dagcbor` is only needed if we switch from the hand-rolled
+# canonical encoder; the commit input is encoded with the local DAG-CBOR helpers.
+multibase = "0.9"
+cid = "0.11"
+
 # Errors.
 thiserror = "2"

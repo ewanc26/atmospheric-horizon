@@ -7,4 +7,5 @@
 pub mod identity;
 pub mod oauth;
 pub mod plc;
+pub mod proof;
 pub mod session;
