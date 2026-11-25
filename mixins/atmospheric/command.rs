@@ -403,6 +403,17 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
             m::fetch_warrants(subject);
             game.native_chat("atmospheric: reading cosmetic warrants…");
         }
+    } else if rest == "verify" || rest.starts_with("verify ") {
+        let subject = rest.strip_prefix("verify").unwrap_or("").trim();
+        *ran = true;
+        if subject.is_empty() {
+            game.native_chat(
+                "atmospheric: /atmospheric verify <did|handle> — proves PDS custody, not human identity",
+            );
+        } else {
+            m::verify_handle(subject);
+            game.native_chat("atmospheric: verifying handle (writing a nonce record)…");
+        }
     } else if rest == "list" || rest.starts_with("list ") {
         let reference = rest.strip_prefix("list").unwrap_or("").trim();
         *ran = true;

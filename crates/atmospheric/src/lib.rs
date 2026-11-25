@@ -350,6 +350,12 @@ pub enum Command {
     /// issuers in config, verifying each signature before showing a line.
     /// The subject is a DID or a handle; the read is unauthenticated.
     FetchWarrants { subject: String },
+    /// Verify a player's handle cryptographically (#185): issues a fresh
+    /// nonce, writes it as a throwaway record through the linked PDS session,
+    /// then verifies the resulting signed commit against the PLC-anchored key
+    /// and checks that handle resolution agrees in both directions. The
+    /// subject is a DID or handle; the write needs an authenticated session.
+    VerifyHandle { subject: String },
     /// Open a Counting Stones poll (#193). `poll_id` is a caller-chosen local
     /// key (any short non-empty token); the worker keeps the ballot box in
     /// memory. One DID gets one vote, resolved from the player's identity link.
@@ -581,6 +587,13 @@ pub enum Event {
         via: String,
         warrants: Option<Vec<warrant::digest::WarrantLine>>,
     },
+    /// A PLC-verified handle plaque (#185): the subject, the verified handle
+    /// and DID, and the fresh commit revision. `None` when verification
+    /// failed. This proves PDS repository custody, not human custody.
+    HandleProofResult {
+        subject: String,
+        proof: Option<proof::HandleProof>,
+    },
     /// A Counting Stones poll was opened (#193): the local id, question,
     /// choices and close time.
     PollOpened {
@@ -724,6 +737,13 @@ mod tests {
             })
             .unwrap(),
             r#"{"FetchWarrants":{"subject":"did:plc:x"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::VerifyHandle {
+                subject: "did:plc:x".into()
+            })
+            .unwrap(),
+            r#"{"VerifyHandle":{"subject":"did:plc:x"}}"#
         );
         let summary = records::SnapshotSummary {
             username: "Steve".into(),
@@ -1153,6 +1173,14 @@ mod tests {
             })
             .unwrap(),
             r#"{"WarrantResult":{"subject":"did:plc:x","via":"https://pds.example","warrants":null}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Event::HandleProofResult {
+                subject: "did:plc:x".into(),
+                proof: None,
+            })
+            .unwrap(),
+            r#"{"HandleProofResult":{"subject":"did:plc:x","proof":null}}"#
         );
         assert_eq!(
             serde_json::to_string(&Event::JoinGateState {

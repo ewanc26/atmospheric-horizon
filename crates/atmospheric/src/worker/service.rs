@@ -16,7 +16,7 @@ use crate::{
     oauth::{self, DpopState, SharedDpop},
     plc, poll,
     presence::{self, PlayerDigest},
-    profiles,
+    profiles, proof,
     records::{self, SnapshotRecord},
     rpg, servers,
     session::{self, Agent, SessionState, StoredSession},
@@ -1037,6 +1037,23 @@ impl Worker {
                         warrants,
                     }),
                     Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::VerifyHandle { subject } => {
+                // Needs an authenticated session: the nonce record is written
+                // through the player's own PDS before the public verification.
+                match self.verify_handle(&subject).await {
+                    Ok(result) => self.emit(Event::HandleProofResult {
+                        subject,
+                        proof: Some(result),
+                    }),
+                    Err(error) => {
+                        self.emit(Event::HandleProofResult {
+                            subject,
+                            proof: None,
+                        });
+                        self.fail(error.to_string());
+                    }
                 }
             }
             Command::OpenPoll {
@@ -2523,6 +2540,47 @@ impl Worker {
         )
         .await?;
         Ok((did, pds, Some(digest.warrants)))
+    }
+
+    /// Verify a handle cryptographically (#185). The nonce is written as a
+    /// throwaway record through the player's own authenticated session to
+    /// force a fresh signed commit; the public verification then checks that
+    /// commit against the PLC-anchored key and both handle directions. The
+    /// subject must be the logged-in account — writing someone else's nonce
+    /// would prove nothing about that subject.
+    async fn verify_handle(&self, subject: &str) -> crate::error::Result<proof::HandleProof> {
+        let (agent, did) = match (&self.agent, self.did.clone()) {
+            (Some(agent), Some(did)) => (agent, did),
+            _ => return Err(AtmosphericError::NotLoggedIn),
+        };
+        let (subject_did, _) =
+            crate::social::servers::resolve_server(&self.http, &self.resolver, subject).await?;
+        if subject_did != did {
+            return Err(AtmosphericError::Message(format!(
+                "subject {subject} resolves to {subject_did}, not the logged-in account {did}"
+            )));
+        }
+
+        let challenge = proof::Challenge::fresh()?;
+        let created_at = serde_json::to_value(atrium_api::types::string::Datetime::now())
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let record = serde_json::json!({
+            "$type": proof::NONCE_COLLECTION,
+            "nonce": challenge.nonce,
+            "createdAt": created_at,
+        });
+        actions::create_record_json(
+            agent,
+            &did,
+            proof::NONCE_COLLECTION,
+            Some(&challenge.nonce),
+            record,
+        )
+        .await?;
+
+        proof::verify_handle(&self.http, &self.resolver, subject, &challenge).await
     }
 
     /// Resolve a player's linked DID through the M35 identity service. Unlike
