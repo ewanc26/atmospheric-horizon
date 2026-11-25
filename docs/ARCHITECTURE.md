@@ -1568,16 +1568,25 @@ The milestone has two halves, both in the `card` scope at
   `Unknown` when the timestamp does not parse. `fetch_card()` resolves the
   account and pages the collection unauthenticated.
 
-Protocol changes: `PublishServerCard { players_online, players_max }` (the
-worker fills the identity fields from the settings file, validates, and
-stamps a fresh `createdAt` per publish — packs and the pinned engine
-revision have no game-side source yet, so they publish empty until the
-runtime command grows), `FetchServerCard { subject }`, and the
-`ServerCard { subject, via, card }` event; wire-shape pins and round-trip
-entries cover all three. No new endpoint or credential: the publish rides
-the server account's PDS session and the read is unauthenticated. The
-runtime stays std-only; the game-side command wiring, the publish timer
-and #196's pre-join display are follow-ups tracked on the issue.
+Protocol changes: `PublishServerCard { players_online, players_max }`,
+`FetchServerCard { subject }`, and the `ServerCard { subject, via, card }`
+event; wire-shape pins and round-trip entries cover all three on both sides
+of the boundary. No new endpoint or credential: the publish rides the server
+account's PDS session and the read is unauthenticated.
+
+The game side (the std-only mirror in `mixins/atmospheric/runtime.rs`) carries
+a plain-data `CardRecord`/`CardPack`/`CardDigest` and `CardLiveness` verdict.
+`/atmospheric server-card publish` publishes once on demand from the live
+server's player count and slot ceiling; a server tick republishes every five
+minutes (`CARD_PUBLISH_SECONDS`), gated on a player-slot ceiling so clients
+stay silent. `/atmospheric card-of <did|handle>` reads another server's card
+and shows its name, version, population, pack count and liveness on the HUD.
+The worker fills identity fields from the settings file, stamps a fresh
+`createdAt` per publish at the fixed rkey, and advertises the pinned Horizon
+revision from `compatibility.json` as `engineRevision`. Packs declare none
+yet: Horizon's signed-registry lookup for `.hpack` checksums is a later slice,
+so the card honestly publishes an empty list rather than unverifiable claims.
+The #196 pre-join display remains a separate slice.
 
 ### M68: automatic player-data sync
 
