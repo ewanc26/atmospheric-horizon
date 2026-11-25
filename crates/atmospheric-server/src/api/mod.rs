@@ -9,6 +9,7 @@
 //! are then completed by the player's browser OAuth login.
 
 mod browser;
+mod continuity;
 mod health;
 mod label;
 mod lexicon;
@@ -19,6 +20,7 @@ mod skin;
 
 use crate::{
     browser::BrowserLinks,
+    continuity::Continuity,
     error::ApiError,
     labeler::Labeler,
     model::unix_now,
@@ -62,6 +64,10 @@ pub struct ServerConfig {
     /// only the static admin token available.
     #[doc(hidden)]
     pub operator: Option<Operator>,
+    /// Experimental Continuity Watchman state (#190). `None` leaves the
+    /// continuity routes disabled and starts no PLC network tasks.
+    #[doc(hidden)]
+    pub continuity: Option<Continuity>,
 }
 
 #[derive(Clone)]
@@ -77,6 +83,7 @@ pub struct AppState {
     skin_signer: Option<SkinSigner>,
     labeler: Option<Labeler>,
     operator: Option<Operator>,
+    continuity: Option<Continuity>,
 }
 
 impl AppState {
@@ -111,6 +118,7 @@ impl AppState {
             skin_signer: config.skin_signer,
             labeler: config.labeler,
             operator: config.operator,
+            continuity: config.continuity,
         }
     }
 
@@ -180,6 +188,27 @@ impl AppState {
             _ => Err(ApiError::Unauthorized),
         }
     }
+
+    /// Continuity watch control is a game-server operation: the link token is
+    /// its normal credential, with the static admin token accepted too so an
+    /// operator without browser linking can still use the watcher.
+    fn authorize_watch(&self, headers: &HeaderMap) -> Result<(), ApiError> {
+        let token = Self::bearer(headers);
+        let link_ok = self.link_token.as_deref().is_some_and(|expected| {
+            token.is_some_and(|actual| constant_time_eq(expected.as_bytes(), actual.as_bytes()))
+        });
+        if link_ok {
+            return Ok(());
+        }
+        match (&self.admin_token, token) {
+            (Some(expected), Some(actual))
+                if constant_time_eq(expected.as_bytes(), actual.as_bytes()) =>
+            {
+                Ok(())
+            }
+            _ => Err(ApiError::Unauthorized),
+        }
+    }
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -235,6 +264,15 @@ pub fn app(store: LinkStore, config: ServerConfig) -> Router {
         .route("/v1/operator/grant", post(operator::grant))
         .route("/v1/operator/receipts", get(operator::receipts))
         .route("/v1/operator/audit-key", get(operator::audit_key))
+        .route("/v1/continuity/status", get(continuity::status))
+        .route("/v1/continuity/snapshots", get(continuity::snapshots))
+        .route("/v1/continuity/snapshots/{did}", get(continuity::snapshot))
+        .route("/v1/continuity/events", get(continuity::events))
+        .route("/v1/continuity/watch", post(continuity::watch))
+        .route(
+            "/v1/continuity/watch/{did}",
+            axum::routing::delete(continuity::unwatch),
+        )
         .merge(xrpc)
         .route(
             "/v1/browser/pairings",

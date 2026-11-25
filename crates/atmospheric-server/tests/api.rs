@@ -29,6 +29,7 @@ fn config() -> ServerConfig {
         labeler: None,
         skin_signer: None,
         operator: None,
+        continuity: None,
     }
 }
 
