@@ -12,6 +12,10 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+### Added
+
+- **Verified handle plaques (#185).** `/atmospheric verify <did|handle>` proves a handle belongs to the logged-in account: a throwaway `at.atpcraft.verify.nonce` record forces a fresh signed commit, whose signature is verified against the DID's PLC-anchored `#atproto` key, with TID freshness and bidirectional handle resolution. The plaque reports PDS repository custody, not human identity; no profile data is written.
+
 ## [0.9.0] — 2026-11-25
 
 Ninth tagged release. Adds cosmetic Warrants: signed credential records accepted
