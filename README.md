@@ -15,15 +15,15 @@ This is the successor to [jollywhoppers-socialsync](https://github.com/ewanc26/j
 
 ## Status
 
-**v0.4.0** (20 November 2026) is the current release. The mod is usable in-game today through the `atmospheric-worker` sidecar: the injected runtime is std-only, and every network or disk operation happens in the worker. Public reads work signed out; posting and record writes need a Bluesky account.
+**v0.5.0** (25 November 2026) is the current release. The mod is usable in-game today through the `atmospheric-worker` sidecar: the injected runtime is std-only, and every network or disk operation happens in the worker. Public reads work signed out; posting and record writes need a Bluesky account.
 
-Shipped in v0.4.0: everything in v0.3.1 (OAuth and app-password login, text and screenshot posts, notifications, atpcraft-compatible chat, signed snapshots and skins, a server profile, record/label/presence/chat/profile reads, social-graph reads and writes, reply/like/repost, a separate server account, the Colibri bridge, the server-side identity service with in-game and browser linking, and the online whitelist sweep) plus generic record browsing, linked-player names, hosted lexicons, proactive token refresh and automatic server-profile publish, a list-member cache, configurable OAuth scope, grants and browser-link lifetime, a complete labeler, player-data aspect capture and RPG item discovery, browser skin upload, and profile editing with avatar and banner uploads (M23–M66).
+Shipped in v0.5.0: automatic player-data sync and liveness-checked server cards (M68/M69), current-major crypto dependencies with unchanged wire formats, and achievement announcements, on top of everything in v0.4.0 — itself everything in v0.3.1 (OAuth and app-password login, text and screenshot posts, notifications, atpcraft-compatible chat, signed snapshots and skins, a server profile, record/label/presence/chat/profile reads, social-graph reads and writes, reply/like/repost, a separate server account, the Colibri bridge, the server-side identity service with in-game and browser linking, and the online whitelist sweep) plus generic record browsing, linked-player names, hosted lexicons, proactive token refresh and automatic server-profile publish, a list-member cache, configurable OAuth scope, grants and browser-link lifetime, a complete labeler, player-data aspect capture and RPG item discovery, browser skin upload, and profile editing with avatar and banner uploads (M23–M66).
 
 Not yet: launcher registry distribution, which waits on third-party native-mod support upstream ([#28](https://github.com/ewanc26/atmospheric-horizon/issues/28)); full core-NBT restore, which needs a complete round-trip player-compound setter the pinned Horizon native API does not expose; in-game skin application, which needs a texture-signing/relay helper the pinned Horizon native API does not expose ([#113](https://github.com/ewanc26/atmospheric-horizon/issues/113)). The separate server account (M25), the Colibri bridge (M26–M34), the shared UUID-to-DID map (M35–M42), the labeler (M56–M62) and the profile/identity services (M63–M66) are the foundations those milestones build on.
 
 ## Features
 
-- **Post from the game.** Publish text with `/atmospheric post`, or the latest F2 screenshot or your current position from a keybind, plus optional death messages.
+- **Post from the game.** Publish text with `/atmospheric post`, or the latest F2 screenshot or your current position from a keybind, plus optional death messages and advancement announcements (#181).
 - **Join the conversation.** Reply to, like or repost any Bluesky post, from its AT-URI or its bsky.app URL.
 - **Notifications in the HUD.** A digest line, a poll timer and a cursor that survives restarts.
 - **atpcraft-compatible records.** Chat messages, Ed25519-endorsed snapshots and skins with blob uploads, and a server descriptor at rkey `self`.
@@ -150,6 +150,7 @@ All commands are under `/atmospheric`:
 | `labeler_enabled` | `false` | Publish the declaration on login and startup resume, request `identity:*` for the PLC identity update, and arm the game join/logout/sweep label triggers (M59–M62) |
 | `persist_session` | `true` | Keep the refresh token in `session.json` across restarts |
 | `post_death_messages` | `false` | Post a text post when you die |
+| `post_achievement_messages` | `false` | Post a text post with 🏆 when you earn an advancement (#181) |
 | `post_chat_messages` | `false` | Mirror every chat line to your repo |
 | `player_data_sync_enabled` | `false` | Capture a linked player's aspects on leave and restore the newest verified snapshot on join (M68). Explicit `/atmospheric player-data` commands always work |
 | `chat_server_id` | empty | Optional override for the chat record's `server` field; empty uses the signing key id, matching atpcraft |
@@ -354,7 +355,7 @@ All of these are unauthenticated, and the query carries only the subject's DID o
 ### Writes to your PDS
 
 - Notification polling uses `app.bsky.notification.listNotifications` with a `seenAt` timestamp, on a timer and on `/atmospheric notifications`.
-- Text and screenshot posts use `com.atproto.repo.uploadBlob` for the image, then `com.atproto.repo.createRecord` with an `app.bsky.embed.images` embed (or a plain text post). The post-location keybind and death messages publish `app.bsky.feed.post` records the same way; death messages only when `post_death_messages` is enabled.
+- Text and screenshot posts use `com.atproto.repo.uploadBlob` for the image, then `com.atproto.repo.createRecord` with an `app.bsky.embed.images` embed (or a plain text post). The post-location keybind, death messages and achievement announcements publish `app.bsky.feed.post` records the same way; death messages only when `post_death_messages` is enabled, achievements only when `post_achievement_messages` is enabled.
 - Chat lines use `com.atproto.repo.createRecord` in the `at.atpcraft.player.chat` collection, TID-keyed — only when `post_chat_messages` is enabled, or one at a time via `/atmospheric chat <text>`. While the Colibri bridge is active, the same chat line is also written to `social.colibri.message` in the player's repo, keyed by a fresh TID; `/atmospheric colibri send <text>` writes one without posting the game chat record. Player-authored Colibri writes are capped at 20 per rolling 60 seconds; the 21st is dropped, server notices are exempt, and the explicit command reports the limit.
 - Colibri membership (M27/M32) lists `social.colibri.membership` in the server account's and local player's own repos and creates one `{community, createdAt}` record when the bridged community is absent. A new player membership in an approval-gated community produces atpcraft's pending line; existing memberships and failed writes stay quiet. It uses `createRecord`, not `putRecord`, because the Colibri OAuth grant contains create/delete but not update.
 - Snapshots use `com.atproto.repo.createRecord` in `at.atpcraft.player.snapshot`, carrying your position/dimension and an Ed25519 endorsement signature.
