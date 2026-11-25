@@ -12,6 +12,10 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-11-25
+
+Tenth tagged release. Adds verified handle plaques — cryptographic handle verification from a fresh signed commit — with no new endpoint or credential.
+
 ### Added
 
 - **Verified handle plaques (#185).** `/atmospheric verify <did|handle>` proves a handle belongs to the logged-in account: a throwaway `at.atpcraft.verify.nonce` record forces a fresh signed commit, whose signature is verified against the DID's PLC-anchored `#atproto` key, with TID freshness and bidirectional handle resolution. The plaque reports PDS repository custody, not human identity; no profile data is written.
@@ -591,7 +595,8 @@ unless it writes to your own repo.
   can issue the same link (M40). The online whitelist sweep remains to be
   implemented.
 
-[Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.10.0
 [0.9.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.9.0
 [0.8.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.8.0
 [0.7.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.7.0
