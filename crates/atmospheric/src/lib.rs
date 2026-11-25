@@ -10,6 +10,7 @@ mod account;
 mod base;
 mod card;
 pub mod colibri;
+pub mod decision;
 pub mod poll;
 mod rpg;
 mod social;
