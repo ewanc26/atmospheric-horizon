@@ -16,7 +16,7 @@ mod social;
 pub mod warrant;
 pub mod worker;
 
-pub use account::{identity, oauth, plc, session};
+pub use account::{identity, oauth, plc, proof, session};
 pub use base::{config, error, records, signing, tid};
 pub use card::{digest, record};
 pub use social::{
