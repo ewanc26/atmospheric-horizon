@@ -1028,6 +1028,17 @@ impl Worker {
                     Err(error) => self.fail(error.to_string()),
                 }
             }
+            Command::FetchWarrants { subject } => {
+                // A public PDS read of pinned issuers: works logged out.
+                match self.fetch_warrants(&subject).await {
+                    Ok((subject, via, warrants)) => self.emit(Event::WarrantResult {
+                        subject,
+                        via,
+                        warrants,
+                    }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
             Command::OpenPoll {
                 poll_id,
                 question,
@@ -2485,6 +2496,33 @@ impl Worker {
         subject: &str,
     ) -> crate::error::Result<(String, String, Option<poll::digest::PollDigest>)> {
         poll::digest::fetch_poll(&self.http, &self.resolver, subject).await
+    }
+
+    /// Read a player's active cosmetic warrants (#192). The issuer allowlist
+    /// comes from the worker's own settings file, never from the game process,
+    /// so a caller cannot self-attest a rank by naming its own key.
+    async fn fetch_warrants(
+        &self,
+        subject: &str,
+    ) -> crate::error::Result<(
+        String,
+        String,
+        Option<Vec<crate::warrant::digest::WarrantLine>>,
+    )> {
+        let config = self.load_config()?;
+        if config.warrant_issuers.is_empty() {
+            let (did, pds) =
+                crate::social::servers::resolve_server(&self.http, &self.resolver, subject).await?;
+            return Ok((did, pds, None));
+        }
+        let (did, pds, digest) = crate::warrant::digest::fetch_warrants(
+            &self.http,
+            &self.resolver,
+            subject,
+            &config.warrant_issuers,
+        )
+        .await?;
+        Ok((did, pds, Some(digest.warrants)))
     }
 
     /// Resolve a player's linked DID through the M35 identity service. Unlike
@@ -4465,6 +4503,7 @@ mod tests {
             colibri_appview_did: "did:web:api.colibri.social".into(),
             colibri_server_events_enabled: true,
             colibri_server_events_fallback_enabled: true,
+            warrant_issuers: Vec::new(),
         }
     }
 
@@ -6426,6 +6465,7 @@ mod tests {
             colibri_appview_did: "did:web:api.colibri.social".into(),
             colibri_server_events_enabled: true,
             colibri_server_events_fallback_enabled: true,
+            warrant_issuers: Vec::new(),
         };
         command_tx
             .send(Command::SaveConfig {
@@ -8430,6 +8470,72 @@ mod tests {
             handle_service: pds_url.to_string(),
             plc_directory: pds_url.to_string(),
         }
+    }
+
+    #[test]
+    fn fetch_warrants_shows_only_pinned_and_signed_lines() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("fetch-warrants");
+        let mut config = test_config(pds.url.clone());
+        let issuer_key = crate::signing::generate();
+        let pin = crate::signing::public_key_spki_b64(&issuer_key.verifying_key());
+        config.warrant_issuers = vec![crate::WarrantIssuer {
+            did: "did:plc:issuer".into(),
+            collection: crate::warrant::record::DEFAULT_WARRANT_COLLECTION.into(),
+            public_key: pin,
+        }];
+        write_config(&dir, &config);
+
+        // A valid warrant from the pinned issuer, plus a self-signed impostor
+        // from an unpinned DID. Only the first may produce a line.
+        let mut signed = crate::warrant::record::WarrantRecord {
+            collection: crate::warrant::record::DEFAULT_WARRANT_COLLECTION.into(),
+            issuer: "did:plc:issuer".into(),
+            subject: "did:plc:stubuser".into(),
+            title: "Community builder".into(),
+            issued_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: None,
+            signing_key: String::new(),
+            signature: String::new(),
+        };
+        signed.sign(&issuer_key);
+        let collection = crate::warrant::record::DEFAULT_WARRANT_COLLECTION;
+        pds.seed_record(collection, "1", serde_json::to_value(&signed).unwrap());
+
+        let mut impostor = crate::warrant::record::WarrantRecord {
+            title: "Fake staff".into(),
+            issuer: "did:plc:stranger".into(),
+            signing_key: String::new(),
+            signature: String::new(),
+            ..signed.clone()
+        };
+        impostor.sign(&crate::signing::generate());
+        pds.seed_record(collection, "2", serde_json::to_value(&impostor).unwrap());
+
+        let (command_tx, event_rx, handle) =
+            spawn_worker_with_resolver(dir.clone(), stub_resolver(&pds.url));
+        command_tx
+            .send(Command::FetchWarrants {
+                subject: "stub.test".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::WarrantResult { .. })) {
+            Event::WarrantResult {
+                subject,
+                via,
+                warrants,
+            } => {
+                assert_eq!(subject, "did:plc:stubuser");
+                assert_eq!(via, pds.url);
+                let lines = warrants.expect("issuers are configured");
+                assert_eq!(lines.len(), 1, "only the pinned signed line survives");
+                assert_eq!(lines[0].title, "Community builder");
+                assert_eq!(lines[0].issuer, "did:plc:issuer");
+            }
+            other => panic!("expected WarrantResult, got {other:?}"),
+        }
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
     }
 
     #[test]

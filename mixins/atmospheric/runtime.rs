@@ -201,6 +201,9 @@ pub enum GameCommand {
     /// Read and verify a published Counting Stones tally (#193) from the
     /// subject's own PDS. Works logged out.
     FetchPoll { subject: String },
+    /// Read a player's active cosmetic warrants (#192) from the pinned
+    /// issuers in the worker's settings. Works logged out.
+    FetchWarrants { subject: String },
     /// Open a Counting Stones ballot box (#193) with a caller-chosen local id.
     OpenPoll {
         poll_id: String,
@@ -623,6 +626,15 @@ pub struct PollReceiptData {
     pub siblings: Vec<String>,
 }
 
+/// One verified cosmetic warrant line (#192), mirrored from the worker's
+/// `WarrantLine` in camelCase wire form. Cosmetic only — never a gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarrantLine {
+    pub title: String,
+    pub issuer: String,
+    pub collection: String,
+}
+
 /// One online player in an M42 whitelist sweep. Plain data: the worker side
 /// has the same struct in the `atmospheric` crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -809,6 +821,14 @@ pub enum ModEvent {
         subject: String,
         via: String,
         poll: Box<Option<PollDigest>>,
+    },
+    /// A player's active cosmetic warrants (#192): the resolved DID, the PDS
+    /// read from, and the verified name-plate lines (`None` when no issuers
+    /// are configured).
+    WarrantResult {
+        subject: String,
+        via: String,
+        warrants: Option<Vec<WarrantLine>>,
     },
     /// A Counting Stones ballot box was opened (#193).
     PollOpened {
@@ -1142,6 +1162,22 @@ pub fn status_text(event: &ModEvent) -> String {
                     "atmospheric: poll \"{}\" — {} vote(s): {} — {verdict}",
                     d.question, d.participants, choices
                 )
+            }
+        },
+        ModEvent::WarrantResult {
+            subject, warrants, ..
+        } => match warrants {
+            None => format!("atmospheric: no warrant issuers configured for {subject}"),
+            Some(lines) if lines.is_empty() => {
+                format!("atmospheric: no active warrants for {subject}")
+            }
+            Some(lines) => {
+                let titles = lines
+                    .iter()
+                    .map(|line| line.title.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("atmospheric: {subject} holds {titles} (cosmetic)")
             }
         },
         ModEvent::PollOpened {
@@ -2472,6 +2508,15 @@ pub fn fetch_poll(subject: &str) {
     });
 }
 
+/// Ask the worker to read a player's active cosmetic warrants (#192) from the
+/// pinned issuers in its settings. `subject` is a DID or handle. Works logged
+/// out; ranks are cosmetic and never gate gameplay.
+pub fn fetch_warrants(subject: &str) {
+    send(GameCommand::FetchWarrants {
+        subject: subject.into(),
+    });
+}
+
 /// Open a Counting Stones ballot box (#193). `poll_id` is a local record-key
 /// token; `closes_at` is an RFC 3339 UTC timestamp in the future.
 pub fn open_poll(poll_id: &str, question: &str, options: Vec<String>, closes_at: &str) {
@@ -3342,6 +3387,10 @@ fn encode_command(command: &GameCommand) -> String {
         GameCommand::FetchPoll { subject } => {
             jobj(vec![("FetchPoll", jobj(vec![("subject", jstr(subject))]))])
         }
+        GameCommand::FetchWarrants { subject } => jobj(vec![(
+            "FetchWarrants",
+            jobj(vec![("subject", jstr(subject))]),
+        )]),
         GameCommand::OpenPoll {
             poll_id,
             question,
@@ -3817,6 +3866,17 @@ fn decode_poll_receipt(value: &Json) -> Option<PollReceiptData> {
     })
 }
 
+/// Decode one verified cosmetic warrant line (#192) from its camelCase wire
+/// shape.
+fn decode_warrant_line(value: &Json) -> Option<WarrantLine> {
+    let obj = as_obj(value)?;
+    Some(WarrantLine {
+        title: req_str(obj, "title")?,
+        issuer: req_str(obj, "issuer")?,
+        collection: req_str(obj, "collection")?,
+    })
+}
+
 /// Decode a published poll digest (#193). The worker sends the full typed
 /// record in camelCase; the game keeps only the fields it displays.
 fn decode_poll_digest(value: &Json) -> Option<PollDigest> {
@@ -4056,6 +4116,23 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 subject: req_str(obj, "subject")?,
                 via: req_str(obj, "via")?,
                 poll: Box::new(poll),
+            })
+        }
+        "WarrantResult" => {
+            let obj = payload_obj()?;
+            let warrants = match jget(obj, "warrants")? {
+                Json::Null => None,
+                other => Some(
+                    as_arr(other)?
+                        .iter()
+                        .map(decode_warrant_line)
+                        .collect::<Option<Vec<_>>>()?,
+                ),
+            };
+            Some(ModEvent::WarrantResult {
+                subject: req_str(obj, "subject")?,
+                via: req_str(obj, "via")?,
+                warrants,
             })
         }
         "PollOpened" => {
@@ -6231,6 +6308,12 @@ mod tests {
             }),
             r#"{"FetchPoll":{"subject":"did:plc:z"}}"#
         );
+        assert_eq!(
+            encode_command(&GameCommand::FetchWarrants {
+                subject: "did:plc:z".into()
+            }),
+            r#"{"FetchWarrants":{"subject":"did:plc:z"}}"#
+        );
 
         assert_eq!(
             decode_event(r#"{"PollResult":{"subject":"s","via":"v","poll":null}}"#),
@@ -6264,6 +6347,39 @@ mod tests {
                 poll: Box::new(None),
             }),
             "atmospheric: no poll result for did:plc:srv"
+        );
+
+        // Warrants (#192): camelCase lines decode and render as cosmetic text.
+        let warrant_event = decode_event(
+            r#"{"WarrantResult":{"subject":"did:plc:p","via":"https://pds.example","warrants":[{"title":"Community builder","issuer":"did:plc:i","collection":"club.atmospheric.warrant"}]}}"#,
+        )
+        .expect("a warrant result decodes");
+        let ModEvent::WarrantResult { warrants, .. } = &warrant_event else {
+            panic!("expected WarrantResult")
+        };
+        let warrants = warrants.as_ref().expect("warrants present");
+        assert_eq!(warrants.len(), 1);
+        assert_eq!(warrants[0].title, "Community builder");
+        assert_eq!(warrants[0].issuer, "did:plc:i");
+        assert_eq!(
+            status_text(&warrant_event),
+            "atmospheric: did:plc:p holds Community builder (cosmetic)"
+        );
+        assert_eq!(
+            decode_event(r#"{"WarrantResult":{"subject":"s","via":"v","warrants":null}}"#),
+            Some(ModEvent::WarrantResult {
+                subject: "s".into(),
+                via: "v".into(),
+                warrants: None,
+            })
+        );
+        assert_eq!(
+            status_text(&ModEvent::WarrantResult {
+                subject: "s".into(),
+                via: "v".into(),
+                warrants: None,
+            }),
+            "atmospheric: no warrant issuers configured for s"
         );
 
         assert_eq!(

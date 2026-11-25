@@ -139,6 +139,7 @@ fn main() {
         colibri_server_events_fallback_enabled: true,
         rpg_items_enabled: false,
         rpg_items_max_per_scan: 10,
+        warrant_issuers: Vec::new(),
         trusted_server_keys: env::var("ATMOSPHERIC_TRUSTED_SERVER_KEYS")
             .ok()
             .filter(|s| !s.trim().is_empty())
