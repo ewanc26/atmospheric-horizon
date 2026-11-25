@@ -12,6 +12,52 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+### Added
+
+- **Operator's Warrant (#189, experimental).** The optional `atmospheric-server`
+  sidecar gains DID-authenticated, short-lived scoped admin grants for
+  allowlisted `did:plc`/`did:web` operators. They are additive: the static
+  `ATMOSPHERIC_SERVER_TOKEN` remains valid and unchanged on every admin route.
+  `POST /v1/operator/challenge` issues a nonce; the operator writes a throwaway
+  `at.atpcraft.verify.nonce` record through their own PDS session and
+  `POST /v1/operator/grant` redeems it with #185's exact PLC-anchored commit,
+  TID-freshness and bidirectional handle checks. `GET /v1/operator/audit-key`
+  is public; `GET /v1/operator/receipts` requires the static token or a grant
+  with `audit_read`. Scopes are `links_read` (`GET /v1/links`), `links_write`
+  (`PUT`/`DELETE /v1/links/{uuid}`), `pairing_create` (`POST /v1/pairings`),
+  `label_emit` (`POST /v1/labeler/labels`) and `audit_read`; a valid grant with
+  the wrong scope receives 403 and writes a `scope_denied` receipt. New
+  variables: `ATMOSPHERIC_SERVER_OPERATOR_DIDS` (comma-separated allowlist;
+  empty or unset disables the feature and creates no key or log),
+  `ATMOSPHERIC_SERVER_OPERATOR_GRANT_TTL_SECONDS` (default 900, max 3600;
+  over-long lifetimes fail startup),
+  `ATMOSPHERIC_SERVER_OPERATOR_SCOPES`,
+  `ATMOSPHERIC_SERVER_OPERATOR_HANDLE_SERVICE` and
+  `ATMOSPHERIC_SERVER_OPERATOR_PLC_DIRECTORY`. These are this repository's
+  `/v1` sidecar routes, not new Horizon `/api/v1` routes.
+
+### Security
+
+- A compromised allowlisted operator DID/PDS key is effectively server takeover,
+  so grant lifetimes stay short. Receipts are owner-only append-only JSONL at
+  `<data>/operator/receipts.jsonl`, signed by the owner-only Ed25519 key at
+  `<data>/operator/audit-key.json`. Receipts record DID, scope, action, target,
+  grant id, outcome, key id and signature, never the bearer token. Static-token
+  operations write no receipts; challenges and grants are in memory only and
+  are invalidated by a restart.
+- DID authentication stays inside the sidecar process boundary and does not
+  weaken the loopback/local-socket, token-gated control-plane assumption. The
+  proof establishes PDS repository custody, not human identity; the sidecar
+  only makes unauthenticated verification reads plus existing DID resolution.
+
+### Notes
+
+- Experimental quality atop the stable control API, for operators only. No
+  player-facing gate, join decision or gameplay capability reads grant or
+  receipt state, and the injected std-only `.hmod`/WASI layer has no sockets or
+  DID code. Horizon's stable API, the native export and client-native Route 2
+  verification are unchanged.
+
 ## [0.10.0] — 2026-11-25
 
 Tenth tagged release. Adds verified handle plaques — cryptographic handle verification from a fresh signed commit — with no new endpoint or credential.

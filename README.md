@@ -33,6 +33,7 @@ Not yet: launcher registry submission, which is no longer blocked by upstream �
 - **Read the public side.** List membership (with a fail-closed gate decision), labels and labeler queries, player presence, skins, chat history, arbitrary public collections (M44), server profiles, profiles with display names and pronouns, and follows/followers/blocks/mutes.
 - **Warrants: cosmetic ranks (#192).** `/atmospheric warrants <did|handle>` reads signed credential records from a player's own repo and shows the ones issued by a DID, collection and Ed25519 key you pin in `warrant_issuers`. A self-attested rank is worthless: the signature must verify with the exact pinned key, for that subject, while the grant is active. Deleting the record drops the rank on the next fetch and `expiresAt` can time-box it. Ranks are name-plate text only — never a join gate or gameplay capability, and nothing is written to the PDS.
 - **Verified handle plaques (#185).** `/atmospheric verify <did|handle>` proves a handle belongs to the logged-in account cryptographically: the worker writes a throwaway nonce record through your own PDS session to force a fresh commit, then verifies that commit's signature against the `#atproto` key in your PLC document, checks the commit is newer than the challenge, and confirms the handle resolves back to the same DID. The plaque states plainly that this proves PDS repository custody, **not** human identity. The subject must be the logged-in account; no profile data is written.
+- **Operator's Warrant (#189, experimental).** The optional `atmospheric-server` sidecar can grant short-lived, scoped admin access to allowlisted DIDs that prove PDS repository custody with the same PLC-anchored commit check as verified handle plaques (#185). DID grants are **additive**: the existing `ATMOSPHERIC_SERVER_TOKEN` stays valid and unchanged on every admin route. This is operators only — no in-game join gate, label trigger or other player-facing state reads it, and it proves repository custody, **not** human identity. See [DID-authenticated operator grants](#did-authenticated-operator-grants-experimental) below.
 - **Serve labels.** The optional identity service can sign and store labels for player DIDs, serve the spec `com.atproto.label.queryLabels` endpoint and stream the log over `subscribeLabels`; operators append labels through the admin token. M56–M62 cover signing, storage, querying, live streaming, the server-account declaration, its PLC identity publication and the game triggers for the full automatic vocabulary: `player`, `online`, `admin`, `playtime-bronze`/`silver`/`gold`, `dragon-slayer`, `monster-hunter` and `death-defier`. `vip` and `donor` remain manual grants.
 - **Show linked players' Bluesky names.** On a server, a joining player linked through the identity service gets their Bluesky display name reduced to atpcraft's valid 16-character Minecraft name, with the handle's username as the fallback, plus pronouns as their in-game name — plain text in chat and the player list (M45/M47). Unlinked players and unusable names keep their Minecraft name.
 - **Publish the schemas.** The optional identity service serves the five `at.atpcraft.*` lexicon documents at `/lexicons`, so other clients and servers can fetch the record shapes this mod writes (M46).
@@ -194,12 +195,17 @@ The same listener can act as a labeler. Set `ATMOSPHERIC_SERVER_LABELER_DID` to 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ATMOSPHERIC_SERVER_ADDR` | `0.0.0.0:8787` | Listen address |
-| `ATMOSPHERIC_SERVER_DATA_DIR` | `./atmospheric-server-data` | Folder containing `links.json` and the labeler data |
-| `ATMOSPHERIC_SERVER_TOKEN` | unset | Admin bearer token; unset disables all admin routes and pairing creation |
+| `ATMOSPHERIC_SERVER_DATA_DIR` | `./atmospheric-server-data` | Folder containing `links.json`, the labeler data and (when #189 is enabled) `operator/audit-key.json` and `operator/receipts.jsonl` |
+| `ATMOSPHERIC_SERVER_TOKEN` | unset | Static admin bearer token; unset disables static-token admin routes and pairing creation, but DID grants can still authorize admin routes when #189 is enabled |
 | `ATMOSPHERIC_SERVER_LINK_TOKEN` | unset | Shared secret the game server uses to create browser links; unset disables browser linking |
 | `ATMOSPHERIC_SERVER_PUBLIC_URL` | unset | Public HTTPS base URL used for OAuth client metadata and the callback |
 | `ATMOSPHERIC_SERVER_LABELER_DID` | unset | Server account `did:plc`/`did:web` to sign labels as; unset disables label emission and querying |
 | `ATMOSPHERIC_SERVER_SKIN_KEY` | unset | Path to the game worker's `signing-key.json` for browser skin publishing; unset disables uploads |
+| `ATMOSPHERIC_SERVER_OPERATOR_DIDS` | unset | Experimental #189: comma-separated `did:plc`/`did:web` allowlist for DID-authenticated admin grants; empty or unset disables the feature and creates no audit key or log |
+| `ATMOSPHERIC_SERVER_OPERATOR_GRANT_TTL_SECONDS` | `900` | Experimental #189: grant lifetime in seconds (1–3600); too-long lifetimes are rejected at startup |
+| `ATMOSPHERIC_SERVER_OPERATOR_SCOPES` | all five scopes | Experimental #189: comma-separated subset of `links_read`, `links_write`, `pairing_create`, `label_emit`, `audit_read` |
+| `ATMOSPHERIC_SERVER_OPERATOR_HANDLE_SERVICE` | `https://bsky.social` | Experimental #189: handle resolver override for the operator's Proof-of-Handle check |
+| `ATMOSPHERIC_SERVER_OPERATOR_PLC_DIRECTORY` | `https://plc.directory` | Experimental #189: PLC directory override for the operator's Proof-of-Handle check |
 
 ### Docker setup example
 
@@ -238,6 +244,10 @@ The sweep closes the gap a list edit leaves behind: every `join_gate_sweep_secon
 | `DELETE /v1/links/{uuid}` | admin | Remove a link |
 | `POST /v1/pairings` | admin | Issue a one-time pairing code for a player |
 | `POST /v1/pairings/claim` | pairing code | Bind the code's player to a DID and handle |
+| `POST /v1/operator/challenge` | public, allowlisted DID only | Issue a one-time DID challenge for an experimental #189 grant |
+| `POST /v1/operator/grant` | public, DID proof | Redeem the challenge and #185 PDS-custody proof for a short-lived scoped grant |
+| `GET /v1/operator/audit-key` | public | Public SPKI key for verifying signed audit receipts (#189) |
+| `GET /v1/operator/receipts` | static admin token or `audit_read` grant | Read signed receipts for grant-exercised operations (#189); no token is stored in them |
 | `POST /v1/browser/pairings` | link token | Create a one-time browser link for an online player (`ttl_seconds` optional, 60–3600) |
 | `POST /v1/browser/skins` | link token | Create a one-time skin-upload link for an already-linked player |
 | `POST /v1/labeler/labels` | admin | Sign and append one label for a subject (`uri`, `val`, optional `neg`/`cid`/`exp`) |
@@ -262,6 +272,61 @@ curl -X PUT http://127.0.0.1:8787/v1/links/00000000-0000-4000-8000-000000000001 
   -H 'content-type: application/json' \
   -d '{"player_name":"Alex","did":"did:plc:...","handle":"alex.example"}'
 ```
+
+#### DID-authenticated operator grants (experimental)
+
+These four routes are additions to this repo's `/v1` surface, not Horizon
+`/api/v1` routes. Set `ATMOSPHERIC_SERVER_OPERATOR_DIDS` to enable them; with an
+empty allowlist they are disabled and no audit key or log is created. A grant
+carries a subset of `links_read` (`GET /v1/links`), `links_write`
+(`PUT`/`DELETE /v1/links/{uuid}`), `pairing_create` (`POST /v1/pairings`),
+`label_emit` (`POST /v1/labeler/labels`) and `audit_read`
+(`GET /v1/operator/receipts`). A valid grant with the wrong scope gets 403 and writes
+a `scope_denied` receipt; static-token operations do not write receipts.
+
+```bash
+# 1. Ask for a challenge (only allowlisted DIDs get one).
+curl -s -X POST http://127.0.0.1:8787/v1/operator/challenge \
+  -H 'content-type: application/json' \
+  -d '{"did":"did:plc:..."}'
+# {"did":"did:plc:...","nonce":"...","issued_at":...,"expires_at":...}
+
+# 2. As that DID, write a throwaway at.atpcraft.verify.nonce record containing
+#    that nonce through your own PDS session (the #185 Proof-of-Handle write).
+#    This sidecar never makes that write and never holds your session.
+
+# 3. Redeem it for a short-lived scoped bearer token.
+curl -s -X POST http://127.0.0.1:8787/v1/operator/grant \
+  -H 'content-type: application/json' \
+  -d '{"did":"did:plc:...","nonce":"<nonce from step 1>"}'
+# 201 {"token":"...","did":"did:plc:...","scopes":[...],"issued_at":...,"expires_at":...}
+
+# 4. Use the grant on a permitted /v1 admin route.
+curl -X PUT http://127.0.0.1:8787/v1/links/00000000-0000-4000-8000-000000000001 \
+  -H "Authorization: Bearer $GRANT_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"player_name":"Alex","did":"did:plc:...","handle":"alex.example"}'
+
+# 5. Verify the public receipt key, then read the signed receipts.
+curl -s http://127.0.0.1:8787/v1/operator/audit-key
+curl -s -H "Authorization: Bearer $ATMOSPHERIC_SERVER_TOKEN" \
+  http://127.0.0.1:8787/v1/operator/receipts
+```
+
+Warnings: this DID layer is experimental-quality on top of the stable control
+API; the static token remains fully valid and unchanged on every admin route.
+Compromise of an allowlisted operator's DID/PDS key is effectively admin
+takeover, so keep the grant lifetime short (default 900 s, maximum 3600 s): a
+stolen grant is a bearer token until it expires. Keep `<data>/operator` private,
+since its Ed25519 key signs the receipts. Challenges and grants are in memory
+only, so a restart invalidates them.
+Receipts are append-only JSONL at `<data>/operator/receipts.jsonl`, signed with
+the owner-only Ed25519 key at `<data>/operator/audit-key.json`; they record DID,
+scope, action, target, grant id, outcome, key id and signature, never the bearer
+token. All DID authentication stays inside the sidecar process boundary and
+does not weaken the loopback/local-socket, token-gated control-plane assumption.
+No player-facing gate reads this state. This proves PDS repository custody,
+not human identity.
 
 Label example:
 
@@ -326,7 +391,7 @@ atpcraft is a server-side Fabric mod, while Horizon native mods can hook the ser
 
 ## Network use
 
-This mod talks to the network **by design**: the AT Protocol services needed to reach and authenticate with your account's PDS, plus the public AppView, labelers, and the optional identity service you configure for link claims, browser link creation, join-time profile checks and labeler triggers — nothing else. Image posts always use your configured PDS; `image_post_target` changes only which record collection is written there (#183). All game-side network I/O happens in the spawned local `atmospheric-worker` process, never in the game; the game and the worker exchange plain JSON commands and events over a local pipe only. The separate `atmospheric-server` listener performs browser OAuth, serves the public lexicon documents and, when configured, stores and serves signed labels as described below.
+This mod talks to the network **by design**: the AT Protocol services needed to reach and authenticate with your account's PDS, plus the public AppView, labelers, and the optional identity service you configure for link claims, browser link creation, join-time profile checks, labeler triggers and (experimentally) DID-authenticated operator grants — nothing else. Image posts always use your configured PDS; `image_post_target` changes only which record collection is written there (#183). All game-side network I/O happens in the spawned local `atmospheric-worker` process, never in the game; the game and the worker exchange plain JSON commands and events over a local pipe only. The separate `atmospheric-server` listener performs browser OAuth, serves the public lexicon documents and, when configured, stores and serves signed labels as described below. With #189 enabled it also serves four routes on **this repo's `/v1` surface, not Horizon's `/api/v1`**: `POST /v1/operator/challenge`, `POST /v1/operator/grant`, public `GET /v1/operator/audit-key`, and `GET /v1/operator/receipts` (static admin token or a grant with `audit_read`). Grants are scoped to `links_read`, `links_write`, `pairing_create`, `label_emit` and `audit_read`; a valid grant with the wrong scope receives 403 and writes a `scope_denied` receipt, while static-token operations write no receipt. The operator writes the throwaway `at.atpcraft.verify.nonce` record through their own PDS session; this sidecar performs only unauthenticated verification reads plus the existing handle and DID resolution (the configured handle service, PLC directory and the DID document's PDS), so the operator DID, nonce and public commit data go to those services. Receipts are stored at `<data>/operator/receipts.jsonl` with an owner-only Ed25519 key at `<data>/operator/audit-key.json`.
 
 ### Identity and login
 
@@ -396,7 +461,9 @@ The files that hold secrets are written with owner-only permissions (0600 on uni
 
 ### Server-side identity service (M35–M40)
 
-The optional `atmospheric-server` process listens only on `ATMOSPHERIC_SERVER_ADDR`. `GET /healthz`, `GET /v1/links/{uuid}` and the OAuth client metadata are public; listing, direct link writes, deletion and pairing creation require `Authorization: Bearer $ATMOSPHERIC_SERVER_TOKEN`; browser-link creation requires `Authorization: Bearer $ATMOSPHERIC_SERVER_LINK_TOKEN`. Claiming a pairing code and opening a browser link are public because the one-time token is the credential. The service stores `links.json` in its own data folder: canonical player UUIDs, player names, DIDs, optional handles, first-link timestamps and pending codes with their expiry. Browser link tokens, PKCE verifiers and DPoP keys stay in memory and are not persisted. It has no telemetry. It also serves the public `at.atpcraft.*` lexicon documents; those responses read no player data. M36's `/atmospheric link <code>` posts the code, the player's DID and optional handle to `<server_api_url>/v1/pairings/claim`; it does not send a session token or game data. M39's `/atmospheric link` posts `{player_uuid, player_name}` with the server-only link token. The browser service resolves the handle and DID, discovers the PDS and authorization server, pushes PAR, and exchanges the callback; no game data beyond the UUID/name binding is sent. M64's `/atmospheric skin upload` posts `{player_uuid, player_name}` to `/v1/browser/skins` with the link token and gets a one-time `/skin/{token}` URL; that page sends the PNG (at most 1 MiB) to the service, which uploads it to the linked account's PDS as a blob and writes the signed `at.atpcraft.player.skin` record after a DPoP browser login as the linked DID. M37 reads `GET /v1/links/{uuid}` when a player joins, to check the linked account's Colibri profile, and M38 reads the same public route at login to enforce the configured list. M40's gate refusal additionally creates a browser link through `POST /v1/browser/pairings`, carrying the UUID, player name and requested lifetime. With `ATMOSPHERIC_SERVER_LABELER_DID` set, M57 adds a local K-256 key at `labeler/signing-key.json` and an append-only `labeler/labels.jsonl`; neither is sent anywhere. The admin emission route stores only the submitted subject DID/AT-URI, value and timestamps, and the public `queryLabels` route returns those stored labels. M58 adds the live `subscribeLabels` WebSocket over the same log and permissive CORS on the public XRPC reads; the stream sends only those stored labels. No outbound request is made for labelling.
+The optional `atmospheric-server` process listens only on `ATMOSPHERIC_SERVER_ADDR`. `GET /healthz`, `GET /v1/links/{uuid}` and the OAuth client metadata are public; admin operations on this surface accept `Authorization: Bearer $ATMOSPHERIC_SERVER_TOKEN` unchanged, and additionally (experimentally) a scoped #189 DID grant carrying the route's scope; browser-link creation requires `Authorization: Bearer $ATMOSPHERIC_SERVER_LINK_TOKEN`. Claiming a pairing code and opening a browser link are public because the one-time token is the credential. The service stores `links.json` in its own data folder: canonical player UUIDs, player names, DIDs, optional handles, first-link timestamps and pending codes with their expiry. Browser link tokens, PKCE verifiers and DPoP keys stay in memory and are not persisted. It has no telemetry. It also serves the public `at.atpcraft.*` lexicon documents; those responses read no player data. M36's `/atmospheric link <code>` posts the code, the player's DID and optional handle to `<server_api_url>/v1/pairings/claim`; it does not send a session token or game data. M39's `/atmospheric link` posts `{player_uuid, player_name}` with the server-only link token. The browser service resolves the handle and DID, discovers the PDS and authorization server, pushes PAR, and exchanges the callback; no game data beyond the UUID/name binding is sent. M64's `/atmospheric skin upload` posts `{player_uuid, player_name}` to `/v1/browser/skins` with the link token and gets a one-time `/skin/{token}` URL; that page sends the PNG (at most 1 MiB) to the service, which uploads it to the linked account's PDS as a blob and writes the signed `at.atpcraft.player.skin` record after a DPoP browser login as the linked DID. M37 reads `GET /v1/links/{uuid}` when a player joins, to check the linked account's Colibri profile, and M38 reads the same public route at login to enforce the configured list. M40's gate refusal additionally creates a browser link through `POST /v1/browser/pairings`, carrying the UUID, player name and requested lifetime. With `ATMOSPHERIC_SERVER_LABELER_DID` set, M57 adds a local K-256 key at `labeler/signing-key.json` and an append-only `labeler/labels.jsonl`; neither is sent anywhere. The admin emission route stores only the submitted subject DID/AT-URI, value and timestamps, and the public `queryLabels` route returns those stored labels. M58 adds the live `subscribeLabels` WebSocket over the same log and permissive CORS on the public XRPC reads; the stream sends only those stored labels. No outbound request is made for labelling.
+
+#189's four operator routes are also on this repo's `/v1` surface, not Horizon's `/api/v1`: `POST /v1/operator/challenge`, `POST /v1/operator/grant`, public `GET /v1/operator/audit-key` and `GET /v1/operator/receipts` (static token or an `audit_read` grant). An allowlisted DID receives a nonce, writes a throwaway `at.atpcraft.verify.nonce` record through its own PDS session as in #185, and redeems the challenge for a short-lived scoped token. The sidecar's own network use for this path is unauthenticated verification reads plus the existing handle/DID resolution through the configured handle service, PLC directory and DID document; it sends no credentials and never writes to the operator's repo. Challenges and grants are in memory only. Every grant-exercised admin operation appends a signed receipt to `<data>/operator/receipts.jsonl`, signed with the owner-only key at `<data>/operator/audit-key.json`; a wrong-scope grant gets 403 and a `scope_denied` receipt, and static-token operations write no receipt. Receipts carry the DID, scope, action, target, grant id, outcome, key id and signature, never the bearer token. No in-game gate or other player-facing feature reads this state.
 
 M61/M62's game triggers read `<server_api_url>/v1/links/{uuid}` and `<server_api_url>/xrpc/com.atproto.label.queryLabels`, then sign the justified automatic labels through `POST <server_api_url>/v1/labeler/labels` with `server_admin_token`. The subject DID and label value are the only player data sent; no name, UUID, op level, statistic or other game state goes to the labeler.
 
@@ -406,7 +473,7 @@ M68's automatic hooks use exactly the same routes and gates as the manual comman
 
 ### Nothing else
 
-No telemetry, no analytics, no other endpoints. The optional identity service above is a separate listener, not part of the game mod's network use.
+No telemetry, no analytics, no endpoints beyond those listed above. The optional identity service above is a separate listener, not part of the game mod's network use.
 
 ## Layout
 
