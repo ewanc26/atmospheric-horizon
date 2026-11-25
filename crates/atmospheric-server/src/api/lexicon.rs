@@ -15,6 +15,10 @@ use axum::{
 /// The served documents, keyed by their base NSID.
 const LEXICONS: &[(&str, &str)] = &[
     (
+        "club.atmospheric.mod.decision",
+        include_str!("../../lexicons/club.atmospheric.mod.decision.json"),
+    ),
+    (
         "at.atpcraft.player.chat",
         include_str!("../../lexicons/at.atpcraft.player.chat.json"),
     ),

@@ -30,6 +30,7 @@ fn config() -> ServerConfig {
         skin_signer: None,
         operator: None,
         continuity: None,
+        ledger: None,
     }
 }
 
@@ -332,6 +333,7 @@ async fn lexicons_are_public_and_unknown_documents_are_not_found() {
     let store = LinkStore::open(&path).unwrap();
     let router = app(store, config());
     let nsids = [
+        "club.atmospheric.mod.decision",
         "at.atpcraft.player.chat",
         "at.atpcraft.player.defs",
         "at.atpcraft.player.skin",
@@ -393,6 +395,22 @@ async fn lexicons_are_public_and_unknown_documents_are_not_found() {
         assert_eq!(document["lexicon"], 1);
         assert_eq!(document["id"], nsid);
         match nsid {
+            "club.atmospheric.mod.decision" => {
+                required_fields(
+                    &document["defs"]["main"]["record"],
+                    &[
+                        "collection",
+                        "kind",
+                        "subject",
+                        "category",
+                        "scope",
+                        "issuer",
+                        "createdAt",
+                        "signingKey",
+                        "signature",
+                    ],
+                );
+            }
             "at.atpcraft.player.chat" => {
                 required_fields(
                     &document["defs"]["main"]["record"],

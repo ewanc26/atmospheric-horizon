@@ -76,6 +76,7 @@ fn config(operator: Option<Operator>) -> ServerConfig {
         skin_signer: None,
         operator,
         continuity: None,
+        ledger: None,
     }
 }
 

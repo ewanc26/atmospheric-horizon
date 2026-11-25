@@ -50,6 +50,7 @@ fn config(continuity: Option<Continuity>) -> ServerConfig {
         skin_signer: None,
         operator: None,
         continuity,
+        ledger: None,
     }
 }
 

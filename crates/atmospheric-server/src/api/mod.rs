@@ -10,6 +10,7 @@
 
 mod browser;
 mod continuity;
+mod decision;
 mod health;
 mod label;
 mod lexicon;
@@ -21,6 +22,7 @@ mod skin;
 use crate::{
     browser::BrowserLinks,
     continuity::Continuity,
+    decision::DecisionLedger,
     error::ApiError,
     labeler::Labeler,
     model::unix_now,
@@ -68,6 +70,10 @@ pub struct ServerConfig {
     /// continuity routes disabled and starts no PLC network tasks.
     #[doc(hidden)]
     pub continuity: Option<Continuity>,
+    /// Experimental Ledger of Decisions state (#199). `None` leaves the ledger
+    /// routes disabled and creates no signing key or subject pepper.
+    #[doc(hidden)]
+    pub ledger: Option<DecisionLedger>,
 }
 
 #[derive(Clone)]
@@ -84,6 +90,7 @@ pub struct AppState {
     labeler: Option<Labeler>,
     operator: Option<Operator>,
     continuity: Option<Continuity>,
+    ledger: Option<DecisionLedger>,
 }
 
 impl AppState {
@@ -119,6 +126,7 @@ impl AppState {
             labeler: config.labeler,
             operator: config.operator,
             continuity: config.continuity,
+            ledger: config.ledger,
         }
     }
 
@@ -162,6 +170,65 @@ impl AppState {
                 }
                 GrantCheck::Unknown => {}
             }
+        }
+        match (&self.admin_token, token) {
+            (Some(expected), Some(actual))
+                if constant_time_eq(expected.as_bytes(), actual.as_bytes()) =>
+            {
+                Ok(())
+            }
+            (Some(_), _) => Err(ApiError::Unauthorized),
+            (None, _) if self.operator.is_some() => Err(ApiError::Unauthorized),
+            (None, _) => Err(ApiError::AdminDisabled),
+        }
+    }
+
+    /// Ledger writes are moderation actions. A DID grant must carry
+    /// `ledger_write`; the game server's link token and the static admin token
+    /// remain valid so an operator without DID grants can still submit.
+    pub(super) async fn authorize_ledger(&self, headers: &HeaderMap) -> Result<(), ApiError> {
+        let token = Self::bearer(headers);
+        if let (Some(operator), Some(token)) = (self.operator.as_ref(), token) {
+            match operator
+                .grants
+                .check(token, GrantScope::LedgerWrite, crate::model::unix_now())
+            {
+                GrantCheck::Authorized(grant) => {
+                    operator
+                        .audit
+                        .append(
+                            &grant,
+                            GrantScope::LedgerWrite.as_str(),
+                            "ledger",
+                            "submit",
+                            "ok",
+                        )
+                        .await?;
+                    return Ok(());
+                }
+                GrantCheck::ScopeDenied(grant) => {
+                    operator
+                        .audit
+                        .append(
+                            &grant,
+                            GrantScope::LedgerWrite.as_str(),
+                            "ledger",
+                            "submit",
+                            "scope_denied",
+                        )
+                        .await?;
+                    return Err(ApiError::Forbidden(
+                        "grant does not carry the ledger_write scope".into(),
+                    ));
+                }
+                GrantCheck::Unknown => {}
+            }
+        }
+        let link_ok = self.link_token.as_deref().is_some_and(|expected| {
+            token.is_some_and(|actual| constant_time_eq(expected.as_bytes(), actual.as_bytes()))
+        });
+        if link_ok {
+            return Ok(());
         }
         match (&self.admin_token, token) {
             (Some(expected), Some(actual))
@@ -273,6 +340,13 @@ pub fn app(store: LinkStore, config: ServerConfig) -> Router {
             "/v1/continuity/watch/{did}",
             axum::routing::delete(continuity::unwatch),
         )
+        .route(
+            "/v1/decisions",
+            get(decision::decisions).post(decision::submit),
+        )
+        .route("/v1/decisions/status", get(decision::status))
+        .route("/v1/decisions/key", get(decision::ledger_key))
+        .route("/v1/decisions/{rkey}", get(decision::decision))
         .merge(xrpc)
         .route(
             "/v1/browser/pairings",

@@ -1,0 +1,91 @@
+{
+  "lexicon": 1,
+  "id": "club.atmospheric.mod.decision",
+  "description": "A signed, privacy-preserving moderation decision published by a Minecraft server's AT Protocol account.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "description": "Decision, reversal and expiry records keyed by TID. The subject is a salted hash, never a plaintext handle or DID.",
+      "record": {
+        "type": "object",
+        "required": [
+          "collection",
+          "kind",
+          "subject",
+          "category",
+          "scope",
+          "issuer",
+          "createdAt",
+          "signingKey",
+          "signature"
+        ],
+        "properties": {
+          "collection": {
+            "type": "string",
+            "const": "club.atmospheric.mod.decision",
+            "description": "Signed so a record cannot be replayed under another collection."
+          },
+          "kind": {
+            "type": "string",
+            "knownValues": [
+              "decision",
+              "reversal",
+              "expiry"
+            ],
+            "description": "Reversals and expiries end the decision named by target."
+          },
+          "subject": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "Lower-hex SHA-256 of the subject DID under a server-held pepper."
+          },
+          "category": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "Reason category chosen by the issuing server."
+          },
+          "scope": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "Where the decision applies, for example server or a channel label."
+          },
+          "target": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "rkey of the decision ended by a reversal or expiry."
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Instant after which a decision no longer applies."
+          },
+          "appeal": {
+            "type": "string",
+            "maxLength": 512,
+            "description": "Optional pointer to an appeal thread or receipt."
+          },
+          "issuer": {
+            "type": "string",
+            "format": "did",
+            "description": "DID of the server account whose repository holds this record."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "signingKey": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "Base64 (standard) X.509/SPKI-encoded Ed25519 public key."
+          },
+          "signature": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "Base64 (no padding) Ed25519 signature over every other field."
+          }
+        }
+      }
+    }
+  }
+}
