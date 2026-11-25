@@ -16,7 +16,7 @@ use std::sync::{
 pub const ID: &str = "atmospheric";
 /// The mod's name and version, as Options > Mods lists them.
 pub const NAME: &str = "Atmospheric";
-pub const VERSION: &str = "0.4.0";
+pub const VERSION: &str = "0.5.0";
 /// The mod's description on its Options > Mods row.
 pub const DESCRIPTION: &str = "Post to Bluesky from Horizon: a keybind posts your location, /atmospheric posts text or logs in. Talks only to the PDS you configure.";
 /// The keybind's name, label and default key, as Options > Mods lists them.
@@ -5686,7 +5686,7 @@ mod tests {
             })
         );
         let full = decode_event(
-            r#"{"ServerCard":{"subject":"did:plc:srv","via":"https://pds.example","card":{"did":"did:plc:srv","rkey":"self","at_uri":"at://did:plc:srv/click.croft.atmospheric.server.card/self","record":{"serverName":"A shoebox","address":"example.test:25565","playersOnline":3,"playersMax":20,"gameVersion":"26.3","engine":"horizon","engineRevision":"9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0","packs":[{"name":"pack","source":"https://example.test/pack.hpack","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"conduct":null,"software":"atmospheric-horizon/0.4.0"},"published_at":"2026-11-25T09:30:00Z","age_seconds":600,"liveness":"Fresh"}}}"#,
+            r#"{"ServerCard":{"subject":"did:plc:srv","via":"https://pds.example","card":{"did":"did:plc:srv","rkey":"self","at_uri":"at://did:plc:srv/click.croft.atmospheric.server.card/self","record":{"serverName":"A shoebox","address":"example.test:25565","playersOnline":3,"playersMax":20,"gameVersion":"26.3","engine":"horizon","engineRevision":"9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0","packs":[{"name":"pack","source":"https://example.test/pack.hpack","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"conduct":null,"software":"atmospheric-horizon/0.5.0"},"published_at":"2026-11-25T09:30:00Z","age_seconds":600,"liveness":"Fresh"}}}"#,
         )
         .expect("a full card digest decodes");
         let ModEvent::ServerCard { card, .. } = &full else {

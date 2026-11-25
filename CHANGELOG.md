@@ -12,6 +12,13 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-11-25
+
+Fifth tagged release. Adds automatic player-data sync and liveness-checked
+server cards, updates the build and release tooling, and moves the crypto
+dependencies onto their current major versions without changing any wire
+format.
+
 ### Added
 
 - **M68 — automatic player-data sync (#162).** With the new default-off
@@ -23,11 +30,38 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
   and are silently skipped before any network call while the setting is off;
   the explicit `/atmospheric player-data` commands always run. No new endpoint,
   event or credential.
+- **M69 — server cards (#191).** The server account publishes a typed
+  `click.croft.atmospheric.server.card` record at rkey `self`, stamped with a
+  fresh `createdAt` on every publish, so a card's liveness is its author's
+  recency (`Fresh` within an hour, `Stale` after, `Unknown` for an unparseable
+  timestamp) — not anyone's endorsement. The record carries no signature
+  block: repo authentication is the authorship claim, and a signature proves
+  authorship, not truth. `/atmospheric server-card publish` publishes on demand
+  from the live player count; a server republishes every five minutes, gated
+  on a player-slot ceiling so clients stay silent. `/atmospheric card-of
+  <did|handle>` reads another server's card unauthenticated and shows its name,
+  version, population, pack count and liveness. Identity fields come from the
+  settings file and `engineRevision` from `compatibility.json`; packs declare
+  none yet because Horizon's signed-registry checksum lookup is a later slice.
+  The record, its read path and the game-side mirror are validated and pinned
+  by wire-shape tests. No new endpoint or credential.
 
 ### Changed
 
 - **Package metadata.** The crate manifests now list their authors, and the
-  README states the copyright holder.
+  README states the copyright holder (#180).
+- **Crypto dependencies.** `ed25519-dalek` 3 and `k256` 0.14 arrive together
+  with `rand_core` 0.10; key generation now uses `getrandom` 0.4's `SysRng`
+  wrapped in `UnwrapErr`, and the label signer uses `Generate::generate`,
+  `to_sec1_point` and the value-returning `normalize_s` (#211). Ed25519 SPKI
+  key ids and compact low-S secp256k1 signatures remain byte-identical.
+- **Other dependencies.** `base64` 0.23 (#169), `sha2` 0.11 (#171),
+  `tower-http` 0.7 (#172), `actions/upload-artifact` 7 (#166),
+  `actions/download-artifact` 8 (#167) and `softprops/action-gh-release` 3
+  (#165).
+- **CI diagnostics.** Clippy output is colourless, filtered to diagnostic
+  lines and mirrored onto the PR, with a Rust problem matcher registering the
+  annotations.
 
 ### Fixed
 
@@ -473,7 +507,9 @@ unless it writes to your own repo.
   can issue the same link (M40). The online whitelist sweep remains to be
   implemented.
 
-[Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.5.0
+[0.4.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.4.0
 [0.3.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.1.0
