@@ -204,6 +204,11 @@ pub enum GameCommand {
     /// Read a player's active cosmetic warrants (#192) from the pinned
     /// issuers in the worker's settings. Works logged out.
     FetchWarrants { subject: String },
+    /// Verify a player's handle cryptographically (#185). The worker writes a
+    /// throwaway nonce record through the logged-in session, then verifies
+    /// the fresh signed commit against the PLC-anchored key and both handle
+    /// directions. Needs an authenticated session.
+    VerifyHandle { subject: String },
     /// Open a Counting Stones ballot box (#193) with a caller-chosen local id.
     OpenPoll {
         poll_id: String,
@@ -635,6 +640,17 @@ pub struct WarrantLine {
     pub collection: String,
 }
 
+/// A PLC-verified handle plaque (#185), mirrored from the worker's
+/// `HandleProof` in camelCase wire form. Proves PDS repository custody, not
+/// human identity — the plaque text says so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandleProof {
+    pub did: String,
+    pub handle: String,
+    pub rev: String,
+    pub verified_at: u64,
+}
+
 /// One online player in an M42 whitelist sweep. Plain data: the worker side
 /// has the same struct in the `atmospheric` crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -829,6 +845,13 @@ pub enum ModEvent {
         subject: String,
         via: String,
         warrants: Option<Vec<WarrantLine>>,
+    },
+    /// A PLC-verified handle plaque (#185): the subject and the proof when
+    /// verification succeeded, `None` when it failed. Proves PDS repository
+    /// custody, not human identity.
+    HandleProofResult {
+        subject: String,
+        proof: Option<HandleProof>,
     },
     /// A Counting Stones ballot box was opened (#193).
     PollOpened {
@@ -1179,6 +1202,13 @@ pub fn status_text(event: &ModEvent) -> String {
                     .join(", ");
                 format!("atmospheric: {subject} holds {titles} (cosmetic)")
             }
+        },
+        ModEvent::HandleProofResult { subject, proof } => match proof {
+            None => format!("atmospheric: handle verification failed for {subject}"),
+            Some(proof) => format!(
+                "atmospheric: {} is verified for {} (PDS custody, not human identity)",
+                proof.handle, proof.did
+            ),
         },
         ModEvent::PollOpened {
             poll_id, question, ..
@@ -2517,6 +2547,16 @@ pub fn fetch_warrants(subject: &str) {
     });
 }
 
+/// Ask the worker to verify a handle cryptographically (#185). The subject
+/// must be the logged-in account; the worker writes a throwaway nonce record
+/// through its session before verifying the fresh signed commit. The plaque
+/// proves PDS repository custody, not human identity.
+pub fn verify_handle(subject: &str) {
+    send(GameCommand::VerifyHandle {
+        subject: subject.into(),
+    });
+}
+
 /// Open a Counting Stones ballot box (#193). `poll_id` is a local record-key
 /// token; `closes_at` is an RFC 3339 UTC timestamp in the future.
 pub fn open_poll(poll_id: &str, question: &str, options: Vec<String>, closes_at: &str) {
@@ -3391,6 +3431,10 @@ fn encode_command(command: &GameCommand) -> String {
             "FetchWarrants",
             jobj(vec![("subject", jstr(subject))]),
         )]),
+        GameCommand::VerifyHandle { subject } => jobj(vec![(
+            "VerifyHandle",
+            jobj(vec![("subject", jstr(subject))]),
+        )]),
         GameCommand::OpenPoll {
             poll_id,
             question,
@@ -3877,6 +3921,17 @@ fn decode_warrant_line(value: &Json) -> Option<WarrantLine> {
     })
 }
 
+/// Decode one PLC-verified handle proof (#185) from its camelCase wire shape.
+fn decode_handle_proof(value: &Json) -> Option<HandleProof> {
+    let obj = as_obj(value)?;
+    Some(HandleProof {
+        did: req_str(obj, "did")?,
+        handle: req_str(obj, "handle")?,
+        rev: req_str(obj, "rev")?,
+        verified_at: req_int(obj, "verified_at")?.max(0) as u64,
+    })
+}
+
 /// Decode a published poll digest (#193). The worker sends the full typed
 /// record in camelCase; the game keeps only the fields it displays.
 fn decode_poll_digest(value: &Json) -> Option<PollDigest> {
@@ -4133,6 +4188,17 @@ fn decode_event(line: &str) -> Option<ModEvent> {
                 subject: req_str(obj, "subject")?,
                 via: req_str(obj, "via")?,
                 warrants,
+            })
+        }
+        "HandleProofResult" => {
+            let obj = payload_obj()?;
+            let proof = match jget(obj, "proof")? {
+                Json::Null => None,
+                other => Some(decode_handle_proof(other)?),
+            };
+            Some(ModEvent::HandleProofResult {
+                subject: req_str(obj, "subject")?,
+                proof,
             })
         }
         "PollOpened" => {
@@ -6314,6 +6380,12 @@ mod tests {
             }),
             r#"{"FetchWarrants":{"subject":"did:plc:z"}}"#
         );
+        assert_eq!(
+            encode_command(&GameCommand::VerifyHandle {
+                subject: "did:plc:z".into()
+            }),
+            r#"{"VerifyHandle":{"subject":"did:plc:z"}}"#
+        );
 
         assert_eq!(
             decode_event(r#"{"PollResult":{"subject":"s","via":"v","poll":null}}"#),
@@ -6380,6 +6452,24 @@ mod tests {
                 warrants: None,
             }),
             "atmospheric: no warrant issuers configured for s"
+        );
+
+        // Handle proofs (#185): camelCase proof decodes; the text is honest
+        // that this proves PDS custody, not human identity.
+        let proof_event = decode_event(
+            r#"{"HandleProofResult":{"subject":"alice.example","proof":{"did":"did:plc:p","handle":"alice.example","rev":"3lxxxgkgxxxx","verified_at":100}}}"#,
+        )
+        .expect("a handle proof decodes");
+        assert_eq!(
+            status_text(&proof_event),
+            "atmospheric: alice.example is verified for did:plc:p (PDS custody, not human identity)"
+        );
+        assert_eq!(
+            decode_event(r#"{"HandleProofResult":{"subject":"s","proof":null}}"#),
+            Some(ModEvent::HandleProofResult {
+                subject: "s".into(),
+                proof: None,
+            })
         );
 
         assert_eq!(

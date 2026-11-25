@@ -19,6 +19,7 @@
 //! says so. This module only verifies and never writes profile data.
 
 use crate::error::{AtmosphericError, Result};
+use crate::oauth;
 use k256::ecdsa::{Signature, VerifyingKey};
 use k256::elliptic_curve::scalar::IsHigh;
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,20 @@ const CID_LINK_TAG: u64 = 42;
 /// A commit is only accepted when it is at most this old (seconds). Combined
 /// with the nonce check this bounds the replay window.
 pub const MAX_COMMIT_AGE_SECS: u64 = 300;
+/// The throwaway record collection the linked session writes to force a fresh
+/// signed commit. It carries only the nonce and a timestamp, never profile
+/// data or gameplay state.
+pub const NONCE_COLLECTION: &str = "at.atpcraft.verify.nonce";
+
+/// A verified handle binding: the DID, the handle both directions agreed on,
+/// and the fresh signed commit revision that carried the nonce record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandleProof {
+    pub did: String,
+    pub handle: String,
+    pub rev: String,
+    pub verified_at: u64,
+}
 
 /// A verification challenge: a random nonce and the Unix time it was issued.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +89,127 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+async fn get_json(http: &reqwest::Client, url: &str) -> Result<serde_json::Value> {
+    let response = http
+        .get(url)
+        .send()
+        .await
+        .map_err(AtmosphericError::protocol)?;
+    let status = response.status();
+    let body = response.text().await.map_err(AtmosphericError::protocol)?;
+    if !status.is_success() {
+        return Err(AtmosphericError::Message(format!(
+            "GET {url} failed with HTTP {status}: {body}"
+        )));
+    }
+    serde_json::from_str(&body).map_err(AtmosphericError::Serde)
+}
+
+/// Resolve a subject (DID or handle) to its DID and PDS endpoint.
+async fn resolve_subject(
+    http: &reqwest::Client,
+    resolver: &oauth::Resolver,
+    subject: &str,
+) -> Result<(String, String)> {
+    let did = if subject.starts_with("did:") {
+        subject.to_owned()
+    } else {
+        oauth::resolve_handle(http, resolver, subject).await?
+    };
+    let did_doc = oauth::resolve_did_document(http, resolver, &did).await?;
+    let pds = oauth::pds_endpoint(&did_doc)?;
+    Ok((did, pds))
+}
+
+/// Verify a handle end-to-end from unauthenticated public reads.
+///
+/// The caller supplies the nonce that was written into the player's repo and
+/// the time it was issued. This resolves the subject to a DID and PDS, fetches
+/// the PLC document and its `#atproto` key, reads and verifies the latest
+/// commit, checks that commit is newer than the challenge, and confirms the
+/// handle resolves back to the same DID.
+pub async fn verify_handle(
+    http: &reqwest::Client,
+    resolver: &oauth::Resolver,
+    subject: &str,
+    challenge: &Challenge,
+) -> Result<HandleProof> {
+    let (did, pds) = resolve_subject(http, resolver, subject).await?;
+    let did_doc = oauth::resolve_did_document(http, resolver, &did).await?;
+    let key = signing_key_from_did_doc(&did_doc)?;
+
+    let base = pds.trim_end_matches('/');
+    let latest_url = format!("{base}/xrpc/com.atproto.sync.getLatestCommit?did={did}");
+    let latest = get_json(http, &latest_url).await?;
+    let cid = latest["cid"]
+        .as_str()
+        .ok_or_else(|| AtmosphericError::Message("latest commit has no cid".into()))?
+        .to_owned();
+    let rev = latest["rev"]
+        .as_str()
+        .ok_or_else(|| AtmosphericError::Message("latest commit has no rev".into()))?
+        .to_owned();
+
+    let blocks_url = format!("{base}/xrpc/com.atproto.sync.getBlocks?did={did}&cids={cid}");
+    let response = http
+        .get(&blocks_url)
+        .send()
+        .await
+        .map_err(AtmosphericError::protocol)?;
+    let status = response.status();
+    let car = response.bytes().await.map_err(AtmosphericError::protocol)?;
+    if !status.is_success() {
+        return Err(AtmosphericError::Message(format!(
+            "getBlocks failed with HTTP {status}"
+        )));
+    }
+    let raw_cid = decode_cid_string(&cid)?;
+    let block = car_block(&car, &raw_cid)?;
+    let proof = verify_commit(block, &key)?;
+    if proof.did != did {
+        return Err(AtmosphericError::Message(format!(
+            "commit DID {} does not match resolved DID {did}",
+            proof.did
+        )));
+    }
+    if proof.rev != rev {
+        return Err(AtmosphericError::Message(
+            "commit revision does not match latest commit".into(),
+        ));
+    }
+
+    let now = now_secs();
+    if !challenge.is_current(now, MAX_COMMIT_AGE_SECS) {
+        return Err(AtmosphericError::Message(
+            "verification challenge expired".into(),
+        ));
+    }
+    commit_is_fresh(&rev, challenge, now, MAX_COMMIT_AGE_SECS)?;
+
+    let handle = handle_from_did_doc(&did_doc)?;
+    did_doc_claims_handle(&did_doc, &handle)?;
+    let resolved_did = oauth::resolve_handle(http, resolver, &handle).await?;
+    if resolved_did != did {
+        return Err(AtmosphericError::Message(format!(
+            "handle {handle} resolves to {resolved_did}, not {did}"
+        )));
+    }
+
+    Ok(HandleProof {
+        did,
+        handle,
+        rev,
+        verified_at: now,
+    })
+}
+
+/// Decode a CID string (`b…` base32 or `z…` base58) to its raw CAR bytes.
+fn decode_cid_string(cid: &str) -> Result<Vec<u8>> {
+    multibase::decode(cid)
+        .map(|(_, bytes)| bytes)
+        .map_err(|err| AtmosphericError::Message(format!("invalid commit CID: {err}")))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -128,9 +264,7 @@ pub fn signing_key_from_did_doc(did_doc: &serde_json::Value) -> Result<String> {
         })
         .and_then(|method| method["publicKeyMultibase"].as_str())
         .map(str::to_owned)
-        .ok_or_else(|| {
-            AtmosphericError::Message("no #atproto multikey in the DID document".into())
-        })
+        .ok_or_else(|| AtmosphericError::Message("no #atproto multikey in the DID document".into()))
 }
 
 /// Decode a TID into its microseconds-since-epoch timestamp.
@@ -143,7 +277,12 @@ pub fn tid_timestamp(tid: &str) -> Result<u64> {
 }
 
 /// Check that a commit revision is newer than the challenge and not too old.
-pub fn commit_is_fresh(rev: &str, challenge: &Challenge, now: u64, max_age_secs: u64) -> Result<()> {
+pub fn commit_is_fresh(
+    rev: &str,
+    challenge: &Challenge,
+    now: u64,
+    max_age_secs: u64,
+) -> Result<()> {
     let commit_secs = tid_timestamp(rev)? / 1_000_000;
     if commit_secs < challenge.issued_at {
         return Err(AtmosphericError::Message(format!(
@@ -156,6 +295,21 @@ pub fn commit_is_fresh(rev: &str, challenge: &Challenge, now: u64, max_age_secs:
         )));
     }
     Ok(())
+}
+
+/// The first `at://` handle claimed by a DID document's `alsoKnownAs`.
+pub fn handle_from_did_doc(did_doc: &serde_json::Value) -> Result<String> {
+    did_doc["alsoKnownAs"]
+        .as_array()
+        .and_then(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str())
+                .filter_map(|value| value.strip_prefix("at://"))
+                .next()
+        })
+        .map(str::to_owned)
+        .ok_or_else(|| AtmosphericError::Message("DID document has no at:// handle".into()))
 }
 
 /// Check that a DID document's `alsoKnownAs` claims exactly the given handle.
@@ -186,9 +340,8 @@ pub fn did_doc_claims_handle(did_doc: &serde_json::Value, handle: &str) -> Resul
 /// CBOR signature profile.
 pub fn verify_commit(block: &[u8], key_multibase: &str) -> Result<CommitProof> {
     let key_bytes = decode_k256_multibase(key_multibase)?;
-    let verifying_key = VerifyingKey::from_sec1_bytes(&key_bytes).map_err(|err| {
-        AtmosphericError::Message(format!("invalid commit verifying key: {err}"))
-    })?;
+    let verifying_key = VerifyingKey::from_sec1_bytes(&key_bytes)
+        .map_err(|err| AtmosphericError::Message(format!("invalid commit verifying key: {err}")))?;
 
     let mut decoder = Decoder::new(block);
     let value = decoder.value()?;
@@ -228,7 +381,8 @@ pub fn verify_commit(block: &[u8], key_multibase: &str) -> Result<CommitProof> {
     let did = did.ok_or_else(|| AtmosphericError::Message("commit has no did".into()))?;
     let rev = rev.ok_or_else(|| AtmosphericError::Message("commit has no rev".into()))?;
     let data = data.ok_or_else(|| AtmosphericError::Message("commit has no data CID".into()))?;
-    let sig_bytes = sig.ok_or_else(|| AtmosphericError::Message("commit has no signature".into()))?;
+    let sig_bytes =
+        sig.ok_or_else(|| AtmosphericError::Message("commit has no signature".into()))?;
     let signature = Signature::from_slice(&sig_bytes).map_err(|err| {
         AtmosphericError::Message(format!("invalid commit signature encoding: {err}"))
     })?;
@@ -247,13 +401,18 @@ pub fn verify_commit(block: &[u8], key_multibase: &str) -> Result<CommitProof> {
         ("data", EncodeValue::Link(&data)),
         ("version", EncodeValue::Unsigned(3)),
     ];
-    let prev_value = prev.as_deref().map(EncodeValue::Link).unwrap_or(EncodeValue::Null);
+    let prev_value = prev
+        .as_deref()
+        .map(EncodeValue::Link)
+        .unwrap_or(EncodeValue::Null);
     fields.push(("prev", prev_value));
     let signing_input = encode_map(fields);
     use k256::ecdsa::signature::Verifier;
-    verifying_key.verify(&signing_input, &signature).map_err(|err| {
-        AtmosphericError::Message(format!("commit signature does not verify: {err}"))
-    })?;
+    verifying_key
+        .verify(&signing_input, &signature)
+        .map_err(|err| {
+            AtmosphericError::Message(format!("commit signature does not verify: {err}"))
+        })?;
 
     Ok(CommitProof { did, rev, data })
 }
@@ -328,9 +487,10 @@ impl<'a> Decoder<'a> {
     }
 
     fn head(&mut self) -> Result<(u8, u64)> {
-        let first = *self.data.get(self.pos).ok_or_else(|| {
-            AtmosphericError::Message("unexpected end of commit CBOR".into())
-        })?;
+        let first = *self
+            .data
+            .get(self.pos)
+            .ok_or_else(|| AtmosphericError::Message("unexpected end of commit CBOR".into()))?;
         self.pos += 1;
         let major = first >> 5;
         let additional = first & 0x1f;
@@ -364,29 +524,31 @@ impl<'a> Decoder<'a> {
     }
 
     fn byte(&mut self) -> Result<u8> {
-        let byte = *self.data.get(self.pos).ok_or_else(|| {
-            AtmosphericError::Message("unexpected end of commit CBOR".into())
-        })?;
+        let byte = *self
+            .data
+            .get(self.pos)
+            .ok_or_else(|| AtmosphericError::Message("unexpected end of commit CBOR".into()))?;
         self.pos += 1;
         Ok(byte)
     }
 
     fn take(&mut self, len: usize) -> Result<&'a [u8]> {
-        let end = self.pos.checked_add(len).ok_or_else(|| {
-            AtmosphericError::Message("CBOR length overflow".into())
-        })?;
-        let slice = self.data.get(self.pos..end).ok_or_else(|| {
-            AtmosphericError::Message("unexpected end of commit CBOR".into())
-        })?;
+        let end = self
+            .pos
+            .checked_add(len)
+            .ok_or_else(|| AtmosphericError::Message("CBOR length overflow".into()))?;
+        let slice = self
+            .data
+            .get(self.pos..end)
+            .ok_or_else(|| AtmosphericError::Message("unexpected end of commit CBOR".into()))?;
         self.pos = end;
         Ok(slice)
     }
 
     fn value(&mut self) -> Result<Value<'a>> {
         let (major, argument) = self.head()?;
-        let length = usize::try_from(argument).map_err(|_| {
-            AtmosphericError::Message("CBOR length exceeds usize".into())
-        })?;
+        let length = usize::try_from(argument)
+            .map_err(|_| AtmosphericError::Message("CBOR length exceeds usize".into()))?;
         match major {
             0 => Ok(Value::Unsigned(argument)),
             1 => Ok(Value::Signed(-1 - argument as i64)),
@@ -536,8 +698,7 @@ pub fn car_block<'a>(car: &'a [u8], wanted: &[u8]) -> Result<&'a [u8]> {
 
 fn read_varint(data: &[u8], pos: &mut usize) -> Result<usize> {
     let value = decode_varint(data, pos)?;
-    usize::try_from(value)
-        .map_err(|_| AtmosphericError::Message("CAR length exceeds usize".into()))
+    usize::try_from(value).map_err(|_| AtmosphericError::Message("CAR length exceeds usize".into()))
 }
 
 fn decode_varint(data: &[u8], pos: &mut usize) -> Result<u64> {
@@ -556,9 +717,9 @@ fn decode_varint(data: &[u8], pos: &mut usize) -> Result<u64> {
 }
 
 fn take<'a>(data: &'a [u8], pos: &mut usize, len: usize) -> Result<&'a [u8]> {
-    let end = pos.checked_add(len).ok_or_else(|| {
-        AtmosphericError::Message("CAR section length overflow".into())
-    })?;
+    let end = pos
+        .checked_add(len)
+        .ok_or_else(|| AtmosphericError::Message("CAR section length overflow".into()))?;
     let slice = data
         .get(*pos..end)
         .ok_or_else(|| AtmosphericError::Message("truncated CAR section".into()))?;
@@ -577,7 +738,10 @@ mod tests {
         let mut multikey = Vec::new();
         multikey.extend_from_slice(K256_MULTICODEC);
         multikey.extend_from_slice(point.as_bytes());
-        let encoded = format!("z{}", multibase::encode(multibase::Base::Base58Btc, &multikey));
+        let encoded = format!(
+            "z{}",
+            multibase::encode(multibase::Base::Base58Btc, &multikey)
+        );
         (key, encoded)
     }
 
@@ -716,7 +880,7 @@ mod tests {
         assert!(decode_k256_multibase("not-multibase").is_err());
         let p256 = format!(
             "z{}",
-            multibase::encode(multibase::Base::Base58Btc, &[0x80, 0x24, 7])
+            multibase::encode(multibase::Base::Base58Btc, [0x80, 0x24, 7])
         );
         assert!(decode_k256_multibase(&p256).is_err());
     }
