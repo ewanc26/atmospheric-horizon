@@ -7,7 +7,8 @@
 //! the crate testable without a game.
 
 use crate::{
-    Command, Config, Event, LabelerPlayer, PlayerAspect, SweepPlayer, actions, card, chats,
+    Command, Config, Event, ImagePostTarget, LabelerPlayer, PlayerAspect, SweepPlayer, actions,
+    card, chats,
     colibri::{self, ChannelRef, StreamEvent},
     error::AtmosphericError,
     graph, identity, interactions, labeler,
@@ -356,6 +357,9 @@ struct Worker {
     /// `post_screenshots` from the settings file (#182): gates automatic F2
     /// screenshot posts. Refreshed at login.
     post_screenshots: bool,
+    /// `image_post_target` from the settings file (#183): which network
+    /// receives image posts. Refreshed at login.
+    image_post_target: ImagePostTarget,
     /// `persist_session` from the settings file, refreshed at login.
     persist_session: bool,
     /// The persisted session, if any, for resuming across restarts.
@@ -560,6 +564,7 @@ impl Worker {
             post_death_messages: false,
             post_achievement_messages: false,
             post_screenshots: false,
+            image_post_target: ImagePostTarget::Bluesky,
             persist_session: true,
             stored_session,
             server_agent: None,
@@ -1134,9 +1139,10 @@ impl Worker {
     }
 
     /// Post an image file: read it here (the worker owns disk I/O), check it
-    /// is an image of a size the PDS accepts, then upload + post it.
+    /// is an image of a size the target's lexicon accepts, then upload + post
+    /// it in that network's record shape.
     async fn post_image(
-        &self,
+        &mut self,
         path: &str,
         alt_text: &str,
         text: Option<&str>,
@@ -1144,14 +1150,15 @@ impl Worker {
         let (Some(agent), Some(did)) = (&self.agent, &self.did) else {
             return Err(AtmosphericError::NotLoggedIn);
         };
+        let target = self.image_post_target;
         let bytes = std::fs::read(path).map_err(|error| {
             AtmosphericError::Message(format!("could not read {path}: {error}"))
         })?;
-        if bytes.len() > actions::MAX_IMAGE_BYTES {
+        let limit = actions::image_size_limit(target);
+        if bytes.len() > limit {
             return Err(AtmosphericError::Message(format!(
-                "{path} is {} bytes; the limit is {}",
-                bytes.len(),
-                actions::MAX_IMAGE_BYTES
+                "{path} is {} bytes; the {target:?} limit is {limit}",
+                bytes.len()
             )));
         }
         // Sniffed to reject non-images early; the PDS re-detects on upload.
@@ -1160,7 +1167,17 @@ impl Worker {
                 "{path} is not a PNG, JPEG, GIF or WebP image"
             )));
         }
-        actions::post_image(agent, did, bytes, alt_text, text).await
+        if target == ImagePostTarget::Grain && actions::png_dimensions(&bytes).is_none() {
+            return Err(AtmosphericError::Message(format!(
+                "{path} is not a PNG; Grain requires a PNG screenshot with readable dimensions for the photo's aspectRatio"
+            )));
+        }
+        // Move the generator out so the action can use it while `agent`/`did`
+        // are borrowed from `self`, then restore it (including on failure).
+        let mut tid = std::mem::take(&mut self.tid);
+        let result = actions::post_image(agent, did, bytes, alt_text, text, target, &mut tid).await;
+        self.tid = tid;
+        result
     }
 
     /// The logged-in DID, after checking that `player_uuid` is linked to it
@@ -2785,6 +2802,7 @@ impl Worker {
                 self.post_death_messages = config.post_death_messages;
                 self.post_achievement_messages = config.post_achievement_messages;
                 self.post_screenshots = config.post_screenshots;
+                self.image_post_target = config.image_post_target;
                 self.persist_session = config.persist_session;
                 self.chat_server_id = config.chat_server_id.clone();
                 self.identifier = config.identifier.clone();
@@ -2845,11 +2863,12 @@ impl Worker {
                     config.labeler_enabled,
                     config.rpg_items_enabled,
                 ),
-                OAuthTarget::Player => oauth::scope_for_rpg(
+                OAuthTarget::Player => oauth::scope_for_player(
                     &config.oauth_scope,
                     config.colibri_bridge_enabled,
                     &config.colibri_appview_did,
                     config.rpg_items_enabled,
+                    config.image_post_target,
                 ),
             })
             .unwrap_or_else(|| oauth::DEFAULT_SCOPE.into());
@@ -2915,6 +2934,7 @@ impl Worker {
                     self.post_death_messages = config.post_death_messages;
                     self.post_achievement_messages = config.post_achievement_messages;
                     self.post_screenshots = config.post_screenshots;
+                    self.image_post_target = config.image_post_target;
                     self.persist_session = config.persist_session;
                     self.chat_server_id = config.chat_server_id.clone();
                 }
@@ -3401,6 +3421,7 @@ impl Worker {
                         self.post_death_messages = config.post_death_messages;
                         self.post_achievement_messages = config.post_achievement_messages;
                         self.post_screenshots = config.post_screenshots;
+                        self.image_post_target = config.image_post_target;
                         self.persist_session = config.persist_session;
                         self.chat_server_id = config.chat_server_id.clone();
                     }
@@ -3437,6 +3458,7 @@ impl Worker {
                     self.post_death_messages = config.post_death_messages;
                     self.post_achievement_messages = config.post_achievement_messages;
                     self.post_screenshots = config.post_screenshots;
+                    self.image_post_target = config.image_post_target;
                     self.persist_session = config.persist_session;
                     self.chat_server_id = config.chat_server_id.clone();
                     self.identifier = config.identifier.clone();
@@ -4087,6 +4109,7 @@ mod tests {
             post_death_messages: false,
             post_achievement_messages: false,
             post_screenshots: false,
+            image_post_target: ImagePostTarget::Bluesky,
             post_chat_messages: false,
             player_data_sync_enabled: false,
             chat_server_id: "test-server".into(),
@@ -5916,6 +5939,7 @@ mod tests {
             post_death_messages: true,
             post_achievement_messages: true,
             post_screenshots: true,
+            image_post_target: ImagePostTarget::Grain,
             post_chat_messages: true,
             player_data_sync_enabled: true,
             chat_server_id: "my-server".into(),
@@ -6145,6 +6169,193 @@ mod tests {
             1440
         );
         assert_eq!(body["record"]["text"], "with a caption");
+    }
+
+    #[test]
+    fn post_image_to_spark_writes_a_spark_post_record() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("post-image-spark");
+        let mut config = test_config(pds.url.clone());
+        config.image_post_target = ImagePostTarget::Spark;
+        write_config(&dir, &config);
+        let png = tiny_png();
+        let shot = dir.join("spark.png");
+        std::fs::write(&shot, &png).unwrap();
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        command_tx
+            .send(Command::PostImage {
+                path: shot.display().to_string(),
+                alt_text: "a spark screenshot".into(),
+                text: Some("from Horizon".into()),
+                automatic: false,
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Posted { .. })) {
+            Event::Posted { uri } => {
+                assert_eq!(uri, "at://did:plc:stubuser/so.sprk.feed.post/3jub4stub")
+            }
+            other => panic!("expected Posted, got {other:?}"),
+        }
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let requests = pds.requests();
+        let upload = requests
+            .iter()
+            .find(|r| r.path == "/xrpc/com.atproto.repo.uploadBlob")
+            .expect("uploadBlob was called");
+        assert_eq!(upload.body_bytes, png, "the raw image bytes were uploaded");
+        let creates: Vec<_> = requests
+            .iter()
+            .filter(|r| r.path == "/xrpc/com.atproto.repo.createRecord")
+            .collect();
+        assert_eq!(creates.len(), 1, "Spark writes one post record");
+        let body: serde_json::Value = serde_json::from_str(&creates[0].body).unwrap();
+        assert_eq!(body["collection"], "so.sprk.feed.post");
+        let record = &body["record"];
+        assert_eq!(record["$type"], "so.sprk.feed.post");
+        assert_eq!(record["caption"]["$type"], "so.sprk.feed.post#captionRef");
+        assert_eq!(record["caption"]["text"], "from Horizon");
+        assert_eq!(record["media"]["$type"], "so.sprk.media.images");
+        assert_eq!(record["media"]["images"][0]["$type"], "so.sprk.media.image");
+        assert_eq!(record["media"]["images"][0]["alt"], "a spark screenshot");
+        assert_eq!(record["media"]["images"][0]["image"]["$type"], "blob");
+        assert_eq!(
+            record["media"]["images"][0]["aspectRatio"]["$type"],
+            "so.sprk.media.defs#aspectRatio"
+        );
+        assert_eq!(record["media"]["images"][0]["aspectRatio"]["width"], 2560);
+        assert_eq!(record["media"]["images"][0]["aspectRatio"]["height"], 1440);
+        assert!(record["createdAt"].as_str().is_some());
+    }
+
+    #[test]
+    fn post_image_to_grain_writes_linked_photo_gallery_and_item_records() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("post-image-grain");
+        let mut config = test_config(pds.url.clone());
+        config.image_post_target = ImagePostTarget::Grain;
+        write_config(&dir, &config);
+        let png = tiny_png();
+        let shot = dir.join("grain.png");
+        std::fs::write(&shot, &png).unwrap();
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        command_tx
+            .send(Command::PostImage {
+                path: shot.display().to_string(),
+                alt_text: "a grain screenshot".into(),
+                text: Some("grain title".into()),
+                automatic: false,
+            })
+            .unwrap();
+        let gallery_uri = match wait_for(&event_rx, |e| matches!(e, Event::Posted { .. })) {
+            Event::Posted { uri } => uri,
+            other => panic!("expected Posted, got {other:?}"),
+        };
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let creates: Vec<_> = pds
+            .requests()
+            .into_iter()
+            .filter(|r| r.path == "/xrpc/com.atproto.repo.createRecord")
+            .collect();
+        assert_eq!(creates.len(), 3, "Grain writes a photo, gallery and item");
+        let bodies: Vec<serde_json::Value> = creates
+            .iter()
+            .map(|request| serde_json::from_str(&request.body).unwrap())
+            .collect();
+        let collections: Vec<_> = bodies
+            .iter()
+            .map(|body| body["collection"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            collections,
+            vec![
+                "social.grain.photo",
+                "social.grain.gallery",
+                "social.grain.gallery.item"
+            ]
+        );
+        let rkeys: Vec<_> = bodies
+            .iter()
+            .map(|body| body["rkey"].as_str().unwrap())
+            .collect();
+        assert!(rkeys.iter().all(|key| key.len() == 13));
+        assert!(rkeys.windows(2).all(|pair| pair[0] < pair[1]));
+        let photo_uri = format!("at://did:plc:stubuser/social.grain.photo/{}", rkeys[0]);
+        let expected_gallery_uri =
+            format!("at://did:plc:stubuser/social.grain.gallery/{}", rkeys[1]);
+        assert_eq!(gallery_uri, expected_gallery_uri);
+
+        let photo = &bodies[0]["record"];
+        assert_eq!(photo["$type"], "social.grain.photo");
+        assert_eq!(photo["photo"]["$type"], "blob");
+        assert_eq!(photo["alt"], "a grain screenshot");
+        assert_eq!(photo["aspectRatio"]["width"], 2560);
+        assert_eq!(photo["aspectRatio"]["height"], 1440);
+        let created_at = photo["createdAt"].as_str().unwrap();
+
+        let gallery = &bodies[1]["record"];
+        assert_eq!(gallery["$type"], "social.grain.gallery");
+        assert_eq!(gallery["title"], "grain title");
+        assert_eq!(gallery["createdAt"], created_at);
+
+        let item = &bodies[2]["record"];
+        assert_eq!(item["$type"], "social.grain.gallery.item");
+        assert_eq!(item["gallery"], gallery_uri);
+        assert_eq!(item["item"], photo_uri);
+        assert_eq!(item["position"], 0);
+        assert_eq!(item["createdAt"], created_at);
+    }
+
+    #[test]
+    fn grain_rejects_a_non_png_image_before_uploading() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("post-image-grain-jpeg");
+        let mut config = test_config(pds.url.clone());
+        config.image_post_target = ImagePostTarget::Grain;
+        write_config(&dir, &config);
+        let shot = dir.join("grain.jpg");
+        std::fs::write(&shot, b"\xff\xd8\xff\xe0jpeg bytes").unwrap();
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        command_tx
+            .send(Command::PostImage {
+                path: shot.display().to_string(),
+                alt_text: "not a png".into(),
+                text: None,
+                automatic: false,
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("Grain requires a PNG"), "{message}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+        assert!(
+            !pds.requests()
+                .iter()
+                .any(|r| r.path == "/xrpc/com.atproto.repo.uploadBlob"),
+            "nothing was uploaded for the rejected image"
+        );
     }
 
     #[test]

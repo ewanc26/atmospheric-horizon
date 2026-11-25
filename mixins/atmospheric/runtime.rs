@@ -18,14 +18,14 @@ pub const ID: &str = "atmospheric";
 pub const NAME: &str = "Atmospheric";
 pub const VERSION: &str = "0.6.0";
 /// The mod's description on its Options > Mods row.
-pub const DESCRIPTION: &str = "Post to Bluesky from Horizon: a keybind posts your location, /atmospheric posts text or logs in. Talks only to the PDS you configure.";
+pub const DESCRIPTION: &str = "Post to Bluesky, Spark or Grain from Horizon: a keybind posts your location or a screenshot, /atmospheric posts text or logs in. Talks only to the PDS you configure.";
 /// The keybind's name, label and default key, as Options > Mods lists them.
 pub const KEY_POST: &str = "post_location";
 pub const KEY_POST_LABEL: &str = "Post location to Bluesky";
 pub const KEY_POST_DEFAULT: &str = "key.keyboard.b";
 /// The second keybind: post the latest F2 screenshot.
 pub const KEY_SHOT: &str = "post_screenshot";
-pub const KEY_SHOT_LABEL: &str = "Post latest screenshot to Bluesky";
+pub const KEY_SHOT_LABEL: &str = "Post latest screenshot to the configured image target";
 pub const KEY_SHOT_DEFAULT: &str = "key.keyboard.v";
 /// The third keybind: publish a player-state snapshot record (M6).
 pub const KEY_SNAPSHOT: &str = "post_snapshot";
@@ -51,6 +51,9 @@ pub struct Settings {
     pub post_death_messages: bool,
     pub post_achievement_messages: bool,
     pub post_screenshots: bool,
+    /// Which network receives image posts (#183): `bluesky`, `spark` or
+    /// `grain`. Sent as a string so the worker's `Config` can validate it.
+    pub image_post_target: String,
     pub post_chat_messages: bool,
     pub chat_server_id: String,
 }
@@ -2986,6 +2989,7 @@ fn encode_command(command: &GameCommand) -> String {
                         jbool(settings.post_achievement_messages),
                     ),
                     ("post_screenshots", jbool(settings.post_screenshots)),
+                    ("image_post_target", jstr(&settings.image_post_target)),
                     ("post_chat_messages", jbool(settings.post_chat_messages)),
                     ("chat_server_id", jstr(&settings.chat_server_id)),
                 ]),
@@ -3914,6 +3918,7 @@ mod tests {
             post_death_messages: false,
             post_achievement_messages: false,
             post_screenshots: false,
+            image_post_target: "bluesky".into(),
             post_chat_messages: false,
             chat_server_id: "horizon-client".into(),
         });
@@ -4767,6 +4772,7 @@ mod tests {
             post_death_messages: false,
             post_achievement_messages: false,
             post_screenshots: false,
+            image_post_target: "bluesky".into(),
             post_chat_messages: true,
             chat_server_id: "horizon-client".into(),
         }
@@ -4905,7 +4911,7 @@ mod tests {
             encode_command(&GameCommand::SaveConfig {
                 settings: sample_settings()
             }),
-            r#"{"SaveConfig":{"config":{"pds_url":"https://pds.example","identifier":"someone.example","app_password":"abcd-1234-efgh-5678","poll_interval_secs":30,"post_death_messages":false,"post_achievement_messages":false,"post_screenshots":false,"post_chat_messages":true,"chat_server_id":"horizon-client"}}}"#
+            r#"{"SaveConfig":{"config":{"pds_url":"https://pds.example","identifier":"someone.example","app_password":"abcd-1234-efgh-5678","poll_interval_secs":30,"post_death_messages":false,"post_achievement_messages":false,"post_screenshots":false,"image_post_target":"bluesky","post_chat_messages":true,"chat_server_id":"horizon-client"}}}"#
         );
         // String escaping matches serde_json: quote, backslash, newline.
         assert_eq!(

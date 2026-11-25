@@ -162,6 +162,7 @@ fn save_config_writes_the_settings_file() {
             pds_url: "https://pds.example".into(),
             identifier: "alice.example".into(),
             app_password: "aaaa-bbbb-cccc-dddd".into(),
+            image_post_target: atmospheric::ImagePostTarget::Spark,
             post_chat_messages: true,
             ..atmospheric::Config::default()
         }),
@@ -181,6 +182,7 @@ fn save_config_writes_the_settings_file() {
     assert_eq!(parsed["pds_url"], "https://pds.example");
     assert_eq!(parsed["identifier"], "alice.example");
     assert_eq!(parsed["post_chat_messages"], true);
+    assert_eq!(parsed["image_post_target"], "spark");
     // A successful save republishes the gate arm state.
     assert_eq!(
         worker.event(),

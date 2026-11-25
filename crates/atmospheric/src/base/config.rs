@@ -20,6 +20,23 @@ fn default_client_name() -> String {
     "atmospheric-horizon".into()
 }
 
+/// The social network an image post is written to (#183).
+///
+/// Bluesky is the default, preserving the existing `app.bsky.feed.post`
+/// behaviour. Spark and Grain use their own record collections on the same
+/// configured PDS; no extra credentials or endpoints are involved.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImagePostTarget {
+    /// `app.bsky.feed.post` with an `app.bsky.embed.images` embed.
+    #[default]
+    Bluesky,
+    /// `so.sprk.feed.post` with `so.sprk.media.images`.
+    Spark,
+    /// `social.grain.photo` plus gallery and gallery-item records.
+    Grain,
+}
+
 /// One trusted atpcraft server endorsement key (M13 presence reads): the
 /// base64 (standard) X.509/SPKI public key, as published in the server's
 /// `at.atpcraft.server.profile` record, plus the key id — derived from the
@@ -65,6 +82,10 @@ pub struct Config {
     /// (#182). Off by default: screenshots are public once written to the
     /// repo. The manual post-screenshot keybind is unaffected by this flag.
     pub post_screenshots: bool,
+    /// Which social network receives image posts (#183). Bluesky is the
+    /// default; Spark and Grain write their own record collections to the same
+    /// configured PDS with the same logged-in account.
+    pub image_post_target: ImagePostTarget,
     /// Publish every chat message as an `at.atpcraft.player.chat` record.
     /// Off by default: chat is public once written to the repo.
     pub post_chat_messages: bool,
@@ -193,6 +214,7 @@ impl Default for Config {
             post_death_messages: false,
             post_achievement_messages: false,
             post_screenshots: false,
+            image_post_target: ImagePostTarget::Bluesky,
             post_chat_messages: false,
             chat_server_id: default_chat_server_id(),
             persist_session: true,
@@ -275,6 +297,7 @@ mod tests {
             post_death_messages: true,
             post_achievement_messages: true,
             post_screenshots: true,
+            image_post_target: ImagePostTarget::Grain,
             post_chat_messages: true,
             chat_server_id: "my-server".into(),
             persist_session: true,
@@ -327,6 +350,7 @@ mod tests {
         assert!(back.post_death_messages);
         assert!(back.post_achievement_messages);
         assert!(back.post_screenshots);
+        assert_eq!(back.image_post_target, ImagePostTarget::Grain);
         assert!(back.post_chat_messages);
         assert!(back.player_data_sync_enabled);
         assert_eq!(back.chat_server_id, "my-server");
@@ -376,6 +400,7 @@ mod tests {
             config.chat_server_id.is_empty(),
             "chat records default to the signing key id"
         );
+        assert_eq!(config.image_post_target, ImagePostTarget::Bluesky);
         assert_eq!(config.client_name, "atmospheric-horizon");
         assert!(config.server_capabilities.is_empty());
         assert!(config.trusted_server_keys.is_empty());

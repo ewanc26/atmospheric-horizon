@@ -1576,6 +1576,50 @@ the channel; a worker PDS test checks the off/on behavior and the rendered embed
 No new endpoint, record kind, credential or stored data — the image file is still
 read only at post time from the path the game saved.
 
+### Image post targets (#183)
+
+Image posts now use a configurable `image_post_target` (`bluesky`, `spark` or
+`grain`, default `bluesky`) instead of always writing an
+`app.bsky.feed.post`. The enum lives in `config`, is re-exported from the
+protocol crate, and is sent as a string in `SaveConfig` so the std-only game
+runtime validates it through the worker's `Config` serde. The worker caches the
+target and refreshes it on every path that refreshes the other settings (login,
+startup resume and config saves). Only the worker reads the screenshot and
+performs the upload/record writes.
+
+`actions::post_image` uploads the bytes once with
+`com.atproto.repo.uploadBlob` and dispatches on the target. Bluesky keeps its
+typed `app.bsky.feed.post` with an `app.bsky.embed.images` embed. Spark writes
+`so.sprk.feed.post` with a `so.sprk.media.images` union, a
+`so.sprk.media.image`, an optional `so.sprk.feed.post#captionRef` and the typed
+`so.sprk.media.defs#aspectRatio`; captions are capped at 3000 bytes and 300
+scalars, a conservative bound on the lexicon's 300-grapheme limit without a new
+dependency. Grain writes three TID-keyed records: `social.grain.photo` with the
+blob, alt text and required plain `{width, height}` `social.grain.defs`
+aspect ratio; `social.grain.gallery` with a title taken from the caption, then
+alt text, then `"Screenshot from Horizon"`; and `social.grain.gallery.item`
+linking the photo into the gallery at position 0. The worker reports the
+gallery URI for Grain. The gallery title and the Spark caption are truncated on
+UTF-8 boundaries; Grain only accepts PNG screenshots with readable dimensions,
+because its photo lexicon requires the aspect ratio before upload.
+
+The worker enforces the per-target blob caps before reading/uploading the
+bytes: 2,000,000 bytes for Bluesky and Spark (below Spark's 5 MB lexicon cap)
+and Grain's exact 1,000,000-byte lexicon cap. A non-PNG for Grain fails before
+any network call. The player OAuth scope helper appends only the selected
+target's narrow repo grants when a custom base lacks `transition:generic`; the
+default broad scope is unchanged, and recomputation at login is idempotent.
+
+No endpoint, AppView call, credential or new persisted data is added: Spark and
+Grain records go to the user's already configured PDS through the existing
+`uploadBlob`/`createRecord` calls. The only new setting is `image_post_target`;
+the image is still read at post time from the game's screenshot path. Unit
+tests pin both upstream record shapes, caption/title truncation, the target
+caps and the target-specific grants; sidecar PDS tests pin the Spark and Grain
+writes and Grain's pre-upload rejection. Wire-shape tests cover `SaveConfig` on
+both sides of the boundary. Upstream lexicons were read from the public Spark
+and Grain repositories; no live service or identity was contacted.
+
 ### M69: server card (#191)
 
 The server card is a liveness-checked server manifest the **server
