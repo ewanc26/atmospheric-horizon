@@ -12,6 +12,10 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-11-25
+
+Twelfth tagged release. Adds Continuity Watchman: an experimental, default-off DID continuity observer in the optional `atmospheric-server` sidecar, with no change to Horizon's API or native/client halves.
+
 ### Added
 
 - **Continuity Watchman (#190, experimental sidecar foundation).** The optional
@@ -660,7 +664,8 @@ unless it writes to your own repo.
   can issue the same link (M40). The online whitelist sweep remains to be
   implemented.
 
-[Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.12.0
 [0.11.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.11.0
 [0.10.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.10.0
 [0.9.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.9.0
