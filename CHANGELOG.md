@@ -12,6 +12,19 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+### Added
+
+- **Counting Stones: verifiable in-game polls (#193).** The worker can open a
+  ballot box, collect one vote per linked DID, close it with a single signed
+  tally record, and hand each voter a private receipt that proves inclusion in
+  the Merkle root. The published record carries the question, choices, root,
+  participant DID list and aggregate tally — never a choice next to an
+  identity — and a reader verifies its Ed25519 signature with the public key
+  it carries. `/atmospheric poll open|vote|close|receipt|result` exposes the
+  flow in game. No new endpoint or credential: votes resolve the existing
+  public identity link, the write rides the logged-in PDS session, and the
+  signing key stays in the worker.
+
 ### Changed
 
 - **ADR-002 records the native server export (#209).** The architecture guide now records that Horizon already ships third-party native mods and the trusted standalone dedicated-server export, superseding ADR-001's upstream blocker. The `route-3`/`blocked-upstream` labels are removed from the parked issues, the README no longer describes registry distribution as blocked upstream, and the distinction between today's sidecar build and the future native server half is explicit. No runtime behaviour changes.
