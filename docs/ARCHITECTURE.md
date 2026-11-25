@@ -1674,6 +1674,56 @@ yet: Horizon's signed-registry lookup for `.hpack` checksums is a later slice,
 so the card honestly publishes an empty list rather than unverifiable claims.
 The #196 pre-join display remains a separate slice.
 
+### Counting Stones: verifiable in-game polls (#193)
+
+Counting Stones is adjudication infrastructure, not social posting: one
+server-signed tally record is the only public artefact. The protocol lives in
+`crates/atmospheric/src/poll/` in four atoms:
+
+- **`record`** defines `PollRecord` in
+  `click.croft.atmospheric.poll.result`, with strict byte/count caps on the
+  question and choices, an RFC 3339 UTC close and publish time, the lower-hex
+  Merkle root, the participant DID list and the aggregate tally. Its signature
+  covers a canonical JSON payload of every field except `signature` itself,
+  using the same Ed25519 helpers as the atpcraft endorsements. The record
+  carries its own public key, so a reader verifies it without trusting the
+  publisher. The same `validate_poll_spec` runs when a box opens and whenever
+  a record is read or published.
+- **`tree`** builds a binary Merkle tree over `(DID, salted choice commitment,
+  deterministic nullifier)` leaves, duplicating the last leaf at odd levels,
+  and issues inclusion proofs. The nullifier binds the DID to the poll's
+  derived id, so one DID cannot vote twice and a receipt cannot be replayed in
+  another poll.
+- **`ballot`** keeps `choice` and `salt` private in the worker, derives the
+  public commitment/nullifier, and publishes the signed record plus one
+  private `Receipt` per ballot. A receipt carries the salt, nullifier, leaf
+  index and sibling hashes; `Receipt::verify` rebuilds the leaf from the
+  published fields and walks the proof to the signed root. No receipt, salt,
+  choice or nullifier is ever put in the tally record.
+- **`digest`** resolves a subject, pages `listRecords` on their own PDS
+  unauthenticated, picks the newest structurally valid record and reports the
+  signature verdict. `FetchPoll` and `PollResult` carry that verdict to the
+  HUD through the existing worker boundary.
+
+The worker owns a `polls: HashMap` of in-memory ballot boxes. `OpenPoll`
+validates the caller's spec and future close time; `VotePoll` resolves the
+player's linked DID through the M35 public link map, enforces a single DID per
+poll and an open box, and emits a `PollVote` event without the choice;
+`ClosePoll` signs with the persisted worker endorsement key, writes one
+`createRecord`, and keeps the receipts in memory; `PollReceipt` resolves the
+caller's DID and returns only their own receipt. The signing key never leaves
+the worker. The server can still omit a vote, but the participant list is its
+claim of completeness and each included voter can check their receipt against
+the signed root.
+
+Protocol additions: `Command::{FetchPoll, OpenPoll, VotePoll, ClosePoll,
+PollReceipt}` and `Event::{PollResult, PollOpened, PollVote, PollPublished,
+PollReceipt}`. The std-only game mirror adds the matching plain-data
+`PollDigest`, `PollRecord` and `PollReceiptData`, wire-shape tests and chat
+commands `/atmospheric poll open|vote|close|receipt|result`. No new endpoint or
+credential: reads use the subject's PDS and the existing public identity link,
+and the write rides the logged-in account's PDS session.
+
 ### M68: automatic player-data sync
 
 M68 makes the M63 capture/restore hooks automatic and cross-server. Two new
