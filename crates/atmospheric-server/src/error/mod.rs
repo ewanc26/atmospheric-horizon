@@ -25,6 +25,12 @@ pub enum ApiError {
     LabelerDisabled,
     #[error("skin upload is disabled; set ATMOSPHERIC_SERVER_SKIN_KEY")]
     SkinDisabled,
+    #[error("DID operator grants are disabled; set ATMOSPHERIC_SERVER_OPERATOR_DIDS")]
+    OperatorDisabled,
+    #[error("{0}")]
+    Forbidden(String),
+    #[error("operator challenge is invalid, expired, or already used")]
+    ChallengeUnavailable,
     #[error("missing or invalid admin bearer token")]
     Unauthorized,
     #[error("internal server error")]
@@ -47,8 +53,10 @@ impl ApiError {
             Self::AdminDisabled
             | Self::BrowserDisabled
             | Self::LabelerDisabled
-            | Self::SkinDisabled => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Unauthorized => StatusCode::UNAUTHORIZED,
+            | Self::SkinDisabled
+            | Self::OperatorDisabled => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::Unauthorized | Self::ChallengeUnavailable => StatusCode::UNAUTHORIZED,
             Self::Internal | Self::Io(_) | Self::Json(_) | Self::Join(_) | Self::Corrupt(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

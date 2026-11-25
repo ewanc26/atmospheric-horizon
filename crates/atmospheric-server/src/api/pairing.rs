@@ -2,6 +2,7 @@ use super::AppState;
 use crate::{
     error::ApiError,
     model::{ClaimInput, Link, PairingInput, PairingResponse, unix_now},
+    operator::GrantScope,
 };
 use axum::{
     Json,
@@ -14,7 +15,14 @@ pub(super) async fn create_pairing(
     headers: HeaderMap,
     Json(input): Json<PairingInput>,
 ) -> Result<(StatusCode, Json<PairingResponse>), ApiError> {
-    state.authorize_admin(&headers)?;
+    state
+        .authorize_admin(
+            &headers,
+            GrantScope::PairingCreate,
+            "create_pairing",
+            &input.player_uuid,
+        )
+        .await?;
     let pairing = state.store.create_pairing(&input, unix_now()).await?;
     Ok((StatusCode::CREATED, Json(pairing)))
 }

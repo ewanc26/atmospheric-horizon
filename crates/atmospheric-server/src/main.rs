@@ -1,10 +1,16 @@
 use atmospheric_server::{
     ServerConfig, app,
     labeler::Labeler,
+    operator::{DEFAULT_GRANT_TTL_SECS, GrantScope, Operator, OperatorSettings, public_verify},
     skin::SkinSigner,
     store::{LinkStore, default_links_path},
 };
-use std::{env, net::SocketAddr, path::PathBuf};
+use std::{
+    env,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -91,6 +97,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     };
+    let operator = open_operator(&data_dir)?;
     let listener = TcpListener::bind(address).await?;
     println!(
         "atmospheric-server {} listening on http://{address} (data: {})",
@@ -104,11 +111,92 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         oauth_resolver: None,
         labeler,
         skin_signer,
+        operator,
     };
     axum::serve(listener, app(store, config))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// Build the experimental DID operator layer from the environment. An empty
+/// allowlist leaves the feature completely off and creates no key or log.
+fn open_operator(data_dir: &Path) -> Result<Option<Operator>, Box<dyn std::error::Error>> {
+    let settings = parse_operator_settings(
+        env::var("ATMOSPHERIC_SERVER_OPERATOR_DIDS").ok(),
+        env::var("ATMOSPHERIC_SERVER_OPERATOR_GRANT_TTL_SECONDS").ok(),
+        env::var("ATMOSPHERIC_SERVER_OPERATOR_SCOPES").ok(),
+    )
+    .map_err(std::io::Error::other)?;
+    let Some(settings) = settings else {
+        eprintln!(
+            "atmospheric-server: DID operator grants disabled; set ATMOSPHERIC_SERVER_OPERATOR_DIDS to a comma-separated allowlist"
+        );
+        return Ok(None);
+    };
+    let resolver = atmospheric::oauth::Resolver {
+        handle_service: env::var("ATMOSPHERIC_SERVER_OPERATOR_HANDLE_SERVICE")
+            .unwrap_or_else(|_| "https://bsky.social".into()),
+        plc_directory: env::var("ATMOSPHERIC_SERVER_OPERATOR_PLC_DIRECTORY")
+            .unwrap_or_else(|_| "https://plc.directory".into()),
+    };
+    let did_count = settings.dids.len();
+    let operator = Operator::open(
+        data_dir.join("operator"),
+        settings,
+        public_verify(reqwest::Client::new(), resolver),
+    )?;
+    println!(
+        "atmospheric-server: DID operator grants enabled for {did_count} DIDs (audit key {})",
+        operator.audit_key_id()
+    );
+    Ok(Some(operator))
+}
+
+/// Parse the operator policy from already-read environment values. Keeping
+/// this pure lets startup validation be tested without mutating the process
+/// environment or touching the audit key.
+fn parse_operator_settings(
+    dids: Option<String>,
+    grant_ttl: Option<String>,
+    scopes: Option<String>,
+) -> Result<Option<OperatorSettings>, String> {
+    let dids = csv(dids);
+    if dids.is_empty() {
+        return Ok(None);
+    }
+    let grant_ttl_secs = match grant_ttl {
+        Some(raw) => raw
+            .trim()
+            .parse::<u64>()
+            .map_err(|error| format!("invalid operator grant lifetime {raw:?}: {error}"))?,
+        None => DEFAULT_GRANT_TTL_SECS,
+    };
+    let scopes = match scopes {
+        Some(raw) => csv(Some(raw))
+            .iter()
+            .map(|scope| GrantScope::from_str(scope))
+            .collect::<Result<Vec<_>, _>>()?,
+        None => GrantScope::all(),
+    };
+    let settings = OperatorSettings {
+        dids,
+        grant_ttl_secs,
+        scopes,
+    };
+    settings.validate()?;
+    Ok(Some(settings))
+}
+
+fn csv(raw: Option<String>) -> Vec<String> {
+    raw.map(|raw| {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 async fn shutdown_signal() {
@@ -132,4 +220,60 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     ctrl_c.await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_allowlist_leaves_operator_grants_off() {
+        assert_eq!(parse_operator_settings(None, None, None).unwrap(), None);
+        assert_eq!(
+            parse_operator_settings(Some(" , , ".into()), None, None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn operator_policy_parses_and_defaults() {
+        let settings = parse_operator_settings(
+            Some(" did:plc:one , did:web:two.example ".into()),
+            Some(" 120 ".into()),
+            Some("links_read, audit_read".into()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(settings.dids, ["did:plc:one", "did:web:two.example"]);
+        assert_eq!(settings.grant_ttl_secs, 120);
+        assert_eq!(
+            settings.scopes,
+            [GrantScope::LinksRead, GrantScope::AuditRead]
+        );
+
+        let defaults = parse_operator_settings(Some("did:plc:one".into()), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(defaults.grant_ttl_secs, DEFAULT_GRANT_TTL_SECS);
+        assert_eq!(defaults.scopes, GrantScope::all());
+    }
+
+    #[test]
+    fn invalid_operator_policy_is_rejected() {
+        assert!(parse_operator_settings(Some("did:key:no".into()), None, None).is_err());
+        assert!(
+            parse_operator_settings(Some("did:plc:one".into()), Some("0".into()), None).is_err()
+        );
+        assert!(
+            parse_operator_settings(
+                Some("did:plc:one".into()),
+                None,
+                Some("links_read,unknown".into())
+            )
+            .is_err()
+        );
+        assert!(
+            parse_operator_settings(Some("did:plc:one".into()), None, Some("".into())).is_err()
+        );
+    }
 }
