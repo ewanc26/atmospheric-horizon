@@ -7,12 +7,10 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The card's collection.
-// Authority-domain note: club.atmospheric presumes control of an
-// atmospheric domain the author does not hold yet. The M69 pull request
-// tracks the choice (an existing owned domain, or a purchased one);
-// changing this constant is the only edit.
-pub const CARD_COLLECTION: &str = "club.atmospheric.server.card";
+/// The card's collection. The authority domain is the owner's existing
+/// `click.croft` namespace, matching the project's other NSIDs; changing
+/// it changes the published collection and is a protocol-visible edit.
+pub const CARD_COLLECTION: &str = "click.croft.atmospheric.server.card";
 
 /// The fixed record key the card is rewritten at (#191): one card per
 /// account, so a fresh commit time is the liveness a reader checks.
@@ -179,7 +177,7 @@ mod tests {
                 r#"{"serverName":"A shoebox","address":"example.test:25565""#,
                 r#","playersOnline":3,"playersMax":20,"gameVersion":"26.3""#,
                 r#","engine":"horizon","engineRevision":"9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0""#,
-                r#","packs":[{"name":"atmospheric-pack","source":"https://example.test/pack.hpack"#,
+                r#","packs":[{"name":"atmospheric-pack","source":"https://example.test/pack.hpack""#,
                 r#","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]"#,
                 r#","conduct":"https://example.test/rules","software":"atmospheric-horizon/1.2.3"}"#
             )

@@ -160,6 +160,9 @@ pub fn digest(
             "the server card does not match its schema: {error}"
         ))
     })?;
+    parsed.validate().map_err(|reason| {
+        AtmosphericError::Message(format!("the server card is not publishable: {reason}"))
+    })?;
     let published_at = record
         .get("createdAt")
         .and_then(|value| value.as_str())
