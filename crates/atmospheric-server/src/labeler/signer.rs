@@ -10,6 +10,7 @@ use ::k256::ecdsa::{
     Signature, SigningKey,
     signature::hazmat::{PrehashSigner, PrehashVerifier},
 };
+use ::k256::elliptic_curve::Generate;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -39,9 +40,8 @@ impl LabelSigner {
 
     /// Generate a fresh key from the operating system RNG.
     pub fn generate() -> Self {
-        let mut rng = rand_core::OsRng;
         Self {
-            key: SigningKey::random(&mut rng),
+            key: SigningKey::generate(),
         }
     }
 
@@ -56,7 +56,7 @@ impl LabelSigner {
     pub fn public_key_bytes(&self) -> [u8; 33] {
         self.key
             .verifying_key()
-            .to_encoded_point(true)
+            .to_sec1_point(true)
             .as_bytes()
             .try_into()
             .expect("a compressed secp256k1 key is 33 bytes")
@@ -64,7 +64,7 @@ impl LabelSigner {
 
     /// The compressed public key as lowercase hex (33 bytes).
     pub fn public_key_hex(&self) -> String {
-        let point = self.key.verifying_key().to_encoded_point(true);
+        let point = self.key.verifying_key().to_sec1_point(true);
         let mut out = String::with_capacity(66);
         for byte in point.as_bytes() {
             use std::fmt::Write;
@@ -75,7 +75,7 @@ impl LabelSigner {
 
     /// The public key as a multibase `did:key` (`did:key:zQ3sh…`).
     pub fn did_key(&self) -> String {
-        let point = self.key.verifying_key().to_encoded_point(true);
+        let point = self.key.verifying_key().to_sec1_point(true);
         let mut bytes = Vec::with_capacity(35);
         bytes.extend_from_slice(&SECP256K1_MULTICODEC);
         bytes.extend_from_slice(point.as_bytes());
@@ -89,8 +89,7 @@ impl LabelSigner {
             .key
             .sign_prehash(&digest)
             .expect("a 32-byte digest is always signable");
-        let signature = signature.normalize_s().unwrap_or(signature);
-        signature.to_bytes().into()
+        signature.normalize_s().to_bytes().into()
     }
 
     /// Verify a label's 64-byte signature with this key.
@@ -161,8 +160,9 @@ mod tests {
         let second = signer.sign(&label);
         assert_eq!(first, second);
         let signature = Signature::from_slice(&first).unwrap();
-        assert!(
-            signature.normalize_s().is_none(),
+        assert_eq!(
+            signature.normalize_s(),
+            signature,
             "signing must produce the low-S form"
         );
         assert!(signer.verify(&label, &first));

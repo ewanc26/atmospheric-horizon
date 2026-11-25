@@ -9,6 +9,7 @@
 use crate::error::{AtmosphericError, Result};
 use base64::{Engine as _, engine::general_purpose};
 use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+use getrandom::{SysRng, rand_core::UnwrapErr};
 
 pub use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
@@ -82,7 +83,7 @@ pub fn verifying_key_from_spki_b64(b64: &str) -> Result<VerifyingKey> {
 
 /// Generate a fresh signing key (random seed).
 pub fn generate() -> SigningKey {
-    SigningKey::generate(&mut rand_core::OsRng)
+    SigningKey::generate(&mut UnwrapErr(SysRng))
 }
 
 /// The key file for a signing key.
