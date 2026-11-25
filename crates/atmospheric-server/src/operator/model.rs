@@ -19,6 +19,7 @@ pub enum GrantScope {
     LinksWrite,
     PairingCreate,
     LabelEmit,
+    LedgerWrite,
     AuditRead,
 }
 
@@ -37,6 +38,7 @@ impl std::str::FromStr for GrantScope {
             "links_write" => Ok(Self::LinksWrite),
             "pairing_create" => Ok(Self::PairingCreate),
             "label_emit" => Ok(Self::LabelEmit),
+            "ledger_write" => Ok(Self::LedgerWrite),
             "audit_read" => Ok(Self::AuditRead),
             other => Err(format!("unknown operator grant scope: {other:?}")),
         }
@@ -51,6 +53,7 @@ impl GrantScope {
             Self::LinksWrite => "links_write",
             Self::PairingCreate => "pairing_create",
             Self::LabelEmit => "label_emit",
+            Self::LedgerWrite => "ledger_write",
             Self::AuditRead => "audit_read",
         }
     }
@@ -119,6 +122,7 @@ impl GrantScope {
             Self::LinksWrite,
             Self::PairingCreate,
             Self::LabelEmit,
+            Self::LedgerWrite,
             Self::AuditRead,
         ]
     }

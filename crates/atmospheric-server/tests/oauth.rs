@@ -57,6 +57,7 @@ fn config(resolver: Resolver) -> ServerConfig {
         skin_signer: None,
         operator: None,
         continuity: None,
+        ledger: None,
     }
 }
 

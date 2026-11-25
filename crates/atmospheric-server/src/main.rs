@@ -1,6 +1,7 @@
 use atmospheric_server::{
     ServerConfig, app,
     continuity::{Continuity, ContinuitySettings, Watcher},
+    decision::{DecisionLedger, DecisionSettings},
     labeler::Labeler,
     operator::{DEFAULT_GRANT_TTL_SECS, GrantScope, Operator, OperatorSettings, public_verify},
     skin::SkinSigner,
@@ -100,6 +101,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let operator = open_operator(&data_dir)?;
     let continuity = open_continuity()?;
+    let ledger = open_ledger(&data_dir)?;
     let listener = TcpListener::bind(address).await?;
     println!(
         "atmospheric-server {} listening on http://{address} (data: {})",
@@ -115,6 +117,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         skin_signer,
         operator,
         continuity,
+        ledger,
     };
     axum::serve(listener, app(store, config))
         .with_graceful_shutdown(shutdown_signal())
@@ -193,6 +196,54 @@ fn open_continuity() -> Result<Option<Continuity>, Box<dyn std::error::Error>> {
         settings.plc_directory, settings.poll_secs, settings.jitter_secs
     );
     Ok(Some(continuity))
+}
+
+/// Build the optional Ledger of Decisions. Off by default: an operator opts in
+/// with both a flag and the server DID that will issue the signed records, so a
+/// plain sidecar creates neither a signing key nor a subject pepper.
+fn open_ledger(data_dir: &Path) -> Result<Option<DecisionLedger>, Box<dyn std::error::Error>> {
+    let settings = parse_ledger_settings(
+        env::var("ATMOSPHERIC_SERVER_LEDGER_ENABLED").ok(),
+        env::var("ATMOSPHERIC_SERVER_LEDGER_ISSUER_DID").ok(),
+    )
+    .map_err(std::io::Error::other)?;
+    let Some(settings) = settings else {
+        eprintln!(
+            "atmospheric-server: decision ledger disabled; set ATMOSPHERIC_SERVER_LEDGER_ENABLED=true and ATMOSPHERIC_SERVER_LEDGER_ISSUER_DID"
+        );
+        return Ok(None);
+    };
+    let ledger = DecisionLedger::open(data_dir, &settings)?;
+    println!(
+        "atmospheric-server: decision ledger enabled as {} (signing key {})",
+        settings.issuer,
+        ledger.key_id()
+    );
+    Ok(Some(ledger))
+}
+
+/// Parse the ledger policy from already-read environment values. Pure so startup
+/// validation can be tested without mutating the process environment.
+fn parse_ledger_settings(
+    enabled: Option<String>,
+    issuer: Option<String>,
+) -> Result<Option<DecisionSettings>, String> {
+    let enabled = enabled
+        .map(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(None);
+    }
+    let issuer = issuer
+        .map(|raw| raw.trim().to_owned())
+        .filter(|raw| !raw.is_empty())
+        .ok_or_else(|| "ledger issuer DID is required when the ledger is enabled".to_owned())?;
+    Ok(Some(DecisionSettings::new(&issuer)?))
 }
 
 /// Parse the watcher policy from already-read environment values so startup
@@ -346,6 +397,21 @@ mod tests {
             .unwrap();
         assert_eq!(defaults.grant_ttl_secs, DEFAULT_GRANT_TTL_SECS);
         assert_eq!(defaults.scopes, GrantScope::all());
+    }
+
+    #[test]
+    fn ledger_policy_defaults_and_validation() {
+        assert_eq!(parse_ledger_settings(None, None).unwrap(), None);
+        assert_eq!(
+            parse_ledger_settings(Some(" off ".into()), None).unwrap(),
+            None
+        );
+        assert!(parse_ledger_settings(Some("true".into()), None).is_err());
+        assert!(parse_ledger_settings(Some("1".into()), Some("@alice".into())).is_err());
+        let settings = parse_ledger_settings(Some("yes".into()), Some(" did:plc:server ".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(settings.issuer, "did:plc:server");
     }
 
     #[test]

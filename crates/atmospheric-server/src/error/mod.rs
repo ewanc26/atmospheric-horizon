@@ -29,6 +29,10 @@ pub enum ApiError {
     OperatorDisabled,
     #[error("continuity watchman is disabled; set ATMOSPHERIC_SERVER_CONTINUITY_ENABLED=true")]
     ContinuityDisabled,
+    #[error(
+        "decision ledger is disabled; set ATMOSPHERIC_SERVER_LEDGER_ENABLED=true and ATMOSPHERIC_SERVER_LEDGER_ISSUER_DID"
+    )]
+    LedgerDisabled,
     #[error("{0}")]
     Forbidden(String),
     #[error("operator challenge is invalid, expired, or already used")]
@@ -57,7 +61,8 @@ impl ApiError {
             | Self::LabelerDisabled
             | Self::SkinDisabled
             | Self::OperatorDisabled
-            | Self::ContinuityDisabled => StatusCode::SERVICE_UNAVAILABLE,
+            | Self::ContinuityDisabled
+            | Self::LedgerDisabled => StatusCode::SERVICE_UNAVAILABLE,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Unauthorized | Self::ChallengeUnavailable => StatusCode::UNAUTHORIZED,
             Self::Internal | Self::Io(_) | Self::Json(_) | Self::Join(_) | Self::Corrupt(_) => {
