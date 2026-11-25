@@ -7,6 +7,7 @@
 
 pub mod api;
 pub mod browser;
+pub mod continuity;
 pub mod error;
 pub mod labeler;
 pub mod model;

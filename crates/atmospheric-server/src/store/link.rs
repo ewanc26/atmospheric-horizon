@@ -68,6 +68,19 @@ impl LinkStore {
         links
     }
 
+    /// The linked Minecraft UUID for a DID, if any. Continuity Watchman uses
+    /// this instead of trusting an identity claim from a PLC operation.
+    pub async fn uuid_for_did(&self, did: &str) -> Option<String> {
+        let state = self.inner.state.read().await;
+        let mut links: Vec<_> = state
+            .links
+            .values()
+            .filter(|link| link.did == did)
+            .collect();
+        links.sort_by(|left, right| left.player_uuid.cmp(&right.player_uuid));
+        links.first().map(|link| link.player_uuid.clone())
+    }
+
     /// Counts used by the health endpoint. Expired pairings are not counted,
     /// but they are removed on the next mutation.
     pub async fn counts(&self, now: u64) -> (usize, usize) {
