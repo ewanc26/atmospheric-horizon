@@ -56,6 +56,15 @@ fn atmospheric_tick(game: &mut crate::game::Game<'_>) {
             )),
         );
     }
+    // M69: republish the server card on a five-minute cadence. The card is a
+    // server manifest, so only a server (which reports a player-slot ceiling)
+    // publishes it; a client has no ceiling and stays silent. Population comes
+    // from the live server and identity fields from the worker's settings.
+    let players_max = game.native_max_players();
+    if m::card_publish_due() && players_max.is_some() {
+        let players_online = u32::try_from(game.native_server_players().len()).unwrap_or(u32::MAX);
+        m::publish_server_card(players_online, players_max);
+    }
     // M42: sweep the online players against the join gate. The worker checks
     // the list through its M52 cache, refreshing when stale, and reports the
     // linked players whose DID has left it; each is disconnected with

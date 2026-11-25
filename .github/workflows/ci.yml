@@ -11,6 +11,9 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
@@ -26,8 +29,34 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      # Surface rustc/clippy diagnostics as check-run annotations.
+      - name: Register the Rust problem matcher
+        run: echo "::add-matcher::.github/problem-matcher-rust.json"
+
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # Problem matchers see raw bytes, so the ANSI colours the global
+        # CARGO_TERM_COLOR=always paints on would hide every diagnostic from
+        # them before an annotation could exist.
+        run: |
+          set -o pipefail
+          CARGO_TERM_COLOR=never cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee clippy.log
+
+      - name: Report clippy diagnostics on the pull request
+        # Annotations also carry the diagnostics, but they are unreadable
+        # to unauthenticated tooling, so mirror the log head onto the PR.
+        if: failure() && github.event_name == 'pull_request'
+        run: |
+          {
+            echo '### Clippy failed'
+            echo
+            echo '```text'
+            grep -aE '^error|^warning|-->|note:|help:|test result|FAILED|panicked' clippy.log | head -n 160
+            echo '```'
+          } > /tmp/clippy-comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/clippy-comment.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
 
       - name: Test
         run: cargo test --workspace --locked

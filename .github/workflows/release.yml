@@ -59,7 +59,7 @@ jobs:
             tar -C "target/${{ matrix.target }}/release" -czf "dist/$name.tar.gz" atmospheric-worker
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: dist/*
@@ -88,7 +88,7 @@ jobs:
           tar --create --gzip --file "dist/$name.tar.gz" \
             mixins/atmospheric compatibility.json LICENSE README.md CHANGELOG.md docs
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mixins-bundle
           path: dist/*
@@ -99,7 +99,7 @@ jobs:
     needs: [worker, mixins]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -112,7 +112,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Publish the GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: atmospheric-horizon ${{ github.ref_name }}
           generate_release_notes: true

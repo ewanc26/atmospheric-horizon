@@ -8,6 +8,7 @@
 
 mod account;
 mod base;
+mod card;
 pub mod colibri;
 mod rpg;
 mod social;
@@ -15,6 +16,7 @@ pub mod worker;
 
 pub use account::{identity, oauth, plc, session};
 pub use base::{config, error, records, signing, tid};
+pub use card::{digest, record};
 pub use social::{
     actions, chats, graph, interactions, labeler, labels, lists, notifications, presence, profiles,
     servers, skins, triggers,
@@ -227,6 +229,15 @@ pub enum Command {
     /// Publish/refresh the server profile from the separate server account
     /// (M25), the atpcraft ownership model, instead of the player account.
     PostServerProfileAsServer,
+    /// Publish/refresh the server card (#191, M69): the typed, liveness-
+    /// checked manifest from the new card scope, written by the server account
+    /// at a fixed record key so the commit recency doubles as the liveness.
+    /// Identity fields come from the settings file; the population counts are
+    /// reported by the game side; the record is validated before it is sent.
+    PublishServerCard {
+        players_online: u32,
+        players_max: Option<u32>,
+    },
     /// Fetch the member DIDs of a public Bluesky list — the read side of
     /// atpcraft's join gate (M11). The reference is an
     /// `at://…/app.bsky.graph.list/<rkey>` URI or a bsky.app list URL.
@@ -322,6 +333,10 @@ pub enum Command {
     /// read side of M10). The subject is a DID or a handle; the read is
     /// unauthenticated — works logged out.
     FetchServerProfile { subject: String },
+    /// Read a server's published card (#191, M69 read side) from its own
+    /// PDS and assess its liveness from the record's recency. The subject
+    /// is a DID or a handle; the read is unauthenticated — works logged out.
+    FetchServerCard { subject: String },
     /// Read one of an account's public social graphs (M20): `kind` is
     /// "follows", "followers", "blocks" or "mutes", and `subject` is a DID
     /// or a handle. Unauthenticated AppView read — works logged out.
@@ -491,6 +506,16 @@ pub enum Event {
         via: String,
         // Boxed: ServerDigest is one of the event enum's largest variants.
         profile: Box<Option<servers::ServerDigest>>,
+    },
+    /// A server's published card (#191, M69 read side): the resolved DID
+    /// (`subject`), the PDS it was read from (`via`), and the digest with
+    /// its liveness verdict (`None` when the repo has no valid card).
+    ServerCard {
+        subject: String,
+        via: String,
+        // Boxed: CardDigest carries the typed record, one of the event
+        // enum's larger variants.
+        card: Box<Option<digest::CardDigest>>,
     },
     /// One of an account's social graphs (M20): the relation (`kind`), the
     /// subject's resolved DID, the AppView it was read from (`via`), and the
@@ -721,6 +746,21 @@ mod tests {
             .unwrap(),
             r#"{"LabelerSweep":{"players":[{"player_uuid":"00000000-0000-4000-8000-000000000001","player_name":"Alex","admin":true,"play_time_ticks":72000000,"mob_kills":1000,"deaths":100,"dragon_kills":1}]}}"#
         );
+        assert_eq!(
+            serde_json::to_string(&Command::PublishServerCard {
+                players_online: 3,
+                players_max: Some(20),
+            })
+            .unwrap(),
+            r#"{"PublishServerCard":{"players_online":3,"players_max":20}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::FetchServerCard {
+                subject: "did:plc:z".into()
+            })
+            .unwrap(),
+            r#"{"FetchServerCard":{"subject":"did:plc:z"}}"#
+        );
         // SaveConfig carries the full Config; the game side sends the Settings
         // subset and container-level serde(default) fills the rest.
         let json = serde_json::to_string(&Command::SaveConfig {
@@ -796,6 +836,13 @@ mod tests {
                 model: "slim".into(),
             },
             Command::PostServerProfile,
+            Command::PublishServerCard {
+                players_online: 3,
+                players_max: Some(20),
+            },
+            Command::FetchServerCard {
+                subject: "did:plc:z".into(),
+            },
             Command::FetchList {
                 reference: "at://x/app.bsky.graph.list/y".into(),
             },
@@ -965,6 +1012,15 @@ mod tests {
             r#"{"PlayerSnapshot":{"subject":"did:plc:x","via":"https://pds.example","snapshot":null}}"#
         );
         assert_eq!(
+            serde_json::to_string(&Event::ServerCard {
+                subject: "did:plc:x".into(),
+                via: "https://pds.example".into(),
+                card: Box::new(None),
+            })
+            .unwrap(),
+            r#"{"ServerCard":{"subject":"did:plc:x","via":"https://pds.example","card":null}}"#
+        );
+        assert_eq!(
             serde_json::to_string(&Event::JoinGateState {
                 enabled: true,
                 list: "at://l".into(),
@@ -1063,6 +1119,11 @@ mod tests {
                 subject: "s".into(),
                 via: "v".into(),
                 profile: Box::new(None),
+            },
+            Event::ServerCard {
+                subject: "s".into(),
+                via: "v".into(),
+                card: Box::new(None),
             },
             Event::SocialGraph {
                 kind: "follows".into(),

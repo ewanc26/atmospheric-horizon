@@ -1,0 +1,23 @@
+{
+  "problemMatcher": [
+    {
+      "owner": "rustc",
+      "severity": "error",
+      "pattern": [
+        {
+          "regexp": "^(warning|error)(?:\\[(.+)\\])?: (.*)$",
+          "severity": 1,
+          "code": 2,
+          "message": 3
+        },
+        {
+          "regexp": "^\\s+--> (.+):(\\d+):(\\d+)$",
+          "kind": "location",
+          "file": 1,
+          "line": 2,
+          "column": 3
+        }
+      ]
+    }
+  ]
+}

@@ -7,7 +7,7 @@
 //! the crate testable without a game.
 
 use crate::{
-    Command, Config, Event, LabelerPlayer, PlayerAspect, SweepPlayer, actions, chats,
+    Command, Config, Event, LabelerPlayer, PlayerAspect, SweepPlayer, actions, card, chats,
     colibri::{self, ChannelRef, StreamEvent},
     error::AtmosphericError,
     graph, identity, interactions, labeler,
@@ -464,6 +464,25 @@ fn server_profile_name(config: &Config) -> String {
     }
 }
 
+/// The pinned Horizon revision from the committed compatibility manifest
+/// (M69). It is the single validated build target, so the card always names the
+/// exact engine this worker was cut against. A malformed manifest yields no
+/// revision rather than an unverifiable one.
+fn pinned_engine_revision() -> Option<String> {
+    const COMPAT: &str = include_str!("../../../../compatibility.json");
+    let value: serde_json::Value = serde_json::from_str(COMPAT).ok()?;
+    value
+        .get("horizon_revision")?
+        .as_str()
+        .filter(|revision| {
+            revision.len() == card::record::CARD_REVISION_LEN
+                && revision
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+        .map(str::to_owned)
+}
+
 /// The server profile's capabilities (M49): an explicit override wins;
 /// otherwise derive the features that are actually implemented. `skin-sync`
 /// is always present (M9/M14); `join-gate` appears when the gate is armed;
@@ -791,6 +810,13 @@ impl Worker {
                     Err(error) => self.fail(error.to_string()),
                 }
             }
+            Command::PublishServerCard {
+                players_online,
+                players_max,
+            } => match self.publish_server_card(players_online, players_max).await {
+                Ok(uri) => self.emit(Event::Posted { uri }),
+                Err(error) => self.fail(error.to_string()),
+            },
             Command::FetchList { reference } => {
                 // Public AppView read: works logged out, no token refresh.
                 match self.fetch_list(&reference).await {
@@ -927,6 +953,18 @@ impl Worker {
                         subject,
                         via,
                         profile: Box::new(profile),
+                    }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::FetchServerCard { subject } => {
+                // A public read against the subject's own PDS: works logged
+                // out, no token refresh.
+                match self.fetch_server_card(&subject).await {
+                    Ok((subject, via, card)) => self.emit(Event::ServerCard {
+                        subject,
+                        via,
+                        card: Box::new(card),
                     }),
                     Err(error) => self.fail(error.to_string()),
                 }
@@ -1673,6 +1711,66 @@ impl Worker {
         };
         Self::write_server_profile(agent, did, handle, &key, &config).await
     }
+    /// Publish/refresh the server card from the separate server account
+    /// (#191, M69). Identity fields come from the settings file and the
+    /// population counts from the game side; the record is validated before
+    /// it is sent. The card lives at a fixed record key and every publish
+    /// stamps a fresh `createdAt`, so a fresh write is the card's liveness.
+    async fn publish_server_card(
+        &mut self,
+        players_online: u32,
+        players_max: Option<u32>,
+    ) -> crate::error::Result<String> {
+        self.ensure_server_oauth_fresh().await;
+        let (Some(agent), Some(did)) = (&self.server_agent, &self.server_did) else {
+            return Err(AtmosphericError::Message(
+                "no server account is logged in — run /atmospheric server-account login <handle>"
+                    .into(),
+            ));
+        };
+        let config = self.load_config().unwrap_or_default();
+        // The pinned engine revision is a compile-time fact from
+        // compatibility.json, so the card always advertises the exact Horizon
+        // build this worker was cut against. Packs are declared by the game's
+        // native mod list and need Horizon's signed-registry lookup (a later
+        // slice); until then the card honestly declares none rather than
+        // claiming unverified checksums.
+        let record = card::record::CardRecord {
+            server_name: server_profile_name(&config),
+            address: config.server_address.clone(),
+            players_online,
+            players_max,
+            game_version: config.game_version.clone(),
+            engine: "horizon".into(),
+            engine_revision: pinned_engine_revision(),
+            packs: Vec::new(),
+            conduct: (!config.server_website.trim().is_empty())
+                .then(|| config.server_website.clone()),
+            software: format!("atmospheric-horizon/{}", env!("CARGO_PKG_VERSION")),
+        };
+        if let Err(reason) = record.validate() {
+            return Err(AtmosphericError::Message(format!(
+                "the server card is not publishable: {reason}"
+            )));
+        }
+        let now = atrium_api::types::string::Datetime::now();
+        let now_str = serde_json::to_value(&now)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let mut value = serde_json::to_value(&record)?;
+        value["$type"] = serde_json::json!(card::record::CARD_COLLECTION);
+        value["createdAt"] = serde_json::json!(now_str);
+        let unknown: atrium_api::types::Unknown = serde_json::from_value(value)?;
+        actions::put_record(
+            agent,
+            did,
+            card::record::CARD_COLLECTION,
+            card::record::CARD_RKEY,
+            unknown,
+        )
+        .await
+    }
 
     /// Re-publish the descriptor after a server-account login or a startup
     /// resume (M51), as atpcraft does. Best-effort: a failed write is reported
@@ -2241,6 +2339,19 @@ impl Worker {
         };
         let digest = servers::digest(&did, &rkey, &value, &keys)?;
         Ok((did, pds, Some(digest)))
+    }
+    /// Read a server's published card (#191, M69 read side): a public read
+    /// against the subject's own PDS, so it works logged out. The liveness
+    /// verdict compares the record's `createdAt` with the worker's clock.
+    async fn fetch_server_card(
+        &self,
+        subject: &str,
+    ) -> crate::error::Result<(String, String, Option<card::digest::CardDigest>)> {
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_secs() as i64)
+            .unwrap_or_default();
+        card::digest::fetch_card(&self.http, &self.resolver, subject, now_epoch).await
     }
 
     /// Read one of an account's public social graphs (M20): follows,
@@ -5829,6 +5940,20 @@ mod tests {
         assert_eq!(server_profile_name(&config), "Custom Client");
         config.server_name = "My Server".into();
         assert_eq!(server_profile_name(&config), "My Server");
+    }
+
+    #[test]
+    fn pinned_engine_revision_matches_the_compatibility_manifest() {
+        let revision = pinned_engine_revision().expect("the committed manifest has a revision");
+        assert_eq!(revision.len(), card::record::CARD_REVISION_LEN);
+        assert!(
+            revision
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../compatibility.json")).unwrap();
+        assert_eq!(revision, manifest["horizon_revision"].as_str().unwrap());
     }
 
     #[test]
