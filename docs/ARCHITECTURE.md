@@ -1539,6 +1539,24 @@ pinned `horizon-mixins` staging tool is not present, and no live Minecraft
 server, identity service or PDS was contacted. atpcraft was used only as a
 wire-behaviour reference.
 
+### Achievement announcements (#181)
+
+Advancement announcements are posted to Bluesky under a new default-off
+`post_achievement_messages` setting, mirroring the existing death-message path.
+The existing `system_message` injection in `mixins/atmospheric/death.rs`
+recognizes `chat.type.advancement.*` translation keys in addition to `death.*`
+and routes each to its own worker command. The game side sends
+`GameCommand::PostAchievement { text }`, the protocol carries
+`Command::PostAchievement { text }`, and the worker posts
+`🏆 {text}` as an `app.bsky.feed.post` only while the setting is on. Both
+settings are refreshed at login alongside the other cached flags, so an
+operator can enable posts without a restart. The worker owns the gate and
+drops the command before any network call while the flag is off, exactly as it
+does for death messages. Both are broadcast lines, so every linked client that
+opts in posts from its own account. Wire-shape pins cover the command on both
+sides of the boundary; a worker PDS test checks the off/on behavior and the
+exact post text. No new endpoint, record kind or credential.
+
 ### M69: server card (#191)
 
 The server card is a liveness-checked server manifest the **server

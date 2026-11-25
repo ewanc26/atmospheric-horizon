@@ -58,6 +58,9 @@ pub struct Config {
     pub labeler_enabled: bool,
     /// Post the death message automatically when the player dies.
     pub post_death_messages: bool,
+    /// Post the player's advancement/achievement announcement automatically.
+    /// Off by default: posts are public once written to the repo.
+    pub post_achievement_messages: bool,
     /// Publish every chat message as an `at.atpcraft.player.chat` record.
     /// Off by default: chat is public once written to the repo.
     pub post_chat_messages: bool,
@@ -184,6 +187,7 @@ impl Default for Config {
             server_account_token_refresh_seconds: 60,
             labeler_enabled: false,
             post_death_messages: false,
+            post_achievement_messages: false,
             post_chat_messages: false,
             chat_server_id: default_chat_server_id(),
             persist_session: true,
@@ -264,6 +268,7 @@ mod tests {
             server_account_token_refresh_seconds: 30,
             labeler_enabled: true,
             post_death_messages: true,
+            post_achievement_messages: true,
             post_chat_messages: true,
             chat_server_id: "my-server".into(),
             persist_session: true,
@@ -314,6 +319,7 @@ mod tests {
             "atproto repo:app.bsky.feed.post?action=create"
         );
         assert!(back.post_death_messages);
+        assert!(back.post_achievement_messages);
         assert!(back.post_chat_messages);
         assert!(back.player_data_sync_enabled);
         assert_eq!(back.chat_server_id, "my-server");

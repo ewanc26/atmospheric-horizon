@@ -49,6 +49,7 @@ pub struct Settings {
     pub app_password: String,
     pub poll_interval_secs: u64,
     pub post_death_messages: bool,
+    pub post_achievement_messages: bool,
     pub post_chat_messages: bool,
     pub chat_server_id: String,
 }
@@ -283,6 +284,8 @@ pub enum GameCommand {
     Repost { uri: String },
     /// Post the player's death message (only when `post_death_messages` is on).
     PostDeathMessage { text: String },
+    /// Post an advancement announcement (only when `post_achievement_messages` is on).
+    PostAchievement { text: String },
     /// Log out: drop the session and delete the persisted refresh token.
     Logout,
     /// Stop the worker thread.
@@ -2377,6 +2380,12 @@ pub fn post_death_message(text: &str) {
     send(GameCommand::PostDeathMessage { text: text.into() });
 }
 
+/// Ask the worker to post an advancement announcement (published only when the
+/// settings enable `post_achievement_messages`).
+pub fn post_achievement(text: &str) {
+    send(GameCommand::PostAchievement { text: text.into() });
+}
+
 /// Ask the worker to log out (drops the session and its persisted token).
 pub fn logout() {
     send(GameCommand::Logout);
@@ -2953,6 +2962,10 @@ fn encode_command(command: &GameCommand) -> String {
                     ("app_password", jstr(&settings.app_password)),
                     ("poll_interval_secs", juint(settings.poll_interval_secs)),
                     ("post_death_messages", jbool(settings.post_death_messages)),
+                    (
+                        "post_achievement_messages",
+                        jbool(settings.post_achievement_messages),
+                    ),
                     ("post_chat_messages", jbool(settings.post_chat_messages)),
                     ("chat_server_id", jstr(&settings.chat_server_id)),
                 ]),
@@ -3226,6 +3239,9 @@ fn encode_command(command: &GameCommand) -> String {
         GameCommand::Repost { uri } => jobj(vec![("Repost", jobj(vec![("uri", jstr(uri))]))]),
         GameCommand::PostDeathMessage { text } => {
             jobj(vec![("PostDeathMessage", jobj(vec![("text", jstr(text))]))])
+        }
+        GameCommand::PostAchievement { text } => {
+            jobj(vec![("PostAchievement", jobj(vec![("text", jstr(text))]))])
         }
         GameCommand::Logout => jstr("Logout"),
         GameCommand::Shutdown => jstr("Shutdown"),
@@ -3830,6 +3846,7 @@ mod tests {
             -2.5,
         ));
         post_death_message("Player was slain by Zombie");
+        post_achievement("Player earned The End");
         fetch_labels("at://did:plc:example/app.bsky.feed.post/3abc");
         fetch_labeler_labels("did:plc:labeler", Some("did:plc:example"));
         fetch_labeler_labels("did:plc:labeler", None);
@@ -3867,6 +3884,7 @@ mod tests {
             app_password: "abcd-1234-efgh-5678".into(),
             poll_interval_secs: 30,
             post_death_messages: false,
+            post_achievement_messages: false,
             post_chat_messages: false,
             chat_server_id: "horizon-client".into(),
         });
@@ -3971,6 +3989,12 @@ mod tests {
                 assert_eq!(text, "Player was slain by Zombie")
             }
             other => panic!("expected PostDeathMessage, got {:?}", other),
+        }
+        match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(GameCommand::PostAchievement { text }) => {
+                assert_eq!(text, "Player earned The End")
+            }
+            other => panic!("expected PostAchievement, got {:?}", other),
         }
         match command_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(GameCommand::FetchLabels { subject }) => {
@@ -4696,6 +4720,7 @@ mod tests {
             app_password: "abcd-1234-efgh-5678".into(),
             poll_interval_secs: 30,
             post_death_messages: false,
+            post_achievement_messages: false,
             post_chat_messages: true,
             chat_server_id: "horizon-client".into(),
         }
@@ -4834,7 +4859,7 @@ mod tests {
             encode_command(&GameCommand::SaveConfig {
                 settings: sample_settings()
             }),
-            r#"{"SaveConfig":{"config":{"pds_url":"https://pds.example","identifier":"someone.example","app_password":"abcd-1234-efgh-5678","poll_interval_secs":30,"post_death_messages":false,"post_chat_messages":true,"chat_server_id":"horizon-client"}}}"#
+            r#"{"SaveConfig":{"config":{"pds_url":"https://pds.example","identifier":"someone.example","app_password":"abcd-1234-efgh-5678","poll_interval_secs":30,"post_death_messages":false,"post_achievement_messages":false,"post_chat_messages":true,"chat_server_id":"horizon-client"}}}"#
         );
         // String escaping matches serde_json: quote, backslash, newline.
         assert_eq!(
@@ -5130,6 +5155,10 @@ mod tests {
         assert_eq!(
             encode_command(&GameCommand::PostDeathMessage { text: "t".into() }),
             r#"{"PostDeathMessage":{"text":"t"}}"#
+        );
+        assert_eq!(
+            encode_command(&GameCommand::PostAchievement { text: "t".into() }),
+            r#"{"PostAchievement":{"text":"t"}}"#
         );
         assert_eq!(encode_command(&GameCommand::Logout), r#""Logout""#);
         assert_eq!(encode_command(&GameCommand::Shutdown), r#""Shutdown""#);
