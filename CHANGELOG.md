@@ -12,6 +12,17 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+### Added
+
+- **Configurable image-post targets (#183).** Set `image_post_target` to
+  `bluesky` (default), `spark` or `grain` to choose where the `V` keybind and
+  automatic F2 screenshot posts are written. Spark uses `so.sprk.feed.post`
+  with its image media union and caption; Grain writes a linked photo, gallery
+  and gallery-item trio. All three upload the image to the configured PDS with
+  the existing `uploadBlob`/`createRecord` calls; no new endpoint, AppView
+  call or credential. Target-specific record shapes, local caps, OAuth grants,
+  settings/wire round-trips and worker PDS tests are included.
+
 ## [0.6.0] — 2026-11-25
 
 Sixth tagged release. Adds two default-off automatic Bluesky posts — achievement

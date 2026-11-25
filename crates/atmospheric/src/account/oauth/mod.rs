@@ -16,7 +16,10 @@
 //! and flow are reimplemented from the public spec (informed by atpcraft's
 //! public description of its flow); no code is copied from any source.
 
-use crate::error::{AtmosphericError, Result};
+use crate::{
+    config::ImagePostTarget,
+    error::{AtmosphericError, Result},
+};
 use base64::Engine as _;
 use p256::ecdsa::{Signature, SigningKey, VerifyingKey, signature::Signer};
 use serde::{Deserialize, Serialize};
@@ -46,6 +49,17 @@ const PLAYER_GRANTS: [&str; 5] = [
 const RPG_ITEM_GRANT: &str = "repo:equipment.rpg.item?action=create&action=update&action=delete";
 /// The provider attestation write on the server account (M63).
 const RPG_GIVE_GRANT: &str = "repo:equipment.rpg.give?action=create&action=update&action=delete";
+
+/// The image-post collection grants (#183). Only the selected target's records
+/// are requested, so a player configured for Spark never asks for Grain's
+/// collections (or vice versa). `transition:generic` covers all of them.
+const BLUESKY_POST_GRANT: &str = "repo:app.bsky.feed.post?action=create";
+const SPARK_POST_GRANT: &str = "repo:so.sprk.feed.post?action=create";
+const GRAIN_IMAGE_GRANTS: [&str; 3] = [
+    "repo:social.grain.photo?action=create",
+    "repo:social.grain.gallery?action=create",
+    "repo:social.grain.gallery.item?action=create",
+];
 
 /// The server account's descriptor write (M10/M25/M51). Only the server login
 /// requests it; a player login never writes `at.atpcraft.server.profile`.
@@ -120,6 +134,33 @@ pub fn scope_for_rpg(
             &mut scope,
             "repo:social.colibri.membership?action=create&action=delete",
         );
+    }
+    scope
+}
+
+/// [`scope_for_rpg`] plus the narrow grant for the configured image-post
+/// target (#183). The broad `transition:generic` scope already covers every
+/// collection, so the default scope string stays untouched. A configured
+/// target's grant is appended at most once, allowing scope recomputation at
+/// login to be idempotent.
+pub fn scope_for_player(
+    base: &str,
+    bridge_enabled: bool,
+    appview_did: &str,
+    rpg_enabled: bool,
+    image_post_target: ImagePostTarget,
+) -> String {
+    let mut scope = scope_for_rpg(base, bridge_enabled, appview_did, rpg_enabled);
+    if !has_transition_generic(&scope) {
+        match image_post_target {
+            ImagePostTarget::Bluesky => append_missing(&mut scope, BLUESKY_POST_GRANT),
+            ImagePostTarget::Spark => append_missing(&mut scope, SPARK_POST_GRANT),
+            ImagePostTarget::Grain => {
+                for grant in GRAIN_IMAGE_GRANTS {
+                    append_missing(&mut scope, grant);
+                }
+            }
+        }
     }
     scope
 }

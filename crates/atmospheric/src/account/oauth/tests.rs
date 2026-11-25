@@ -946,6 +946,82 @@ fn rpg_grants_are_requested_only_when_discovery_is_on() {
 }
 
 #[test]
+fn image_post_grants_are_requested_only_for_the_selected_target() {
+    let base = "atproto";
+    let bluesky = scope_for_player(
+        base,
+        false,
+        "did:web:api.colibri.social",
+        false,
+        ImagePostTarget::Bluesky,
+    );
+    assert_eq!(bluesky.matches(BLUESKY_POST_GRANT).count(), 1);
+    assert!(!bluesky.contains(SPARK_POST_GRANT));
+    assert!(
+        GRAIN_IMAGE_GRANTS
+            .iter()
+            .all(|grant| !bluesky.contains(grant))
+    );
+
+    let spark = scope_for_player(
+        base,
+        false,
+        "did:web:api.colibri.social",
+        false,
+        ImagePostTarget::Spark,
+    );
+    assert_eq!(spark.matches(SPARK_POST_GRANT).count(), 1);
+    assert!(!spark.contains(BLUESKY_POST_GRANT));
+    assert!(
+        GRAIN_IMAGE_GRANTS
+            .iter()
+            .all(|grant| !spark.contains(grant))
+    );
+
+    let grain = scope_for_player(
+        base,
+        false,
+        "did:web:api.colibri.social",
+        false,
+        ImagePostTarget::Grain,
+    );
+    for grant in GRAIN_IMAGE_GRANTS {
+        assert_eq!(grain.matches(grant).count(), 1, "{grant} appears once");
+    }
+    assert!(!grain.contains(BLUESKY_POST_GRANT));
+    assert!(!grain.contains(SPARK_POST_GRANT));
+
+    // Idempotent when recomputed at login, and the broad default carries all
+    // three collections through `transition:generic` without extra tokens.
+    for (scope, target) in [
+        (&bluesky, ImagePostTarget::Bluesky),
+        (&spark, ImagePostTarget::Spark),
+        (&grain, ImagePostTarget::Grain),
+    ] {
+        assert_eq!(
+            scope_for_player(scope, false, "did:web:api.colibri.social", false, target),
+            *scope
+        );
+    }
+    for target in [
+        ImagePostTarget::Bluesky,
+        ImagePostTarget::Spark,
+        ImagePostTarget::Grain,
+    ] {
+        assert_eq!(
+            scope_for_player(
+                DEFAULT_SCOPE,
+                false,
+                "did:web:api.colibri.social",
+                false,
+                target
+            ),
+            DEFAULT_SCOPE
+        );
+    }
+}
+
+#[test]
 fn the_server_scope_adds_its_grants_and_a_broad_base_needs_none() {
     let base = "atproto";
     let player = scope_for(base, false, "did:web:api.colibri.social");

@@ -102,6 +102,7 @@ fn main() {
         post_death_messages: false,
         post_achievement_messages: false,
         post_screenshots: false,
+        image_post_target: atmospheric::ImagePostTarget::Bluesky,
         post_chat_messages: false,
         player_data_sync_enabled: false,
         chat_server_id: "pds-check".into(),

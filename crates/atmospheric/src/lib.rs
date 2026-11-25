@@ -22,7 +22,7 @@ pub use social::{
     servers, skins, triggers,
 };
 
-pub use config::Config;
+pub use config::{Config, ImagePostTarget};
 pub use error::AtmosphericError;
 use serde::{Deserialize, Serialize};
 
@@ -787,6 +787,10 @@ mod tests {
         assert_eq!(
             value["SaveConfig"]["config"]["pds_url"],
             "https://pds.example"
+        );
+        assert_eq!(
+            value["SaveConfig"]["config"]["image_post_target"],
+            "bluesky"
         );
         // Round-trip every variant's shape.
         let commands = vec![
