@@ -2,6 +2,7 @@ use super::AppState;
 use crate::{
     error::ApiError,
     model::{Link, LinkInput, LinksResponse, normalize_uuid, unix_now},
+    operator::GrantScope,
 };
 use axum::{
     Json,
@@ -26,7 +27,9 @@ pub(super) async fn list_links(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<LinksResponse>, ApiError> {
-    state.authorize_admin(&headers)?;
+    state
+        .authorize_admin(&headers, GrantScope::LinksRead, "list_links", "links")
+        .await?;
     let links = state.store.links().await;
     Ok(Json(LinksResponse {
         total: links.len(),
@@ -40,7 +43,9 @@ pub(super) async fn put_link(
     headers: HeaderMap,
     Json(input): Json<LinkInput>,
 ) -> Result<(StatusCode, Json<Link>), ApiError> {
-    state.authorize_admin(&headers)?;
+    state
+        .authorize_admin(&headers, GrantScope::LinksWrite, "put_link", &uuid)
+        .await?;
     let (link, existed) = state.store.upsert_link(&uuid, &input, unix_now()).await?;
     let status = if existed {
         StatusCode::OK
@@ -55,7 +60,9 @@ pub(super) async fn delete_link(
     Path(uuid): Path<String>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
-    state.authorize_admin(&headers)?;
+    state
+        .authorize_admin(&headers, GrantScope::LinksWrite, "delete_link", &uuid)
+        .await?;
     if state.store.remove_link(&uuid).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {

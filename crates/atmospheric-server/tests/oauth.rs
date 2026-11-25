@@ -55,6 +55,7 @@ fn config(resolver: Resolver) -> ServerConfig {
         oauth_resolver: Some(resolver),
         labeler: None,
         skin_signer: None,
+        operator: None,
     }
 }
 

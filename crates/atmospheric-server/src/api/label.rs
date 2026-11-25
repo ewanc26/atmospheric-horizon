@@ -3,6 +3,7 @@ use crate::{
     error::ApiError,
     labeler::{EmitLabel, Labeler, LabelerError, LogEntry, Query, error_frame, labels_frame},
     model::{EmitLabelInput, unix_now},
+    operator::GrantScope,
 };
 use axum::{
     Json,
@@ -129,7 +130,9 @@ pub(super) async fn emit_label(
     headers: HeaderMap,
     Json(input): Json<EmitLabelInput>,
 ) -> Result<(StatusCode, Json<LogEntry>), ApiError> {
-    state.authorize_admin(&headers)?;
+    state
+        .authorize_admin(&headers, GrantScope::LabelEmit, "emit_label", &input.uri)
+        .await?;
     let labeler = state.labeler.as_ref().ok_or(ApiError::LabelerDisabled)?;
     let entry = labeler
         .emit(

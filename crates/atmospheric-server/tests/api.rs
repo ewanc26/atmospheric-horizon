@@ -28,6 +28,7 @@ fn config() -> ServerConfig {
         oauth_resolver: None,
         labeler: None,
         skin_signer: None,
+        operator: None,
     }
 }
 

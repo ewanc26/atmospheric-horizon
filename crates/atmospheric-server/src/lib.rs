@@ -11,6 +11,7 @@ pub mod error;
 pub mod labeler;
 pub mod model;
 pub mod oauth;
+pub mod operator;
 mod page;
 pub mod skin;
 pub mod store;

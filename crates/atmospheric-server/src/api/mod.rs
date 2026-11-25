@@ -2,16 +2,18 @@
 //!
 //! Public reads let a game client resolve a player UUID. Admin writes are
 //! protected by `ATMOSPHERIC_SERVER_TOKEN`; a missing token disables only the
-//! admin routes. Pairing claims are public because possession of the one-time
-//! code is the credential. Browser links are created only for the game server,
-//! authenticated with `ATMOSPHERIC_SERVER_LINK_TOKEN`, and are then completed
-//! by the player's browser OAuth login.
+//! admin routes. Allowlisted operators can use a short-lived DID grant (#189)
+//! instead of the shared token. Pairing claims are public because possession
+//! of the one-time code is the credential. Browser links are created only for
+//! the game server, authenticated with `ATMOSPHERIC_SERVER_LINK_TOKEN`, and
+//! are then completed by the player's browser OAuth login.
 
 mod browser;
 mod health;
 mod label;
 mod lexicon;
 mod link;
+mod operator;
 mod pairing;
 mod skin;
 
@@ -19,7 +21,9 @@ use crate::{
     browser::BrowserLinks,
     error::ApiError,
     labeler::Labeler,
+    model::unix_now,
     oauth::{OAuthClient, Resolver},
+    operator::{GrantCheck, GrantScope, Operator},
     skin::{SkinSigner, SkinUploads},
     store::LinkStore,
 };
@@ -54,6 +58,10 @@ pub struct ServerConfig {
     /// The game worker's Ed25519 endorsement key, when the operator has made
     /// it available for browser skin publishing.
     pub skin_signer: Option<SkinSigner>,
+    /// Experimental DID-authenticated operator grants (#189). `None` leaves
+    /// only the static admin token available.
+    #[doc(hidden)]
+    pub operator: Option<Operator>,
 }
 
 #[derive(Clone)]
@@ -68,6 +76,7 @@ pub struct AppState {
     skin_uploads: SkinUploads,
     skin_signer: Option<SkinSigner>,
     labeler: Option<Labeler>,
+    operator: Option<Operator>,
 }
 
 impl AppState {
@@ -101,38 +110,75 @@ impl AppState {
             skin_uploads: SkinUploads::default(),
             skin_signer: config.skin_signer,
             labeler: config.labeler,
+            operator: config.operator,
         }
     }
 
-    fn authorize(&self, headers: &HeaderMap, expected: Option<&str>) -> Result<(), ApiError> {
-        let expected = expected.ok_or(ApiError::AdminDisabled)?;
-        let value = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .ok_or(ApiError::Unauthorized)?;
-        let (scheme, actual) = value.split_once(' ').ok_or(ApiError::Unauthorized)?;
-        let actual = actual.trim();
-        if !scheme.eq_ignore_ascii_case("Bearer")
-            || !constant_time_eq(expected.as_bytes(), actual.as_bytes())
-        {
-            return Err(ApiError::Unauthorized);
+    fn bearer(headers: &HeaderMap) -> Option<&str> {
+        let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+        let (scheme, actual) = value.split_once(' ')?;
+        if !scheme.eq_ignore_ascii_case("Bearer") {
+            return None;
         }
-        Ok(())
+        Some(actual.trim())
     }
 
-    fn authorize_admin(&self, headers: &HeaderMap) -> Result<(), ApiError> {
-        self.authorize(headers, self.admin_token.as_deref())
+    /// Authorize an admin operation. The static token remains valid on every
+    /// route. A DID grant is accepted only when it carries the route's scope;
+    /// both accepted and scope-denied grant uses write signed audit receipts.
+    pub(super) async fn authorize_admin(
+        &self,
+        headers: &HeaderMap,
+        scope: GrantScope,
+        action: &str,
+        target: &str,
+    ) -> Result<(), ApiError> {
+        let token = Self::bearer(headers);
+        if let (Some(operator), Some(token)) = (self.operator.as_ref(), token) {
+            match operator.grants.check(token, scope, unix_now()) {
+                GrantCheck::Authorized(grant) => {
+                    operator
+                        .audit
+                        .append(&grant, scope.as_str(), action, target, "ok")
+                        .await?;
+                    return Ok(());
+                }
+                GrantCheck::ScopeDenied(grant) => {
+                    operator
+                        .audit
+                        .append(&grant, scope.as_str(), action, target, "scope_denied")
+                        .await?;
+                    return Err(ApiError::Forbidden(format!(
+                        "grant does not carry the {scope} scope"
+                    )));
+                }
+                GrantCheck::Unknown => {}
+            }
+        }
+        match (&self.admin_token, token) {
+            (Some(expected), Some(actual))
+                if constant_time_eq(expected.as_bytes(), actual.as_bytes()) =>
+            {
+                Ok(())
+            }
+            (Some(_), _) => Err(ApiError::Unauthorized),
+            (None, _) if self.operator.is_some() => Err(ApiError::Unauthorized),
+            (None, _) => Err(ApiError::AdminDisabled),
+        }
     }
 
     fn authorize_link(&self, headers: &HeaderMap) -> Result<(), ApiError> {
         if self.link_token.is_none() || self.public_url.is_none() {
             return Err(ApiError::BrowserDisabled);
         }
-        self.authorize(headers, self.link_token.as_deref())
-            .map_err(|error| match error {
-                ApiError::AdminDisabled => ApiError::BrowserDisabled,
-                other => other,
-            })
+        let expected = self
+            .link_token
+            .as_deref()
+            .ok_or(ApiError::BrowserDisabled)?;
+        match Self::bearer(headers) {
+            Some(actual) if constant_time_eq(expected.as_bytes(), actual.as_bytes()) => Ok(()),
+            _ => Err(ApiError::Unauthorized),
+        }
     }
 }
 
@@ -185,6 +231,10 @@ pub fn app(store: LinkStore, config: ServerConfig) -> Router {
         .route("/v1/pairings/claim", post(pairing::claim_pairing))
         .route("/v1/labeler/labels", post(label::emit_label))
         .route("/v1/labeler/identity", get(label::labeler_identity))
+        .route("/v1/operator/challenge", post(operator::challenge))
+        .route("/v1/operator/grant", post(operator::grant))
+        .route("/v1/operator/receipts", get(operator::receipts))
+        .route("/v1/operator/audit-key", get(operator::audit_key))
         .merge(xrpc)
         .route(
             "/v1/browser/pairings",
