@@ -1768,6 +1768,37 @@ The std-only game mirror in `mixins/atmospheric/runtime.rs` adds a plain-data
 Status text marks the lines cosmetic. No new endpoint or credential: the read
 is unauthenticated against the subject's PDS and nothing is written.
 
+### Verified handle plaques (#185)
+
+Unlike a linked badge, a verified plaque proves the handle cryptographically.
+The protocol lives in `crates/atmospheric/src/account/proof.rs`. A
+`Challenge` is a random 128-bit nonce plus the Unix time it was issued. The
+linked session writes one `at.atpcraft.verify.nonce` record at the nonce rkey
+to force a fresh repository commit; its only fields are `nonce` and
+`createdAt`, never profile or gameplay data. Verification then:
+
+- resolves the subject to a DID and `#atproto_pds` endpoint and requires it to
+  be the logged-in account;
+- reads `com.atproto.sync.getLatestCommit` for the CID and revision, then
+  `com.atproto.sync.getBlocks` for that CID, and walks the CAR v1 frame to the
+  commit block;
+- re-encodes the unsigned commit as canonical DRISL/DAG-CBOR (map keys sorted
+  by UTF-8 length then bytes, CID links as tag 42, `prev` present even when
+  null) and verifies its ECDSA signature with the `#atproto` multikey from the
+  PLC document, rejecting high-S signatures;
+- checks the commit revision (a TID) is newer than the challenge and within
+  `MAX_COMMIT_AGE_SECS` (300), bounding the replay window; and
+- confirms the DID document's `alsoKnownAs` handle resolves back to the same
+  DID.
+
+This proves **PDS repository custody, not human custody** — the HUD text says
+so, and the branch never writes profile data or gates gameplay. Protocol
+additions: `Command::VerifyHandle { subject }` and
+`Event::HandleProofResult { subject, proof: Option<HandleProof> }`. The
+std-only mirror adds a plain-data `HandleProof`, wire-shape tests and
+`/atmospheric verify <did|handle>`. A key-type variation (only K-256 multipkeys
+are accepted) or a handle change mid-session fails closed.
+
 ### M68: automatic player-data sync
 
 M68 makes the M63 capture/restore hooks automatic and cross-server. Two new
