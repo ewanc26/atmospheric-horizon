@@ -100,6 +100,7 @@ fn main() {
         labeler_enabled: false,
         list_cache_seconds: 300,
         post_death_messages: false,
+        post_achievement_messages: false,
         post_chat_messages: false,
         player_data_sync_enabled: false,
         chat_server_id: "pds-check".into(),

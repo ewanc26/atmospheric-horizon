@@ -85,8 +85,10 @@ bindings = [
 ]
 
 # System messages (HEAD of system_message is injectable; death_message itself
-# is not — it contains control flow the injector rejects). Only translatable
-# "death.*" messages are posted, when post_death_messages is enabled.
+# is not — it contains control flow the injector rejects). Translatable
+# "death.*" messages post when post_death_messages is enabled, and
+# "chat.type.advancement.*" announcements post when post_achievement_messages
+# is enabled (#181).
 [[injection]]
 id = "death"
 kind = "HEAD"

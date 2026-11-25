@@ -12,6 +12,16 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+### Added
+
+- **Achievement announcements (#181).** With the new default-off
+  `post_achievement_messages` setting, a player's advancement announcements
+  (`chat.type.advancement.*`) are posted to Bluesky with a 🏆 prefix. The
+  existing `system_message` injection now recognizes both death and
+  advancement translation keys and routes them to separate worker commands,
+  each gated by its own setting. Wire-shape pins, a worker PDS test and a
+  game-side command-flow test cover the new path. No new endpoint or credential.
+
 ## [0.5.0] — 2026-11-25
 
 Fifth tagged release. Adds automatic player-data sync and liveness-checked

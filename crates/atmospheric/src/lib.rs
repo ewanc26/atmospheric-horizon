@@ -358,6 +358,9 @@ pub enum Command {
     /// Post the player's death message to Bluesky (only when
     /// `post_death_messages` is enabled).
     PostDeathMessage { text: String },
+    /// Post the player's advancement/achievement announcement (only when
+    /// `post_achievement_messages` is enabled).
+    PostAchievement { text: String },
     /// Log out: drop the session and delete the persisted refresh token.
     Logout,
     /// Shut the worker thread down.
@@ -606,6 +609,10 @@ mod tests {
             })
             .unwrap(),
             r#"{"PostChat":{"message":"m","automatic":true}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::PostAchievement { text: "t".into() }).unwrap(),
+            r#"{"PostAchievement":{"text":"t"}}"#
         );
         assert_eq!(
             serde_json::to_string(&Command::FetchLabelerLabels {
@@ -899,6 +906,7 @@ mod tests {
                 uri: "at://did:plc:z/app.bsky.feed.post/1".into(),
             },
             Command::PostDeathMessage { text: "t".into() },
+            Command::PostAchievement { text: "t".into() },
             Command::Logout,
             Command::Shutdown,
         ];

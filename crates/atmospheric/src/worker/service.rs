@@ -351,6 +351,8 @@ struct Worker {
     player_data_sync_enabled: bool,
     /// `post_death_messages` from the settings file, refreshed at login.
     post_death_messages: bool,
+    /// `post_achievement_messages` from the settings file, refreshed at login.
+    post_achievement_messages: bool,
     /// `persist_session` from the settings file, refreshed at login.
     persist_session: bool,
     /// The persisted session, if any, for resuming across restarts.
@@ -553,6 +555,7 @@ impl Worker {
             post_chat_messages: false,
             player_data_sync_enabled: false,
             post_death_messages: false,
+            post_achievement_messages: false,
             persist_session: true,
             stored_session,
             server_agent: None,
@@ -1017,6 +1020,22 @@ impl Worker {
                 let result = match (&self.agent, &self.did) {
                     (Some(agent), Some(did)) => {
                         actions::post_text(agent, did, &format!("☠ {text}")).await
+                    }
+                    _ => Err(AtmosphericError::NotLoggedIn),
+                };
+                match result {
+                    Ok(uri) => self.emit(Event::Posted { uri }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::PostAchievement { text } => {
+                if !self.post_achievement_messages {
+                    return;
+                }
+                self.ensure_oauth_fresh().await;
+                let result = match (&self.agent, &self.did) {
+                    (Some(agent), Some(did)) => {
+                        actions::post_text(agent, did, &format!("🏆 {text}")).await
                     }
                     _ => Err(AtmosphericError::NotLoggedIn),
                 };
@@ -2754,6 +2773,7 @@ impl Worker {
                 self.post_chat_messages = config.post_chat_messages;
                 self.player_data_sync_enabled = config.player_data_sync_enabled;
                 self.post_death_messages = config.post_death_messages;
+                self.post_achievement_messages = config.post_achievement_messages;
                 self.persist_session = config.persist_session;
                 self.chat_server_id = config.chat_server_id.clone();
                 self.identifier = config.identifier.clone();
@@ -2882,6 +2902,7 @@ impl Worker {
                     self.post_chat_messages = config.post_chat_messages;
                     self.player_data_sync_enabled = config.player_data_sync_enabled;
                     self.post_death_messages = config.post_death_messages;
+                    self.post_achievement_messages = config.post_achievement_messages;
                     self.persist_session = config.persist_session;
                     self.chat_server_id = config.chat_server_id.clone();
                 }
@@ -3366,6 +3387,7 @@ impl Worker {
                         self.post_chat_messages = config.post_chat_messages;
                         self.player_data_sync_enabled = config.player_data_sync_enabled;
                         self.post_death_messages = config.post_death_messages;
+                        self.post_achievement_messages = config.post_achievement_messages;
                         self.persist_session = config.persist_session;
                         self.chat_server_id = config.chat_server_id.clone();
                     }
@@ -3400,6 +3422,7 @@ impl Worker {
                     self.post_chat_messages = config.post_chat_messages;
                     self.player_data_sync_enabled = config.player_data_sync_enabled;
                     self.post_death_messages = config.post_death_messages;
+                    self.post_achievement_messages = config.post_achievement_messages;
                     self.persist_session = config.persist_session;
                     self.chat_server_id = config.chat_server_id.clone();
                     self.identifier = config.identifier.clone();
@@ -4048,6 +4071,7 @@ mod tests {
             server_account_token_refresh_seconds: 60,
             labeler_enabled: false,
             post_death_messages: false,
+            post_achievement_messages: false,
             post_chat_messages: false,
             player_data_sync_enabled: false,
             chat_server_id: "test-server".into(),
@@ -5875,6 +5899,7 @@ mod tests {
             server_account_token_refresh_seconds: 30,
             labeler_enabled: false,
             post_death_messages: true,
+            post_achievement_messages: true,
             post_chat_messages: true,
             player_data_sync_enabled: true,
             chat_server_id: "my-server".into(),
@@ -5925,6 +5950,7 @@ mod tests {
         assert_eq!(back.app_password, config.app_password);
         assert_eq!(back.poll_interval_secs, 30);
         assert!(back.post_death_messages);
+        assert!(back.post_achievement_messages);
         assert!(back.post_chat_messages);
         assert_eq!(back.chat_server_id, "my-server");
         assert!(back.persist_session);
@@ -8687,6 +8713,62 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&create_record.body).unwrap();
         assert_eq!(body["collection"], "app.bsky.feed.post");
         assert_eq!(body["record"]["text"], "☠ Player was slain by Zombie");
+    }
+
+    #[test]
+    fn achievement_posts_only_when_enabled() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("achievement-off");
+        let mut config = test_config(pds.url.clone());
+        config.post_achievement_messages = false;
+        write_config(&dir, &config);
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir.clone());
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        command_tx
+            .send(Command::PostAchievement {
+                text: "Player earned The End".into(),
+            })
+            .unwrap();
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+        assert!(
+            !pds.requests()
+                .iter()
+                .any(|r| r.path == "/xrpc/com.atproto.repo.createRecord"),
+            "flag off: nothing was posted"
+        );
+
+        // Flag on: the announcement is posted as a text post with a trophy.
+        let pds = StubPds::start(false);
+        let dir = temp_dir("achievement-on");
+        let mut config = test_config(pds.url.clone());
+        config.post_achievement_messages = true;
+        write_config(&dir, &config);
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+        command_tx
+            .send(Command::PostAchievement {
+                text: "Player earned The End".into(),
+            })
+            .unwrap();
+        let _ = wait_for(&event_rx, |e| matches!(e, Event::Posted { .. }));
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+        let requests = pds.requests();
+        let create_record = requests
+            .iter()
+            .find(|r| r.path == "/xrpc/com.atproto.repo.createRecord")
+            .expect("the achievement was posted");
+        let body: serde_json::Value = serde_json::from_str(&create_record.body).unwrap();
+        assert_eq!(body["collection"], "app.bsky.feed.post");
+        assert_eq!(body["record"]["text"], "🏆 Player earned The End");
     }
 
     #[test]
