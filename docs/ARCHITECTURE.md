@@ -1724,6 +1724,50 @@ commands `/atmospheric poll open|vote|close|receipt|result`. No new endpoint or
 credential: reads use the subject's PDS and the existing public identity link,
 and the write rides the logged-in account's PDS session.
 
+### Warrants: cosmetic ranks from signed issuer records (#192)
+
+Warrants are cosmetic credentials a player keeps in their own repo and an
+operator chooses to recognise. They grant a name-plate line only — never a
+join gate or gameplay capability — and the lexicon is documented with that
+intent loudly. The protocol lives in `crates/atmospheric/src/warrant/` in two
+atoms:
+
+- **`record`** defines `WarrantRecord` (default collection
+  `club.atmospheric.warrant`): issuer DID, subject DID, cosmetic `title`,
+  RFC 3339 UTC `issuedAt` and optional `expiresAt`, the issuer's Ed25519 SPKI
+  key and a signature. `validate_warrant_spec` applies the same byte/shape
+  checks before signing and on every read. The signature covers a canonical
+  JSON payload of every field except `signature` itself, using the same
+  helpers as the poll tallies and atpcraft endorsements, so changing the
+  title, subject, collection or expiry invalidates it. `is_active_at` refuses
+  a future `issuedAt` and a past `expiresAt`, so a backdated grant cannot flash
+  early and a time-boxed one stops on its own.
+- **`digest`** resolves the subject and pages `listRecords` for each pinned
+  collection on their own PDS unauthenticated. `verify_against` is the trust
+  root: it accepts a record only when the issuer DID **and** collection match
+  an allowlist entry, the signature verifies with the key the record carries,
+  and that key equals the entry's pinned key byte-for-byte. A self-signed or
+  unpinned record is worthless no matter how valid its signature. The subject
+  must match the repo being read, and lines are sorted and de-duplicated for a
+  stable HUD. An empty allowlist returns an empty digest without any
+  `listRecords` call. `FetchWarrants` and `WarrantResult` carry the lines to
+  the HUD through the existing worker boundary.
+
+The allowlist is a worker-side config field, `warrant_issuers` — a list of
+`{did, collection, public_key}` with `public_key` the base64 SPKI Ed25519 key.
+It is `#[serde(default)]` and empty by default, so old settings files keep
+loading and nothing is trusted until an operator pins it; the game process
+never supplies an issuer or key, which is what stops self-attestation.
+Revocation is absence from the repo: a deleted record simply disappears on
+the next fetch, and `expiresAt` gives an issuer a time-boxed grant.
+
+Protocol additions: `Command::FetchWarrants { subject }` and
+`Event::WarrantResult { subject, via, warrants: Option<Vec<WarrantLine>> }`.
+The std-only game mirror in `mixins/atmospheric/runtime.rs` adds a plain-data
+`WarrantLine`, wire-shape tests and `/atmospheric warrants <did|handle>`.
+Status text marks the lines cosmetic. No new endpoint or credential: the read
+is unauthenticated against the subject's PDS and nothing is written.
+
 ### M68: automatic player-data sync
 
 M68 makes the M63 capture/restore hooks automatic and cross-server. Two new
