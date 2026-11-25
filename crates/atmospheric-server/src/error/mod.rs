@@ -27,6 +27,8 @@ pub enum ApiError {
     SkinDisabled,
     #[error("DID operator grants are disabled; set ATMOSPHERIC_SERVER_OPERATOR_DIDS")]
     OperatorDisabled,
+    #[error("continuity watchman is disabled; set ATMOSPHERIC_SERVER_CONTINUITY_ENABLED=true")]
+    ContinuityDisabled,
     #[error("{0}")]
     Forbidden(String),
     #[error("operator challenge is invalid, expired, or already used")]
@@ -54,7 +56,8 @@ impl ApiError {
             | Self::BrowserDisabled
             | Self::LabelerDisabled
             | Self::SkinDisabled
-            | Self::OperatorDisabled => StatusCode::SERVICE_UNAVAILABLE,
+            | Self::OperatorDisabled
+            | Self::ContinuityDisabled => StatusCode::SERVICE_UNAVAILABLE,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Unauthorized | Self::ChallengeUnavailable => StatusCode::UNAUTHORIZED,
             Self::Internal | Self::Io(_) | Self::Json(_) | Self::Join(_) | Self::Corrupt(_) => {
