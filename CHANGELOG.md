@@ -12,6 +12,11 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-11-25
+
+Ninth tagged release. Adds cosmetic Warrants: signed credential records accepted
+only from pinned issuers, with no new endpoint or credential.
+
 ### Added
 
 - **Warrants: cosmetic ranks from signed issuer records (#192).** Set
@@ -582,7 +587,8 @@ unless it writes to your own repo.
   can issue the same link (M40). The online whitelist sweep remains to be
   implemented.
 
-[Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/ewanc26/atmospheric-horizon/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.9.0
 [0.8.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.8.0
 [0.7.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.7.0
 [0.6.0]: https://github.com/ewanc26/atmospheric-horizon/releases/tag/v0.6.0
