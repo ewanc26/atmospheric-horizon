@@ -52,6 +52,7 @@ fn config(resolver: Option<Resolver>, signer: Option<SkinSigner>) -> ServerConfi
         labeler: None,
         skin_signer: signer,
         operator: None,
+        continuity: None,
     }
 }
 

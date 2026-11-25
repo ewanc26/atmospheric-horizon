@@ -1,5 +1,6 @@
 use atmospheric_server::{
     ServerConfig, app,
+    continuity::{Continuity, ContinuitySettings, Watcher},
     labeler::Labeler,
     operator::{DEFAULT_GRANT_TTL_SECS, GrantScope, Operator, OperatorSettings, public_verify},
     skin::SkinSigner,
@@ -98,6 +99,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let operator = open_operator(&data_dir)?;
+    let continuity = open_continuity()?;
     let listener = TcpListener::bind(address).await?;
     println!(
         "atmospheric-server {} listening on http://{address} (data: {})",
@@ -112,6 +114,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         labeler,
         skin_signer,
         operator,
+        continuity,
     };
     axum::serve(listener, app(store, config))
         .with_graceful_shutdown(shutdown_signal())
@@ -151,6 +154,93 @@ fn open_operator(data_dir: &Path) -> Result<Option<Operator>, Box<dyn std::error
         operator.audit_key_id()
     );
     Ok(Some(operator))
+}
+
+/// Build the optional Continuity Watchman state and spawn its background
+/// loops. The feature is off unless explicitly enabled, so a plain sidecar
+/// makes no PLC export connection.
+fn open_continuity() -> Result<Option<Continuity>, Box<dyn std::error::Error>> {
+    let settings = parse_continuity_settings(
+        env::var("ATMOSPHERIC_SERVER_CONTINUITY_ENABLED").ok(),
+        env::var("ATMOSPHERIC_SERVER_CONTINUITY_PLC_DIRECTORY").ok(),
+        env::var("ATMOSPHERIC_SERVER_CONTINUITY_POLL_SECONDS").ok(),
+        env::var("ATMOSPHERIC_SERVER_CONTINUITY_JITTER_SECONDS").ok(),
+    )
+    .map_err(std::io::Error::other)?;
+    let Some(settings) = settings else {
+        eprintln!(
+            "atmospheric-server: continuity watchman disabled; set ATMOSPHERIC_SERVER_CONTINUITY_ENABLED=true"
+        );
+        return Ok(None);
+    };
+    settings
+        .validate()
+        .map_err(|error| std::io::Error::other(format!("continuity policy: {error}")))?;
+    let continuity = Continuity::with_settings(settings.clone());
+    let resolver = atmospheric::oauth::Resolver {
+        handle_service: env::var("ATMOSPHERIC_SERVER_CONTINUITY_HANDLE_SERVICE")
+            .unwrap_or_else(|_| "https://bsky.social".into()),
+        plc_directory: settings.plc_directory.clone(),
+    };
+    let watcher = Watcher::new(continuity.clone(), settings.clone(), resolver);
+    tokio::spawn(async move {
+        if let Err(error) = watcher.run().await {
+            eprintln!("atmospheric-server: continuity watcher stopped: {error}");
+        }
+    });
+    println!(
+        "atmospheric-server: continuity watchman enabled via {} (poll {}s, jitter {}s)",
+        settings.plc_directory, settings.poll_secs, settings.jitter_secs
+    );
+    Ok(Some(continuity))
+}
+
+/// Parse the watcher policy from already-read environment values so startup
+/// validation is testable without mutating the process environment.
+fn parse_continuity_settings(
+    enabled: Option<String>,
+    directory: Option<String>,
+    poll: Option<String>,
+    jitter: Option<String>,
+) -> Result<Option<ContinuitySettings>, String> {
+    let enabled = enabled
+        .map(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(None);
+    }
+    let number = |raw: Option<String>, name: &str, default: u64| -> Result<u64, String> {
+        match raw {
+            Some(raw) => raw
+                .trim()
+                .parse::<u64>()
+                .map_err(|error| format!("invalid {name} {raw:?}: {error}")),
+            None => Ok(default),
+        }
+    };
+    let settings = ContinuitySettings {
+        plc_directory: directory
+            .map(|raw| raw.trim().trim_end_matches('/').to_owned())
+            .filter(|raw| !raw.is_empty())
+            .unwrap_or_else(|| "https://plc.directory".into()),
+        poll_secs: number(
+            poll,
+            "continuity poll seconds",
+            ContinuitySettings::default().poll_secs,
+        )?,
+        jitter_secs: number(
+            jitter,
+            "continuity jitter seconds",
+            ContinuitySettings::default().jitter_secs,
+        )?,
+    };
+    settings.validate()?;
+    Ok(Some(settings))
 }
 
 /// Parse the operator policy from already-read environment values. Keeping
@@ -256,6 +346,40 @@ mod tests {
             .unwrap();
         assert_eq!(defaults.grant_ttl_secs, DEFAULT_GRANT_TTL_SECS);
         assert_eq!(defaults.scopes, GrantScope::all());
+    }
+
+    #[test]
+    fn continuity_policy_defaults_and_validation() {
+        assert_eq!(
+            parse_continuity_settings(None, None, None, None).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_continuity_settings(Some(" off ".into()), None, None, None).unwrap(),
+            None
+        );
+        let settings = parse_continuity_settings(
+            Some("true".into()),
+            Some(" https://plc.example/ ".into()),
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(settings.plc_directory, "https://plc.example");
+        assert_eq!(settings.poll_secs, 300);
+        assert_eq!(settings.jitter_secs, 30);
+
+        assert!(
+            parse_continuity_settings(Some("yes".into()), None, Some("29".into()), None).is_err()
+        );
+        assert!(
+            parse_continuity_settings(Some("1".into()), None, None, Some("301".into())).is_err()
+        );
+        assert!(
+            parse_continuity_settings(Some("1".into()), Some("plc.example".into()), None, None)
+                .is_err()
+        );
     }
 
     #[test]

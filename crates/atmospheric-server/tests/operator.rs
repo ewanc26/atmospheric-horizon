@@ -75,6 +75,7 @@ fn config(operator: Option<Operator>) -> ServerConfig {
         labeler: None,
         skin_signer: None,
         operator,
+        continuity: None,
     }
 }
 
