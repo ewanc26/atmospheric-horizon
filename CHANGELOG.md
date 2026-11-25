@@ -12,6 +12,19 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+### Added
+
+- **Warrants: cosmetic ranks from signed issuer records (#192).** Set
+  `warrant_issuers` to pin the DID, collection and Ed25519 public key of the
+  issuers you recognise, then `/atmospheric warrants <did|handle>` reads signed
+  credential records from that player's own repo and shows the active ones as
+  name-plate lines. A rank is accepted only when the signature verifies with
+  the exact pinned key for that DID and collection and the subject matches;
+  self-attested records are worthless. Deleting a record drops the rank on the
+  next fetch and `expiresAt` can time-box a grant. Ranks are cosmetic only —
+  never a join gate or gameplay capability. The read is unauthenticated and
+  writes nothing; an empty allowlist trusts nobody and sends no record reads.
+
 ## [0.8.0] — 2026-11-25
 
 Eighth tagged release. Adds Counting Stones polls: a signed tally root, private
