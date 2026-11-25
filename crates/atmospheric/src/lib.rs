@@ -13,6 +13,7 @@ pub mod colibri;
 pub mod poll;
 mod rpg;
 mod social;
+pub mod warrant;
 pub mod worker;
 
 pub use account::{identity, oauth, plc, session};
@@ -23,7 +24,7 @@ pub use social::{
     servers, skins, triggers,
 };
 
-pub use config::{Config, ImagePostTarget};
+pub use config::{Config, ImagePostTarget, WarrantIssuer};
 pub use error::AtmosphericError;
 use serde::{Deserialize, Serialize};
 
@@ -345,6 +346,10 @@ pub enum Command {
     /// PDS and verify its signature and structure. The subject is a DID or a
     /// handle; the read is unauthenticated — works logged out.
     FetchPoll { subject: String },
+    /// Read a player's active cosmetic warrants (#192) from the pinned
+    /// issuers in config, verifying each signature before showing a line.
+    /// The subject is a DID or a handle; the read is unauthenticated.
+    FetchWarrants { subject: String },
     /// Open a Counting Stones poll (#193). `poll_id` is a caller-chosen local
     /// key (any short non-empty token); the worker keeps the ballot box in
     /// memory. One DID gets one vote, resolved from the player's identity link.
@@ -568,6 +573,14 @@ pub enum Event {
         // Boxed: PollDigest carries the full typed record.
         poll: Box<Option<poll::digest::PollDigest>>,
     },
+    /// A player's active cosmetic warrants (#192): the resolved DID, the PDS
+    /// they were read from, and the verified name-plate lines (`None` when no
+    /// issuers are configured or the repo has no valid warrants).
+    WarrantResult {
+        subject: String,
+        via: String,
+        warrants: Option<Vec<warrant::digest::WarrantLine>>,
+    },
     /// A Counting Stones poll was opened (#193): the local id, question,
     /// choices and close time.
     PollOpened {
@@ -704,6 +717,13 @@ mod tests {
             })
             .unwrap(),
             r#"{"FetchPoll":{"subject":"did:plc:x"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Command::FetchWarrants {
+                subject: "did:plc:x".into()
+            })
+            .unwrap(),
+            r#"{"FetchWarrants":{"subject":"did:plc:x"}}"#
         );
         let summary = records::SnapshotSummary {
             username: "Steve".into(),
@@ -1124,6 +1144,15 @@ mod tests {
             })
             .unwrap(),
             r#"{"PollResult":{"subject":"did:plc:x","via":"https://pds.example","poll":null}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Event::WarrantResult {
+                subject: "did:plc:x".into(),
+                via: "https://pds.example".into(),
+                warrants: None,
+            })
+            .unwrap(),
+            r#"{"WarrantResult":{"subject":"did:plc:x","via":"https://pds.example","warrants":null}}"#
         );
         assert_eq!(
             serde_json::to_string(&Event::JoinGateState {

@@ -49,6 +49,18 @@ pub struct TrustedServerKey {
     pub public_key: String,
 }
 
+/// One pinned warrant issuer (#192): a signed cosmetic credential from this
+/// DID, in this collection, is accepted only when it verifies with this exact
+/// Ed25519 public key (base64 of the X.509/SPKI encoding). Records from any
+/// other DID, collection or key are ignored, so self-attested ranks are
+/// worthless.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WarrantIssuer {
+    pub did: String,
+    pub collection: String,
+    pub public_key: String,
+}
+
 // `#[serde(default)]` keeps settings files written by older versions (which
 // lack the newer fields) loadable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,6 +212,11 @@ pub struct Config {
     /// How many new RPG discoveries to publish per scan (M63). The rest are
     /// skipped until a later scan; atpcraft defaults to 10.
     pub rpg_items_max_per_scan: usize,
+    /// Pinned issuers of cosmetic warrant credentials (#192). A rank is shown
+    /// only when signed by one of these DIDs with its pinned key, in its pinned
+    /// collection. Empty by default: nothing is trusted until configured.
+    #[serde(default)]
+    pub warrant_issuers: Vec<WarrantIssuer>,
 }
 
 impl Default for Config {
@@ -250,6 +267,7 @@ impl Default for Config {
             colibri_server_events_fallback_enabled: true,
             rpg_items_enabled: false,
             rpg_items_max_per_scan: 10,
+            warrant_issuers: Vec::new(),
         }
     }
 }
@@ -336,6 +354,7 @@ mod tests {
             colibri_server_events_fallback_enabled: false,
             rpg_items_enabled: true,
             rpg_items_max_per_scan: 3,
+            warrant_issuers: Vec::new(),
         };
         let raw = config.to_json().unwrap();
         let back = Config::from_json(&raw).unwrap();

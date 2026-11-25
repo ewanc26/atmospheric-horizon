@@ -42,7 +42,7 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
     if parts.next() != Some("atmospheric") {
         return;
     }
-    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric player-data capture|restore [player], /atmospheric rpg discover [player], /atmospheric skin [path] [default|slim], /atmospheric skin upload, /atmospheric server, /atmospheric server-card publish, /atmospheric card-of <did|handle>, /atmospheric poll open|vote|close|receipt|result, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric colibri start|stop|reconnect|status|send <text>, /atmospheric link [code], /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric profile-set <name|description|pronouns|avatar|banner> [text|path], /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric records <did|handle> <collection>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric labeler-identity [status|request|submit <token>], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
+    let usage = "atmospheric: try /atmospheric login [handle], /atmospheric post <text>, /atmospheric chat <text>, /atmospheric snapshot, /atmospheric player-data capture|restore [player], /atmospheric rpg discover [player], /atmospheric skin [path] [default|slim], /atmospheric skin upload, /atmospheric server, /atmospheric server-card publish, /atmospheric card-of <did|handle>, /atmospheric poll open|vote|close|receipt|result, /atmospheric warrants <did|handle>, /atmospheric server-account login <handle>|status|logout|publish, /atmospheric colibri start|stop|reconnect|status|send <text>, /atmospheric link [code], /atmospheric server-of <did|handle>, /atmospheric profile <did|handle>, /atmospheric profile-set <name|description|pronouns|avatar|banner> [text|path], /atmospheric follows|followers|blocks|mutes <did|handle>, /atmospheric follow|unfollow|block|unblock|mute|unmute <did|handle>, /atmospheric records <did|handle> <collection>, /atmospheric reply <at-uri> <text>, /atmospheric like <at-uri>, /atmospheric repost <at-uri>, /atmospheric list <list>, /atmospheric gate <list> <did|handle>, /atmospheric labels <subject>, /atmospheric labeler <did> [subject], /atmospheric labeler-identity [status|request|submit <token>], /atmospheric player <did|handle>, /atmospheric skin-of <did|handle>, /atmospheric chat-of <did|handle>, /atmospheric logout or /atmospheric notifications";
     let Some(rest) = parts.next().map(str::trim).filter(|s| !s.is_empty()) else {
         *ran = true;
         game.native_chat(usage);
@@ -393,6 +393,15 @@ fn atmospheric_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mu
             _ => game.native_chat(
                 "atmospheric: /atmospheric poll open <id> <closes-at> <question>|<choice>|… | vote <id> <choice> | close <id> | receipt <id> | result <did|handle>",
             ),
+        }
+    } else if rest == "warrants" || rest.starts_with("warrants ") {
+        let subject = rest.strip_prefix("warrants").unwrap_or("").trim();
+        *ran = true;
+        if subject.is_empty() {
+            game.native_chat("atmospheric: /atmospheric warrants <did|handle>");
+        } else {
+            m::fetch_warrants(subject);
+            game.native_chat("atmospheric: reading cosmetic warrants…");
         }
     } else if rest == "list" || rest.starts_with("list ") {
         let reference = rest.strip_prefix("list").unwrap_or("").trim();
