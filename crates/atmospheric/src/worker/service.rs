@@ -464,6 +464,25 @@ fn server_profile_name(config: &Config) -> String {
     }
 }
 
+/// The pinned Horizon revision from the committed compatibility manifest
+/// (M69). It is the single validated build target, so the card always names the
+/// exact engine this worker was cut against. A malformed manifest yields no
+/// revision rather than an unverifiable one.
+fn pinned_engine_revision() -> Option<String> {
+    const COMPAT: &str = include_str!("../../../../compatibility.json");
+    let value: serde_json::Value = serde_json::from_str(COMPAT).ok()?;
+    value
+        .get("horizon_revision")?
+        .as_str()
+        .filter(|revision| {
+            revision.len() == card::record::CARD_REVISION_LEN
+                && revision
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+        .map(str::to_owned)
+}
+
 /// The server profile's capabilities (M49): an explicit override wins;
 /// otherwise derive the features that are actually implemented. `skin-sync`
 /// is always present (M9/M14); `join-gate` appears when the gate is armed;
@@ -1710,9 +1729,12 @@ impl Worker {
             ));
         };
         let config = self.load_config().unwrap_or_default();
-        // Packs and the pinned engine revision have no game-side source
-        // yet: the wire command reports only the population counts, so the
-        // card publishes without both until the runtime command grows.
+        // The pinned engine revision is a compile-time fact from
+        // compatibility.json, so the card always advertises the exact Horizon
+        // build this worker was cut against. Packs are declared by the game's
+        // native mod list and need Horizon's signed-registry lookup (a later
+        // slice); until then the card honestly declares none rather than
+        // claiming unverified checksums.
         let record = card::record::CardRecord {
             server_name: server_profile_name(&config),
             address: config.server_address.clone(),
@@ -1720,7 +1742,7 @@ impl Worker {
             players_max,
             game_version: config.game_version.clone(),
             engine: "horizon".into(),
-            engine_revision: None,
+            engine_revision: pinned_engine_revision(),
             packs: Vec::new(),
             conduct: (!config.server_website.trim().is_empty())
                 .then(|| config.server_website.clone()),
@@ -5918,6 +5940,20 @@ mod tests {
         assert_eq!(server_profile_name(&config), "Custom Client");
         config.server_name = "My Server".into();
         assert_eq!(server_profile_name(&config), "My Server");
+    }
+
+    #[test]
+    fn pinned_engine_revision_matches_the_compatibility_manifest() {
+        let revision = pinned_engine_revision().expect("the committed manifest has a revision");
+        assert_eq!(revision.len(), card::record::CARD_REVISION_LEN);
+        assert!(
+            revision
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../compatibility.json")).unwrap();
+        assert_eq!(revision, manifest["horizon_revision"].as_str().unwrap());
     }
 
     #[test]
