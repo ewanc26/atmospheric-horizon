@@ -40,6 +40,43 @@ grant with the wrong scope. Keep that key private, and keep grant lifetimes
 short: a leaked grant is a bearer token until it expires, and compromise of an
 allowlisted DID's PDS key is effectively admin takeover.
 
+## Continuity Watchman (#190): DID-keyed observation in the sidecar
+
+The Continuity Watchman foundation is another additive layer in the optional
+`atmospheric-server` process. It is default-off: with
+`ATMOSPHERIC_SERVER_CONTINUITY_ENABLED` unset the six `/v1/continuity` routes
+return 503 and no PLC client is started. When enabled, the sidecar tails
+`wss://<plc>/export/stream`, pages `GET <plc>/export?after=<seq>&count=1000`
+after a stale cursor, and independently re-resolves each watched DID on a
+jittered poll. The stream is a latency optimisation, not a correctness
+dependency: a lost or unavailable WebSocket still leaves the poll observing
+PDS migrations, handle changes and key rotations.
+
+All state is DID-bound and in memory. A watch request accepts only a `did:plc`;
+the linked Minecraft UUID is looked up from the existing `links.json` map, never
+from a PLC claim. Snapshots keep PLC/DID-document handle claims separate from
+`verified_handles`, which the poll fills only after bidirectional resolution
+back to the same DID. PDS endpoints are refreshed from the DID document's
+`#atproto_pds` service. Events carry the previous and current snapshot, the PLC
+sequence and CID, and a bounded change list (`pds_migration`, `handle_change`,
+`key_rotation`, `signing_key_change`, `tombstone`, `restored`). The watch list,
+snapshots, events, cursor and verification results are lost on restart; no new
+file is written and no credential leaves the process.
+
+The PLC directory is a trusted third party for ordering but not a source of
+identity truth, so both the stream and all resolution honor
+`ATMOSPHERIC_SERVER_CONTINUITY_PLC_DIRECTORY` for mirrors. Watch/unwatch uses
+the existing link token (or static admin token) on this repository's `/v1`
+surface, not Horizon's `/api/v1`; reads are public because they expose only
+public PLC observations. The injected `runtime.rs`, game/worker JSON channel,
+join gate, label triggers and native export are untouched.
+
+This PR is the sidecar observation foundation only. The rest of #190 — rebinding
+DID-keyed game state, retrying failed writes, inline notices to the migrating
+player and the paired client HUD line — needs game/native capabilities and is
+explicitly deferred. No Horizon hook, `players`/`storage`/`network` API or
+client HUD wire field is introduced here.
+
 ## The two client layers
 
 ```text

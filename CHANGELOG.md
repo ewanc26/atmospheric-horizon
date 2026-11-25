@@ -12,6 +12,21 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+### Added
+
+- **Continuity Watchman (#190, experimental sidecar foundation).** The optional
+  `atmospheric-server` process can now tail the public PLC export stream,
+  recover with HTTP export pages after `OutdatedCursor`, and independently
+  re-resolve watched DIDs on a jittered poll. DID-keyed snapshots record PDS
+  endpoints, claimed and bidirectionally verified handles, rotation keys and
+  signing methods; bounded events report migrations, handle changes, key
+  rotations, tombstones and restores. New token-gated watch/unwatch routes and
+  public status, snapshot and event routes live on this repository's `/v1`
+  surface. State is in memory only, watches accept DIDs rather than handles,
+  and the PLC mirror, poll and jitter are configurable. The game-side rebind,
+  failed-write retry queue, player notice and paired client HUD from #190 are
+  not part of this slice.
+
 ## [0.11.0] — 2026-11-25
 
 Eleventh tagged release. Adds Operator's Warrant: experimental, additive DID-authenticated admin grants in the optional `atmospheric-server` sidecar, with signed audit receipts and no change to Horizon's API or native/client halves.
