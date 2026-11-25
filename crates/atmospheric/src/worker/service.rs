@@ -14,7 +14,7 @@ use crate::{
     graph, identity, interactions, labeler,
     notifications::{self, SeenCursor},
     oauth::{self, DpopState, SharedDpop},
-    plc,
+    plc, poll,
     presence::{self, PlayerDigest},
     profiles,
     records::{self, SnapshotRecord},
@@ -317,6 +317,33 @@ enum OAuthTarget {
 }
 
 /// Cached member DIDs for one list/AppView pair (M52).
+/// An in-memory Counting Stones ballot box (#193). Kept only in the worker:
+/// the game never sees a private ballot or the signing key, and receipts are
+/// handed back one at a time to the linked DID that cast them.
+struct PollState {
+    question: String,
+    options: Vec<String>,
+    closes_at: String,
+    ballots: Vec<poll::ballot::Ballot>,
+    voters: HashSet<String>,
+    receipts: Vec<poll::ballot::Receipt>,
+    published_uri: Option<String>,
+}
+
+impl PollState {
+    fn new(question: String, options: Vec<String>, closes_at: String) -> Self {
+        Self {
+            question,
+            options,
+            closes_at,
+            ballots: Vec::new(),
+            voters: HashSet::new(),
+            receipts: Vec::new(),
+            published_uri: None,
+        }
+    }
+}
+
 struct ListCache {
     appview: String,
     list: String,
@@ -380,6 +407,8 @@ struct Worker {
     signing_key: Option<SigningKey>,
     /// The last published snapshot version (anti-rollback), persisted.
     snapshot_version: i64,
+    /// Open/published Counting Stones polls (#193), keyed by the caller's id.
+    polls: HashMap<String, PollState>,
     /// The shared DPoP state (OAuth mode): installed into every agent built
     /// here, and updated when the access token is refreshed.
     dpop: SharedDpop,
@@ -576,6 +605,7 @@ impl Worker {
             identifier: String::new(),
             signing_key: None,
             snapshot_version,
+            polls: HashMap::new(),
             dpop: oauth::new_shared_dpop(),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
@@ -985,6 +1015,53 @@ impl Worker {
                         card: Box::new(card),
                     }),
                     Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::FetchPoll { subject } => {
+                // A public PDS read: works logged out, no token refresh.
+                match self.fetch_poll(&subject).await {
+                    Ok((subject, via, poll)) => self.emit(Event::PollResult {
+                        subject,
+                        via,
+                        poll: Box::new(poll),
+                    }),
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
+            Command::OpenPoll {
+                poll_id,
+                question,
+                options,
+                closes_at,
+            } => self.open_poll(&poll_id, question, options, &closes_at),
+            Command::VotePoll {
+                poll_id,
+                player_uuid,
+                player_name,
+                choice,
+            } => {
+                if let Err(error) = self
+                    .vote_poll(&poll_id, &player_uuid, &player_name, choice)
+                    .await
+                {
+                    self.fail(error.to_string());
+                }
+            }
+            Command::ClosePoll { poll_id } => {
+                if let Err(error) = self.close_poll(&poll_id).await {
+                    self.fail(error.to_string());
+                }
+            }
+            Command::PollReceipt {
+                poll_id,
+                player_uuid,
+                player_name,
+            } => {
+                if let Err(error) = self
+                    .poll_receipt(&poll_id, &player_uuid, &player_name)
+                    .await
+                {
+                    self.fail(error.to_string());
                 }
             }
             Command::FetchGraph { kind, subject } => {
@@ -2398,6 +2475,250 @@ impl Worker {
             .map(|since| since.as_secs() as i64)
             .unwrap_or_default();
         card::digest::fetch_card(&self.http, &self.resolver, subject, now_epoch).await
+    }
+
+    /// Read and verify a published Counting Stones tally (#193): a public
+    /// read against the subject's own PDS, so it works logged out. The
+    /// signature verdict is self-contained in the record's public key.
+    async fn fetch_poll(
+        &self,
+        subject: &str,
+    ) -> crate::error::Result<(String, String, Option<poll::digest::PollDigest>)> {
+        poll::digest::fetch_poll(&self.http, &self.resolver, subject).await
+    }
+
+    /// Resolve a player's linked DID through the M35 identity service. Unlike
+    /// `linked_self`, a poll accepts any linked DID — the voter does not have
+    /// to be the account this worker is logged in as.
+    async fn linked_did(
+        &self,
+        player_uuid: &str,
+        player_name: &str,
+    ) -> crate::error::Result<String> {
+        let config = self.load_config()?;
+        if config.server_api_url.trim().is_empty() {
+            return Err(AtmosphericError::Message(
+                "server_api_url is not configured; voting needs the identity service link map"
+                    .into(),
+            ));
+        }
+        let Some(link) =
+            identity::fetch_link(&self.http, &config.server_api_url, player_uuid).await?
+        else {
+            return Err(AtmosphericError::Message(format!(
+                "{player_name} is not linked to a Bluesky account; run /atmospheric link first"
+            )));
+        };
+        Ok(link.did)
+    }
+
+    /// Open a Counting Stones ballot box (#193). Validation happens before
+    /// any state is stored, so a malformed question or close time cannot open
+    /// a poll that later fails at publication.
+    fn open_poll(
+        &mut self,
+        poll_id: &str,
+        question: String,
+        options: Vec<String>,
+        closes_at: &str,
+    ) {
+        if poll_id.is_empty()
+            || poll_id.len() > 64
+            || !poll_id
+                .bytes()
+                .all(|b| matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~'))
+        {
+            self.fail("poll id must be 1–64 record-key characters (letters, digits, -_.~)");
+            return;
+        }
+        if self.polls.contains_key(poll_id) {
+            self.fail(format!("poll {poll_id} is already open or published"));
+            return;
+        }
+        if let Err(reason) = crate::poll::record::validate_poll_spec(&question, &options, closes_at)
+        {
+            self.fail(format!("the poll is not valid: {reason}"));
+            return;
+        }
+        let closes_epoch = card::digest::epoch_seconds(closes_at).unwrap_or_default();
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_secs() as i64)
+            .unwrap_or_default();
+        if closes_epoch <= now_epoch {
+            self.fail("the poll must close in the future");
+            return;
+        }
+        self.polls.insert(
+            poll_id.to_string(),
+            PollState::new(question.clone(), options.clone(), closes_at.to_string()),
+        );
+        self.emit(Event::PollOpened {
+            poll_id: poll_id.to_string(),
+            question,
+            options,
+            closes_at: closes_at.to_string(),
+        });
+    }
+
+    /// Cast one vote in an open poll (#193). One linked DID gets one vote;
+    /// the private salt is drawn here in the worker and never crosses to the
+    /// game. The event names only the voter, never the choice.
+    async fn vote_poll(
+        &mut self,
+        poll_id: &str,
+        player_uuid: &str,
+        player_name: &str,
+        choice: u16,
+    ) -> crate::error::Result<()> {
+        let state = self
+            .polls
+            .get(poll_id)
+            .ok_or_else(|| AtmosphericError::Message(format!("no poll named {poll_id}")))?;
+        if state.published_uri.is_some() {
+            return Err(AtmosphericError::Message(format!(
+                "poll {poll_id} is already closed"
+            )));
+        }
+        let closes_epoch = card::digest::epoch_seconds(&state.closes_at).unwrap_or_default();
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_secs() as i64)
+            .unwrap_or_default();
+        if closes_epoch <= now_epoch {
+            return Err(AtmosphericError::Message(format!(
+                "poll {poll_id} has closed"
+            )));
+        }
+        if usize::from(choice) >= state.options.len() {
+            return Err(AtmosphericError::Message(format!(
+                "choice {choice} is outside the poll's {} options",
+                state.options.len()
+            )));
+        }
+        let did = self.linked_did(player_uuid, player_name).await?;
+        let state = self
+            .polls
+            .get_mut(poll_id)
+            .expect("the poll is still present");
+        if !state.voters.insert(did.clone()) {
+            return Err(AtmosphericError::Message(format!(
+                "{player_name} has already voted in {poll_id}"
+            )));
+        }
+        let ballot =
+            poll::ballot::Ballot::new(poll_id, &did, choice, poll::ballot::Ballot::fresh_salt());
+        state.ballots.push(ballot);
+        self.emit(Event::PollVote {
+            poll_id: poll_id.to_string(),
+            did,
+        });
+        Ok(())
+    }
+
+    /// Close a poll and publish its signed tally in one record write (#193).
+    /// The signing key is the worker's persisted endorsement key; the game
+    /// never sees it. Receipts stay in the worker for per-voter retrieval.
+    async fn close_poll(&mut self, poll_id: &str) -> crate::error::Result<()> {
+        let state = self
+            .polls
+            .get(poll_id)
+            .ok_or_else(|| AtmosphericError::Message(format!("no poll named {poll_id}")))?;
+        if state.published_uri.is_some() {
+            return Err(AtmosphericError::Message(format!(
+                "poll {poll_id} is already published"
+            )));
+        }
+        if state.ballots.is_empty() {
+            return Err(AtmosphericError::Message(format!(
+                "poll {poll_id} has no votes to publish"
+            )));
+        }
+        if self.agent.is_none() || self.did.is_none() {
+            return Err(AtmosphericError::NotLoggedIn);
+        }
+        // Clone the immutable inputs so the agent borrow ends before the
+        // mutable borrow that stores the receipts.
+        let state = self.polls.get(poll_id).expect("the poll is still present");
+        let question = state.question.clone();
+        let options = state.options.clone();
+        let closes_at = state.closes_at.clone();
+        let ballots = state.ballots.clone();
+        let key = self.endorsement_key()?;
+        let now = atrium_api::types::string::Datetime::now();
+        let created_at = serde_json::to_value(&now)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let (record, receipts) =
+            poll::ballot::publish(question, options, closes_at, created_at, &ballots, &key)?;
+        if let Err(reason) = record.validate_structure() {
+            return Err(AtmosphericError::Message(format!(
+                "the poll tally is not publishable: {reason}"
+            )));
+        }
+        let (Some(agent), Some(account_did)) = (&self.agent, self.did.clone()) else {
+            return Err(AtmosphericError::NotLoggedIn);
+        };
+        let mut value = serde_json::to_value(&record)?;
+        value["$type"] = serde_json::json!(poll::record::POLL_COLLECTION);
+        let uri = actions::create_record_json(
+            agent,
+            &account_did,
+            poll::record::POLL_COLLECTION,
+            Some(poll_id),
+            value,
+        )
+        .await?;
+        let state = self
+            .polls
+            .get_mut(poll_id)
+            .expect("the poll is still present");
+        state.receipts = receipts;
+        state.published_uri = Some(uri.clone());
+        self.emit(Event::PollPublished {
+            poll_id: poll_id.to_string(),
+            uri,
+            record: Box::new(record),
+        });
+        Ok(())
+    }
+
+    /// Return only the requesting voter's private receipt (#193). A receipt
+    /// carries their salted choice, so handing every receipt to every player
+    /// would break ballot secrecy even though the PDS never sees one.
+    async fn poll_receipt(
+        &mut self,
+        poll_id: &str,
+        player_uuid: &str,
+        player_name: &str,
+    ) -> crate::error::Result<()> {
+        let state = self
+            .polls
+            .get(poll_id)
+            .ok_or_else(|| AtmosphericError::Message(format!("no poll named {poll_id}")))?;
+        let published = state.published_uri.is_some();
+        let did = self.linked_did(player_uuid, player_name).await?;
+        if !published {
+            return Err(AtmosphericError::Message(format!(
+                "poll {poll_id} has not published a tally yet"
+            )));
+        }
+        let state = self.polls.get(poll_id).expect("the poll is still present");
+        let receipt = state
+            .receipts
+            .iter()
+            .find(|receipt| receipt.did == did)
+            .ok_or_else(|| {
+                AtmosphericError::Message(format!("{player_name} did not vote in {poll_id}"))
+            })?
+            .clone();
+        self.emit(Event::PollReceipt {
+            poll_id: poll_id.to_string(),
+            did,
+            receipt: Box::new(receipt),
+        });
+        Ok(())
     }
 
     /// Read one of an account's public social graphs (M20): follows,
@@ -5051,6 +5372,137 @@ mod tests {
         assert_eq!(body["repo"], "did:plc:stubuser");
         assert_eq!(body["record"]["$type"], "app.bsky.feed.post");
         assert_eq!(body["record"]["text"], "hello from the worker test");
+    }
+
+    #[test]
+    fn counting_stones_poll_publishes_a_signed_tally_and_private_receipts() {
+        let pds = StubPds::start(false);
+        let dir = temp_dir("counting-stones");
+        let mut config = test_config(pds.url.clone());
+        config.server_api_url = pds.url.clone();
+        write_config(&dir, &config);
+
+        let (command_tx, event_rx, handle) = spawn_worker(dir);
+        command_tx.send(Command::Login).unwrap();
+        let _ = wait_for(&event_rx, |e| {
+            matches!(e, Event::Session(SessionState::LoggedIn { .. }))
+        });
+
+        command_tx
+            .send(Command::OpenPoll {
+                poll_id: "weekly".into(),
+                question: "Where to next?".into(),
+                options: vec!["Nether".into(), "End".into()],
+                closes_at: "2099-01-01T00:00:00Z".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::PollOpened { .. })) {
+            Event::PollOpened { poll_id, .. } => assert_eq!(poll_id, "weekly"),
+            other => panic!("expected PollOpened, got {other:?}"),
+        }
+
+        // Two distinct linked DIDs vote; the third command is a duplicate.
+        for (uuid, name, choice) in [
+            ("00000000-0000-4000-8000-0000000000a1", "Remote", 0),
+            ("00000000-0000-4000-8000-0000000000a3", "Alice", 1),
+        ] {
+            command_tx
+                .send(Command::VotePoll {
+                    poll_id: "weekly".into(),
+                    player_uuid: uuid.into(),
+                    player_name: name.into(),
+                    choice,
+                })
+                .unwrap();
+            match wait_for(&event_rx, |e| matches!(e, Event::PollVote { .. })) {
+                Event::PollVote { poll_id, did } => {
+                    assert_eq!(poll_id, "weekly");
+                    assert!(did.starts_with("did:plc:"));
+                }
+                other => panic!("expected PollVote, got {other:?}"),
+            }
+        }
+        command_tx
+            .send(Command::VotePoll {
+                poll_id: "weekly".into(),
+                player_uuid: "00000000-0000-4000-8000-0000000000a1".into(),
+                player_name: "Remote".into(),
+                choice: 1,
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("already voted"), "{message}")
+            }
+            other => panic!("expected Failed on a duplicate vote, got {other:?}"),
+        }
+
+        command_tx
+            .send(Command::ClosePoll {
+                poll_id: "weekly".into(),
+            })
+            .unwrap();
+        let record = match wait_for(&event_rx, |e| matches!(e, Event::PollPublished { .. })) {
+            Event::PollPublished { uri, record, .. } => {
+                assert!(uri.contains("click.croft.atmospheric.poll.result"), "{uri}");
+                record.verify().unwrap();
+                assert_eq!(record.tally, vec![1, 1]);
+                assert_eq!(record.participants.len(), 2);
+                *record
+            }
+            other => panic!("expected PollPublished, got {other:?}"),
+        };
+
+        // Receipts go only to the requesting voter; the published record has
+        // no salt, choice index or nullifier that could pair a DID to a vote.
+        command_tx
+            .send(Command::PollReceipt {
+                poll_id: "weekly".into(),
+                player_uuid: "00000000-0000-4000-8000-0000000000a1".into(),
+                player_name: "Remote".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::PollReceipt { .. })) {
+            Event::PollReceipt { receipt, .. } => receipt.verify(&record).unwrap(),
+            other => panic!("expected PollReceipt, got {other:?}"),
+        }
+        command_tx
+            .send(Command::PollReceipt {
+                poll_id: "weekly".into(),
+                player_uuid: "00000000-0000-4000-8000-0000000000a2".into(),
+                player_name: "Unlinked".into(),
+            })
+            .unwrap();
+        match wait_for(&event_rx, |e| matches!(e, Event::Failed { .. })) {
+            Event::Failed { message } => {
+                assert!(message.contains("not linked"), "{message}")
+            }
+            other => panic!("expected Failed for an unlinked voter, got {other:?}"),
+        }
+
+        command_tx.send(Command::Shutdown).unwrap();
+        handle.join().unwrap();
+
+        let requests = pds.requests();
+        let writes: Vec<&Captured> = requests
+            .iter()
+            .filter(|request| request.path == "/xrpc/com.atproto.repo.createRecord")
+            .collect();
+        assert_eq!(writes.len(), 1, "the tally is one record write");
+        let body = &writes[0].body;
+        assert!(body.contains(crate::poll::record::POLL_COLLECTION));
+        for private in ["salt", "nullifier", "\"choice\"", "\"receipt\""] {
+            assert!(
+                !body.contains(private),
+                "published a private field: {private}"
+            );
+        }
+        let json: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            json["record"]["$type"],
+            crate::poll::record::POLL_COLLECTION
+        );
+        assert_eq!(json["rkey"], "weekly");
     }
 
     #[test]
