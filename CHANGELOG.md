@@ -12,6 +12,10 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+### Changed
+
+- **ADR-002 records the native server export (#209).** The architecture guide now records that Horizon already ships third-party native mods and the trusted standalone dedicated-server export, superseding ADR-001's upstream blocker. The `route-3`/`blocked-upstream` labels are removed from the parked issues, the README no longer describes registry distribution as blocked upstream, and the distinction between today's sidecar build and the future native server half is explicit. No runtime behaviour changes.
+
 ## [0.7.0] — 2026-11-25
 
 Seventh tagged release. Adds configurable Bluesky, Spark and Grain image-post

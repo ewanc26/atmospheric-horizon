@@ -2,6 +2,11 @@
 
 How atmospheric-horizon is put together, for reviewers, contributors, and coding agents. Start with `AGENTS.md` for the working rules.
 
+## Architecture decision records
+
+- **ADR-001 — native server half ([#208](https://github.com/ewanc26/atmospheric-horizon/issues/208), superseded).** Chose a native, unsandboxed server half for all server-side AT Protocol egress and server-DID custody, but assumed Horizon had no native server path. The decision to own server-side egress in-process stands; the premise about upstream support does not.
+- **ADR-002 — adopt the existing native server export ([#209](https://github.com/ewanc26/atmospheric-horizon/issues/209)).** Verified against the fork's `db7d9029` sync that `horizon-launcher native-build FOLDER --server-output DIR --version TAG --trust-native-code` already exports a standalone dedicated-server engine with the pinned prebuilt SDK, an explicit native-code trust gate, `native-mods.json` provenance, `engine.path` deployment and rollback, server-only hooks and `Dist::DedicatedServer`, plus `native-mod` registry entries identified by source repo with SHA-256-pinned downloads and revocation. No upstream work is needed, and the parked server-publishing issues are schedulable. The target remains Route 3; the shipped code still uses the M17 sidecar until the native server half lands. Route 2 client-edge verification remains the degraded path when no trusted export is present, and the client native half is unchanged.
+
 ## The two client layers
 
 ```text

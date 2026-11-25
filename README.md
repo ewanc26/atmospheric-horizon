@@ -19,7 +19,7 @@ This is the successor to [jollywhoppers-socialsync](https://github.com/ewanc26/j
 
 Shipped in v0.7.0: configurable Bluesky/Spark/Grain image posts (#183), on top of v0.6.0's achievement announcements and automatic F2 screenshot posting (#181/#182), v0.5.0's automatic player-data sync, liveness-checked server cards and current-major crypto dependencies with unchanged wire formats, itself everything in v0.4.0 — itself everything in v0.3.1 (OAuth and app-password login, text and screenshot posts, notifications, atpcraft-compatible chat, signed snapshots and skins, a server profile, record/label/presence/chat/profile reads, social-graph reads and writes, reply/like/repost, a separate server account, the Colibri bridge, the server-side identity service with in-game and browser linking, and the online whitelist sweep) plus generic record browsing, linked-player names, hosted lexicons, proactive token refresh and automatic server-profile publish, a list-member cache, configurable OAuth scope, grants and browser-link lifetime, a complete labeler, player-data aspect capture and RPG item discovery, browser skin upload, and profile editing with avatar and banner uploads (M23–M66).
 
-Not yet: launcher registry distribution, which waits on third-party native-mod support upstream ([#28](https://github.com/ewanc26/atmospheric-horizon/issues/28)); full core-NBT restore, which needs a complete round-trip player-compound setter the pinned Horizon native API does not expose; in-game skin application, which needs a texture-signing/relay helper the pinned Horizon native API does not expose ([#113](https://github.com/ewanc26/atmospheric-horizon/issues/113)). The separate server account (M25), the Colibri bridge (M26–M34), the shared UUID-to-DID map (M35–M42), the labeler (M56–M62) and the profile/identity services (M63–M66) are the foundations those milestones build on.
+Not yet: launcher registry submission, which is no longer blocked by upstream — current Horizon supports third-party native mods and a trusted native server export, per ADR-002 ([#209](https://github.com/ewanc26/atmospheric-horizon/issues/209)); the native server half that uses that export for server-DID egress; full core-NBT restore, which needs a complete round-trip player-compound setter the pinned Horizon native API does not expose; in-game skin application, which needs a texture-signing/relay helper the pinned Horizon native API does not expose ([#113](https://github.com/ewanc26/atmospheric-horizon/issues/113)). The separate server account (M25), the Colibri bridge (M26–M34), the shared UUID-to-DID map (M35–M42), the labeler (M56–M62) and the profile/identity services (M63–M66) are the foundations those milestones build on.
 
 ## Features
 
@@ -54,9 +54,9 @@ Not yet: launcher registry distribution, which waits on third-party native-mod s
 
 ## Install
 
-The published mod installs through the Horizon launcher's Mods page once it is in the [horizon-mods registry](https://playhorizon.dev/mods). Native mods are built by the launcher against the pinned revisions in `compatibility.json`.
+The launcher supports third-party native mods and a trusted standalone dedicated-server export (ADR-002, [#209](https://github.com/ewanc26/atmospheric-horizon/issues/209)); native mods are built against the pinned revisions in `compatibility.json`. This mod is not yet in the [horizon-mods registry](https://playhorizon.dev/mods), and the native server half that would use the server export is still future work, so the shipped build uses the worker sidecar below.
 
-Until then, install the sidecar by hand:
+Install the sidecar by hand until a registry entry and native server half are available:
 
 1. Download the archive for your OS from [Releases](https://github.com/ewanc26/atmospheric-horizon/releases) — `atmospheric-worker-vX.Y.Z-linux-x86_64.tar.gz`, `...-macos-aarch64.tar.gz` or `...-windows-x86_64.zip` — plus `atmospheric-horizon-mixins-vX.Y.Z.tar.gz` and `SHA256SUMS`. Check the hash.
 2. Put `atmospheric-worker` next to the game executable, or set `ATMOSPHERIC_WORKER_BIN` to its path.
@@ -293,7 +293,7 @@ M35 supplies the mapping, M36 lets a player claim a link in game, M37 checks a l
 
 ## Roadmap
 
-M1–M21 shipped through v0.1.0 and v0.2.0, M23 (social-graph writes) through M42 (online whitelist sweep) in v0.3.1, and M44 (generic record browser) through M66 (profile avatar and banner uploads) in v0.4.0; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is distribution, automatic cross-server sync, core player aspects, in-game skin application, and the next read/write surfaces.
+M1–M21 shipped through v0.1.0 and v0.2.0, M23 (social-graph writes) through M42 (online whitelist sweep) in v0.3.1, M44 (generic record browser) through M66 (profile avatar and banner uploads) in v0.4.0, and the automatic post and image-target work through v0.7.0; the release history is in [CHANGELOG.md](CHANGELOG.md). What remains is registry submission (no longer blocked upstream, per ADR-002), the native server half that uses the trusted server export, automatic cross-server sync, core player aspects, in-game skin application, and the next read/write surfaces.
 
 ### Porting atpcraft
 
