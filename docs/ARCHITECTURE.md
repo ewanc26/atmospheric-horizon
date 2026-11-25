@@ -1543,7 +1543,7 @@ wire-behaviour reference.
 
 The server card is a liveness-checked server manifest the **server
 account** (M25) republishes under one fixed record key
-(`club.atmospheric.server.card` at rkey `self`), so a freshly stamped record
+(`click.croft.atmospheric.server.card` at rkey `self`), so a freshly stamped record
 is evidence the server is still publishing and every field stays plainly
 attributable to its author: the card carries no signature block (repo
 authentication only), and the liveness verdict says when the author last
@@ -1552,14 +1552,13 @@ republished, never that anyone vouched for the fields.
 The milestone has two halves, both in the `card` scope at
 `crates/atmospheric/src/card/`:
 
-- **The typed record (`card::record`).** `CardRecord~/~CardPack` with caps:
+- **The typed record (`card::record`).** `CardRecord`/`CardPack` with caps:
   64-byte names, a 128-byte plain `host[:port]` address, population counts
   capped at 100 000, at most 32 packs each with an https `source` and a
   lower-hex sha-256, and `conduct` restricted to https or at://. `validate()`
-  runs before any publish and its failure message is reported as-is. The
-  collection's authority domain (`club.atmospheric` presumes a domain the
-  author does not hold yet) is an open choice tracked in the issue;
-  changing one constant changes it.
+  runs before any publish and on every read, and its failure message is
+  reported as-is. The collection uses the owner's existing `click.croft`
+  authority namespace; changing it changes the published collection.
 - **The read side (`card::digest`).** `latest()` picks the structurally
   valid record (rkey `self` preferred, otherwise the newest `createdAt`),
   mirroring the M19 pick; `epoch_seconds()` is a dependency-free RFC 3339
