@@ -14,3 +14,4 @@ pub mod challenge;
 pub mod command;
 pub mod grant;
 pub mod nonce;
+pub mod receipt;
