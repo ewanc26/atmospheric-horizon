@@ -14,6 +14,7 @@ pub mod decision;
 pub mod poll;
 mod rpg;
 mod social;
+pub mod standin;
 pub mod warrant;
 pub mod worker;
 
