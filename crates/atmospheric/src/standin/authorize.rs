@@ -149,7 +149,9 @@ fn verify_with_trusted_key(canonical: Vec<u8>, signature: &str, key_b64: &str) -
 
 /// Authorize one exact command line at `now_epoch`.
 ///
-/// `owner_key_b64` and `agent_key_b64` are SPKI base64 keys the caller has
+/// `owner` is the DID of the player whose control socket this doorkeeper
+/// guards; a grant from anyone else is [`DenyReason::BadGrant`], however well
+/// it is signed. `owner_key_b64` and `agent_key_b64` are SPKI base64 keys the caller has
 /// already resolved and trusted for the two DIDs. `grant_rkey` names the grant
 /// record in the owner's repository; signed revocations naming that rkey are
 /// checked. `expected_nonce` is the nonce this doorkeeper issued, and
@@ -157,6 +159,7 @@ fn verify_with_trusted_key(canonical: Vec<u8>, signature: &str, key_b64: &str) -
 /// [`authorize_presented`], which also burns the nonce.
 #[allow(clippy::too_many_arguments)]
 pub fn authorize(
+    owner: &str,
     grant: &AgentGrantRecord,
     owner_key_b64: &str,
     grant_rkey: &str,
@@ -171,7 +174,8 @@ pub fn authorize(
     if class != CommandClass::Delegable {
         return Decision::Deny(class.into());
     }
-    if grant.kind != GrantKind::Grant
+    if grant.owner != owner
+        || grant.kind != GrantKind::Grant
         || grant.validate_structure().is_err()
         || verify_with_trusted_key(grant.canonical_bytes(), &grant.signature, owner_key_b64)
             .is_err()
@@ -229,6 +233,7 @@ pub fn authorize(
 #[allow(clippy::too_many_arguments)]
 pub fn authorize_presented(
     nonces: &mut NonceBook,
+    owner: &str,
     grant: &AgentGrantRecord,
     owner_key_b64: &str,
     grant_rkey: &str,
@@ -242,6 +247,7 @@ pub fn authorize_presented(
         return Decision::Deny(DenyReason::ReplayedNonce);
     }
     authorize(
+        owner,
         grant,
         owner_key_b64,
         grant_rkey,
@@ -264,6 +270,7 @@ mod tests {
     };
 
     const RKEY: &str = "3labcdef";
+    const OWNER: &str = "did:plc:player";
 
     fn now() -> i64 {
         epoch_seconds("2026-11-25T12:00:00.000Z").unwrap()
@@ -317,6 +324,7 @@ mod tests {
         ) -> Decision {
             authorize_presented(
                 &mut self.nonces,
+                OWNER,
                 grant,
                 &self.owner_key_b64,
                 RKEY,
@@ -390,6 +398,7 @@ mod tests {
         for (command, reason) in cases {
             // A broken grant and a mismatched challenge do not mask the reason.
             let decision = authorize(
+                OWNER,
                 &AgentGrantRecord::new(String::new(), String::new(), String::new()),
                 &f.owner_key_b64,
                 RKEY,
@@ -481,6 +490,23 @@ mod tests {
     }
 
     #[test]
+    fn grants_from_another_player_are_rejected_even_when_validly_signed() {
+        let mut f = Fixture::new(&["state"]);
+        let mallory = generate();
+        let mut foreign = f.grant.clone();
+        foreign.owner = "did:plc:mallory".into();
+        foreign.sign(&mallory);
+        foreign.verify().unwrap();
+        // The caller mistakenly trusts the key of the grant's own owner.
+        f.owner_key_b64 = public_key_spki_b64(&mallory.verifying_key());
+        let challenge = f.challenge("did:plc:agent", "state");
+        assert_eq!(
+            f.present(&foreign, &[], &challenge, "state", now()),
+            Decision::Deny(DenyReason::BadGrant)
+        );
+    }
+
+    #[test]
     fn challenges_are_verified_bound_and_short_lived() {
         let mut f = Fixture::new(&["state", "inventory"]);
         let grant = f.grant.clone();
@@ -562,6 +588,7 @@ mod tests {
         let challenge = f.challenge("did:plc:agent", "state");
         assert_eq!(
             authorize(
+                OWNER,
                 &grant,
                 &f.owner_key_b64,
                 RKEY,

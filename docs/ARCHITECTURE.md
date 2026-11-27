@@ -150,8 +150,9 @@ data.
   on the doorkeeper's own issue time and are consumed on the first
   presentation, allowed or denied, so a challenge can never be replayed.
 - `authorize.rs` decides. `authorize_presented` burns the nonce, then checks
-  the command class, the grant's signature against the key the caller trusts
-  for the owner, signed revocations naming the rkey, the grant window, the
+  the command class, that the grant's owner is the player whose socket the
+  doorkeeper guards, the grant's signature against the key the caller trusts
+  for that owner, signed revocations naming the rkey, the grant window, the
   challenge's signature against the key the caller trusts for the agent, its
   freshness, the agent DID, the nonce, the command binding and finally that
   the exact line is granted. Anything else is denied with one of 15 stable
