@@ -114,6 +114,61 @@ or PDS publish is introduced: writing records under the server DID's repository
 and the in-game `/history` receipts need native `players`/`storage`/`network`
 support and remain deferred.
 
+## Stand-In (#206): the local-deny path for agent delegation
+
+Stand-In lets a player delegate a narrow, audited subset of their own
+`horizon-ctl` capabilities to an agent DID. Per ADR-001 (#208) and ADR-002
+(#209), the doorkeeper stays a **local daemon guarding the client control
+socket**; what native server mods make possible is moving grant verification
+and receipt anchoring into the server half. This slice is the part both ADRs
+call orthogonal: the deny-by-default decision itself, as pure logic in
+`crates/atmospheric/src/standin/`. It opens no socket, runs no process,
+resolves no DID, touches no file and adds no wire field, route or stored
+data.
+
+- `command.rs` pins the 114 command names from `docs/horizon-ctl-commands.md`
+  at the Horizon revision in `compatibility.json` (a test fails if the pin
+  moves without regenerating the catalog). An unknown name **fails closed**.
+  Lifecycle, multiplayer, scripting and waits, raw input, recording,
+  benchmarks/tracing, file-writing and settings commands, `command` and every
+  cheat are denied even when a grant lists them; `container` with item
+  arguments is denied as a cheat; `chat`/`type` with any `/`-prefixed word is
+  denied as a hidden server command; any `--confirm…` token is denied. Because
+  `horizon-ctl` splits lines like a shell, a line that is not printable ASCII
+  or contains `"`, `'`, `\` or `#` is rejected as malformed rather than
+  interpreted.
+- `grant.rs` defines `club.atmospheric.agent.grant`: a signed grant from the
+  owner DID to one agent DID for 1–64 distinct, exact, delegable command
+  lines, with a **required** `expiresAt` no more than 24 hours after its start
+  (`notBefore`, or `createdAt`). Missing or unparseable timestamps are
+  inactive. A revocation is a second signed record in the same collection
+  naming the grant's rkey. Records sign their collection NSID.
+- `challenge.rs` defines `club.atmospheric.agent.challenge`: the agent signs
+  its DID, the doorkeeper's nonce and the exact command line, valid for at
+  most five minutes.
+- `nonce.rs` is the doorkeeper's in-memory, bounded `NonceBook`. Nonces expire
+  on the doorkeeper's own issue time and are consumed on the first
+  presentation, allowed or denied, so a challenge can never be replayed.
+- `authorize.rs` decides. `authorize_presented` burns the nonce, then checks
+  the command class, the grant's signature against the key the caller trusts
+  for the owner, signed revocations naming the rkey, the grant window, the
+  challenge's signature against the key the caller trusts for the agent, its
+  freshness, the agent DID, the nonce, the command binding and finally that
+  the exact line is granted. Anything else is denied with one of 15 stable
+  reasons.
+- `receipt.rs` defines `club.atmospheric.agent.receipt`: one signed receipt
+  per decision, allowed or denied, with a sequence number, the owner, the
+  grant's agent DID (only once that grant verified), the presented line
+  (sanitised to printable ASCII and the length cap), the grant rkey, outcome
+  and reason. It never records the nonce or the challenge signature.
+
+Still on #206: the doorkeeper daemon and its socket wrapper, DID-document key
+resolution for owners and agents, reading grants and revocations from the
+player's repository, publishing grants and receipts to it (and lexicon
+documents for the three NSIDs at `/lexicons`), the in-game grant screen,
+per-server operator declaration/disallow, presence gating through the server
+`players`/`saved-data` APIs, and the #205 Clearing review screen.
+
 ## The two client layers
 
 ```text
@@ -135,7 +190,7 @@ All Rust source follows `<scope>/[<subscope>/]<atom>.rs`: the directory names th
 
 `crates/atmospheric-server` uses the same rule: `api/` holds the router, state and handler atoms (including M46's `lexicon` handler); `browser/` the one-time link state; `continuity/` the #190 DID snapshots and events; `decision/` the #199 ledger; `error/` the HTTP error mapping; `labeler/` the M56–M58 signing, key, log, state, query and stream atoms; `model/` the wire types and validation; `oauth/` the client, DPoP, resolver and encoding atoms; `page/` the browser HTML; and `store/` the in-memory store plus atomic file persistence. The compile-time lexicon documents live in `crates/atmospheric-server/lexicons/`. The public `app`, `ServerConfig`, `model`, `oauth` and `store` paths are unchanged.
 
-`crates/atmospheric` now follows the same rule: `account/` holds `identity`, `oauth`, `plc` and `session`; `base/` holds `config`, `error`, `records`, `signing` and `tid`; `decision/` holds the #199 `record` and `subject` atoms; `social/` holds the Bluesky read/write and digest atoms; `colibri/bridge.rs` holds the bridge; and `worker/service.rs` owns the worker. Public paths such as `atmospheric::oauth`, `atmospheric::records` and `atmospheric::worker` are unchanged.
+`crates/atmospheric` now follows the same rule: `account/` holds `identity`, `oauth`, `plc` and `session`; `base/` holds `config`, `error`, `records`, `signing` and `tid`; `decision/` holds the #199 `record` and `subject` atoms; `standin/` holds the #206 `authorize`, `challenge`, `command`, `grant`, `nonce` and `receipt` atoms; `social/` holds the Bluesky read/write and digest atoms; `colibri/bridge.rs` holds the bridge; and `worker/service.rs` owns the worker. Public paths such as `atmospheric::oauth`, `atmospheric::records` and `atmospheric::worker` are unchanged.
 
 The mixin helpers now follow the same rule: `colibri/` holds `join`, `leave` and `notice`; `gate/` holds `login`; the remaining helpers are single-word atoms at the mixin scope root.
 

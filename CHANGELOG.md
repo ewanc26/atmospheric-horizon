@@ -12,6 +12,26 @@ the GitHub Release. See the release section of `docs/ARCHITECTURE.md`.
 
 ## [Unreleased]
 
+### Added
+
+- **Stand-In local-deny path (#206, protocol foundation; part of #206).** A new
+  `atmospheric::standin` scope holds pure, deny-by-default authorization for
+  delegating `horizon-ctl` commands to an agent DID. The 114 command names
+  are pinned to the validated Horizon revision; an unknown name fails
+  closed, and session/world lifecycle, multiplayer, scripting and waits, raw
+  input, recording, benchmarks, file-writing and settings commands, `command`
+  and every cheat are always denied, as are `--confirm` tokens, `/`-prefixed
+  words in `chat`/`type`, and lines with shell quoting, escapes, comments or
+  non-printable-ASCII bytes. Signed `club.atmospheric.agent.grant` records
+  carry 1–64 exact command lines and a required window of at most 24 hours;
+  signed revocations name the grant rkey. Agents present a signed
+  `club.atmospheric.agent.challenge` over a single-use nonce from the
+  doorkeeper's bounded in-memory book, and every decision, allowed or
+  denied, yields a signed `club.atmospheric.agent.receipt` with one of 15
+  stable reasons. No network, socket, process or disk use is added; the
+  doorkeeper daemon, DID key resolution, PDS publishing, lexicon hosting,
+  the in-game grant screen and the review screen remain deferred.
+
 ## [0.13.0] — 2026-11-25
 
 Thirteenth tagged release. Adds the Ledger of Decisions: a signed, privacy-preserving moderation record foundation in the optional `atmospheric-server` sidecar, with no change to Horizon's API or native/client halves.
