@@ -10,3 +10,4 @@
 //! native work. This module never executes a command and never opens a socket.
 
 pub mod command;
+pub mod grant;
