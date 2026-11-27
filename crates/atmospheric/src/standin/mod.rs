@@ -9,6 +9,7 @@
 //! in-game grant screen and publication of records to the player's PDS remain
 //! native work. This module never executes a command and never opens a socket.
 
+pub mod authorize;
 pub mod challenge;
 pub mod command;
 pub mod grant;
